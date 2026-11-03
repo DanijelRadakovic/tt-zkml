@@ -1,1 +1,11 @@
-build
+.build
+.tt-metal-build
+generated
+
+# clangd: generated from .clangd.in by CMake (machine-specific paths)
+.clangd
+compile_commands.json
+.cache/        # clangd's index cache
+
+# vs code
+*.code-workspace

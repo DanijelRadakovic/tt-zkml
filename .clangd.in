@@ -1,0 +1,47 @@
+# .clangd is generated from .clangd.in by CMake at configure time (`cmake --preset default`), with this
+# machine's paths filled in. Edit .clangd.in, not .clangd; .clangd is not committed.
+#
+# Host code (ops, program factories, tests): our own CMake build's compile_commands.json
+CompileFlags:
+  CompilationDatabase: .build/default
+---
+# Device kernels: borrow flags from tt-metal's build (fake kernel target)
+If:
+  PathMatch: src/operations/.*/kernels/.*
+CompileFlags:
+  CompilationDatabase: @TT_METAL_BUILD_DIR@
+  # Kernels include shared headers from src/ (e.g. common/kernel_debug.hpp); at runtime the program
+  # factory passes src/ via compiler_include_paths. clangd resolves a relative -I against tt-metal's
+  # build directory, so this path is absolute and generated per machine.
+  Add:
+    - -I@ZKML_SRC_DIR@
+  Remove:
+    - -fno-tree-loop-distribute-patterns
+    - -mcpu=*
+---
+# Device kernels: tt-metal's fake kernel target misconfigures clangd for these files.
+# Fixes following errors: 
+#  - ovl_no_viable_function_in_call on get_arg_val<>() function
+#  - constexpr_var_requires_const_init on get_compile_time_arg_val() function
+#  - constexpr_if_condition_expression_is_not_constant is required because of the error above
+#  - incomplete_nested_name_spec on DataFormat::...: tensix_types.h, which defines DataFormat, is not found
+If:
+  PathMatch: src/operations/.*/kernels/.*
+Diagnostics:
+  Suppress:
+    - ovl_no_viable_function_in_call
+    - constexpr_var_requires_const_init
+    - constexpr_if_condition_expression_is_not_constant
+    - incomplete_nested_name_spec
+  Includes:
+    IgnoreHeader:
+      - api/.*
+---
+# Kernel-only headers outside a kernels/ folder (e.g. src/common/kernel_debug.hpp): clangd guesses
+# their flags from an unrelated tt-metal host file, so tt-metal's kernel headers are not found when
+# the header is opened on its own. Kernels that include it are checked with kernel flags and are fine.
+If:
+  PathMatch: src/common/kernel_debug\.hpp
+Diagnostics:
+  Suppress:
+    - pp_file_not_found

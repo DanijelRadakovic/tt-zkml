@@ -4,7 +4,7 @@
 //   float x, w --(PoT quant)--> int8 q_x, q_w --(FPU matmul, Int32 DEST)--> int32 acc
 //              --(requant)--> int8 y
 //
-// Build: c++ -std=c++20 -O2 zkml/pot_quantazation.cpp -o pot_quantazation && ./pot_quantazation
+// Build: cmake --build .build/default --target zkml_quant && .build/default/zkml_quant
 
 #include <algorithm>
 #include <cfenv>
