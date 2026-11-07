@@ -11,41 +11,58 @@
 
 // clang-format off
 /**
- * @brief Writer kernel for per-tensor PoT quantization: drains quantized tiles from `c_16` to DRAM.
+ * @brief Writer kernel for per-tensor PoT quantization: writes the scaler tile from `c_17`, then
+ *        drains the quantized tiles from `c_16` to DRAM.
  *
- * | Circular buffer | Direction | Format                          | Contents        |
- * |-----------------|-----------|---------------------------------|-----------------|
- * | `c_16`          | consumes  | Int32, or UInt8 for Int8 output | Quantized tiles |
+ * The compute kernel produces the scaler before any quantized tile, so it is written first.
+ *
+ * | Circular buffer | Direction | Format                          | Contents                  |
+ * |-----------------|-----------|---------------------------------|---------------------------|
+ * | `c_16`          | consumes  | Int32, or UInt8 for Int8 output | Quantized tiles           |
+ * | `c_17`          | consumes  | Float32                         | Scaler tile, all `2^k`    |
  *
  * **Compile-time args**
  *
- * | Index | Name       | Description                               |
- * |-------|------------|-------------------------------------------|
- * | 0..   | `out_args` | `TensorAccessorArgs` of the output buffer |
+ * | Index | Name         | Description                               |
+ * |-------|--------------|-------------------------------------------|
+ * | 0..   | `out_args`   | `TensorAccessorArgs` of the output buffer |
+ * | ..    | `scale_args` | `TensorAccessorArgs` of the scaler buffer |
  *
  * **Runtime args**
  *
- * | Index | Name        | Type     | Description                                          |
- * |-------|-------------|----------|------------------------------------------------------|
- * | 0     | `out_addr`  | uint32_t | DRAM base address of the output tensor (TILE layout) |
- * | 1     | `num_tiles` | uint32_t | Number of tiles to write                             |
+ * | Index | Name         | Type     | Description                                          |
+ * |-------|--------------|----------|------------------------------------------------------|
+ * | 0     | `out_addr`   | uint32_t | DRAM base address of the output tensor (TILE layout) |
+ * | 1     | `scale_addr` | uint32_t | DRAM base address of the scaler tensor (one tile)    |
+ * | 2     | `num_tiles`  | uint32_t | Number of quantized tiles to write                   |
  *
  * @pre  The output tensor is interleaved, in TILE layout, and holds at least `num_tiles` pages.
- * @post Tile `t` of `c_16` has been written to output page `t`, for `t` in `[0, num_tiles)`.
+ * @post Scaler page 0 holds the scaler tile. Tile `t` of `c_16` has been written to output page
+ *       `t`, for `t` in `[0, num_tiles)`.
  * @see reader.cpp, ../compute/quantize.cpp
  */
 // clang-format on
 void kernel_main() {
     const uint32_t out_addr = get_arg_val<uint32_t>(0);
-    const uint32_t num_tiles = get_arg_val<uint32_t>(1);
+    const uint32_t scale_addr = get_arg_val<uint32_t>(1);
+    const uint32_t num_tiles = get_arg_val<uint32_t>(2);
 
     constexpr uint32_t cb_out_id = tt::CBIndex::c_16;
+    constexpr uint32_t cb_scale_out_id = tt::CBIndex::c_17;
 
     constexpr auto out_args = TensorAccessorArgs<0>();
+    constexpr auto scale_args = TensorAccessorArgs<out_args.next_compile_time_args_offset()>();
     const auto out = TensorAccessor(out_args, out_addr);
+    const auto scale = TensorAccessor(scale_args, scale_addr);
 
     Noc noc;
     CircularBuffer cb_out(cb_out_id);
+    CircularBuffer cb_scale_out(cb_scale_out_id);
+
+    cb_scale_out.wait_front(1);
+    noc.async_write(cb_scale_out, scale, cb_scale_out.get_tile_size(), {}, {.page_id = 0});
+    noc.async_write_barrier();
+    cb_scale_out.pop_front(1);
 
     const uint32_t tile_bytes = cb_out.get_tile_size();
     for (uint32_t t = 0; t < num_tiles; t++) {

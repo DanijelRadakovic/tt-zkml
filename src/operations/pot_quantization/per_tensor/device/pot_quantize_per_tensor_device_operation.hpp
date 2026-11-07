@@ -2,17 +2,20 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Per-tensor power-of-two (PoT) symmetric quantization:
-//   q = clamp(round_half_even(x * 2^k), int8 range)
+// Per-tensor power-of-two (PoT) symmetric quantization with a device-computed scaler:
+//   Q = 2^(bit_width - 1) - 1
+//   k = max{k : absmax(x) * 2^k <= Q}   (capped at 127)
+//   q = clamp(round_half_even(x * 2^k), -Q, Q)
 //
-// The host chooses k (the number of fractional bits, scale = 2^-k) and passes it in; the device
-// only applies it. The output is Int32 (values in int8 range) or Int8.
+// The device finds absmax(x), derives the scaler 2^k from it and quantizes, all in one program.
+// The outputs are the quantized tensor and the scaler 2^k (so x ~= q / 2^k).
 //
 // Implementation detail of the op: callers use ../pot_quantize_per_tensor.hpp.
 
 #pragma once
 
 #include <cstdint>
+#include <tuple>
 #include <variant>
 
 #include <tt-metalium/host_api.hpp>
@@ -25,7 +28,7 @@ namespace zkml::operations::pot_quantization {
 
 struct PotQuantizePerTensorOperation {
     struct operation_attributes_t {
-        int32_t k;  // fractional bits: scale = 2^-k, the kernel multiplies by 2^k
+        uint32_t bit_width;  // 8, 16 or 32: Q = 2^(bit_width - 1) - 1
         tt::tt_metal::DataType output_dtype;
         tt::tt_metal::MemoryConfig output_memory_config;
     };
@@ -34,10 +37,11 @@ struct PotQuantizePerTensorOperation {
         const ttnn::Tensor& input;
     };
 
-    using spec_return_value_t = tt::tt_metal::TensorSpec;
-    using tensor_return_value_t = ttnn::Tensor;
+    // (quantized, scaler). The scaler is a FLOAT32 [1, 1] tensor holding 2^k.
+    using spec_return_value_t = std::tuple<tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec>;
+    using tensor_return_value_t = std::tuple<ttnn::Tensor, ttnn::Tensor>;
 
-    // Single core, loops over every tile of the input.
+    // Single core, two passes over every tile of the input.
     struct SingleCore {
         struct shared_variables_t {
             tt::tt_metal::KernelHandle reader_id;
@@ -48,14 +52,14 @@ struct PotQuantizePerTensorOperation {
 
         // Cache miss: build the program (CBs, kernels, runtime args).
         static cached_program_t create(
-            const operation_attributes_t& attributes, const tensor_args_t& tensor_args, tensor_return_value_t& output);
+            const operation_attributes_t& attributes, const tensor_args_t& tensor_args, tensor_return_value_t& outputs);
 
-        // Cache hit: the program is reused, only the buffer addresses (and scale) are patched.
+        // Cache hit: the program is reused, only the buffer addresses are patched.
         static void override_runtime_arguments(
             cached_program_t& cached_program,
             const operation_attributes_t& attributes,
             const tensor_args_t& tensor_args,
-            tensor_return_value_t& output);
+            tensor_return_value_t& outputs);
     };
 
     using program_factory_t = std::variant<SingleCore>;
@@ -65,8 +69,7 @@ struct PotQuantizePerTensorOperation {
     static spec_return_value_t compute_output_specs(const operation_attributes_t&, const tensor_args_t&);
     static tensor_return_value_t create_output_tensors(const operation_attributes_t&, const tensor_args_t&);
 
-    // Leaves out k: it only reaches the device as a runtime arg, which
-    // override_runtime_arguments patches, so one cached program serves every k.
+    // bit_width and output_dtype are compile-time args of the compute kernel, so both are in the key.
     static ttsl::hash::hash_t compute_program_hash(const operation_attributes_t&, const tensor_args_t&);
 };
 

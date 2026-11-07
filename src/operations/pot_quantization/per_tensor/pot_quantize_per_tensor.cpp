@@ -9,16 +9,14 @@
 
 namespace zkml::prim {
 
-ttnn::Tensor pot_quantize_per_tensor(
+std::tuple<ttnn::Tensor, ttnn::Tensor> pot_quantize_per_tensor(
     const ttnn::Tensor& input,
-    int32_t k,
+    uint32_t bit_width,
     tt::tt_metal::DataType output_dtype,
     const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config) {
     using Op = zkml::operations::pot_quantization::PotQuantizePerTensorOperation;
-    // k is not part of the program cache key (see compute_program_hash): calls that differ only in
-    // k reuse one cached program, and override_runtime_arguments sets the new scale.
     const auto attributes = Op::operation_attributes_t{
-        .k = k,
+        .bit_width = bit_width,
         .output_dtype = output_dtype,
         .output_memory_config = output_memory_config.value_or(input.memory_config()),
     };
