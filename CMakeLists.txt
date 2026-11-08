@@ -53,18 +53,86 @@ add_library(
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
 
-add_executable(zkml_quant src/host/quantization.cpp)
+add_executable(zkml_quant src/bin/quantization.cpp)
 target_link_libraries(zkml_quant PRIVATE TT::Metalium)
 
-add_executable(zkml_pot_quant_per_tensor src/host/pot_quant_per_tensor.cpp)
+add_executable(zkml_pot_quant_per_tensor src/bin/pot_quant_per_tensor.cpp)
 target_link_libraries(zkml_pot_quant_per_tensor PRIVATE zkml_ops)
 target_compile_definitions(zkml_pot_quant_per_tensor PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
-# Tests (need a Tenstorrent device)
+# NoC / DRAM microbenchmark (latency per bank and per core distance, bandwidth); see tools/noc_bench/
+add_executable(zkml_noc_bench tools/noc_bench/noc_bench.cpp)
+target_include_directories(zkml_noc_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_noc_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_noc_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
+# Tests (GoogleTest; every one needs a Tenstorrent device).
+# tt-metal builds GoogleTest but installs no CMake config for it, so use its build products directly.
 enable_testing()
-add_executable(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization/test_pot_quantize_per_tensor.cpp)
-target_link_libraries(test_pot_quantize_per_tensor PRIVATE zkml_ops)
-# Set default value for TT_METAL_RUNTIME_ROOT when the binary is run directly
-target_compile_definitions(test_pot_quantize_per_tensor PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
-add_test(NAME pot_quantize_per_tensor COMMAND test_pot_quantize_per_tensor)
-set_tests_properties(pot_quantize_per_tensor PROPERTIES ENVIRONMENT "TT_METAL_RUNTIME_ROOT=${TT_METAL_HOME}")
+find_package(GTest QUIET)
+if(NOT TARGET GTest::gtest_main)
+    file(GLOB ZKML_GTEST_INCLUDE_DIRS "${TT_METAL_HOME}/.cpmcache/gtest/*/googletest/include")
+    find_package(Threads REQUIRED)
+    foreach(lib gtest gtest_main)
+        add_library(GTest::${lib} STATIC IMPORTED)
+        set_target_properties(
+            GTest::${lib}
+            PROPERTIES
+                IMPORTED_LOCATION "${TT_METAL_BUILD_DIR}/lib/lib${lib}.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${ZKML_GTEST_INCLUDE_DIRS}"
+        )
+    endforeach()
+    target_link_libraries(GTest::gtest INTERFACE Threads::Threads)
+    target_link_libraries(GTest::gtest_main INTERFACE GTest::gtest)
+endif()
+
+# zkml_add_test(<name> <source> <libs...>): one gtest binary, run as a single ctest test. Run the binary
+# directly with --gtest_filter to pick cases. Not gtest_discover_tests, which would run it at build time.
+function(zkml_add_test name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE ${ARGN} GTest::gtest_main)
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp)
+    # Default value for TT_METAL_RUNTIME_ROOT when the binary is run directly
+    target_compile_definitions(${name} PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES ENVIRONMENT "TT_METAL_RUNTIME_ROOT=${TT_METAL_HOME}")
+endfunction()
+
+zkml_add_test(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization/test_pot_quantize_per_tensor.cpp zkml_ops)
+# check_if_cbs_can_fit_in_l1 on its own; deliberately not part of the op tests
+zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
+
+# Does keeping the tensor in L1 between the two passes help? Profiler-based bench; see
+# tools/quant_tensor_fit_in_l1_bench/README.md
+add_executable(zkml_quant_l1_bench tools/quant_tensor_fit_in_l1_bench/bench.cpp)
+target_include_directories(zkml_quant_l1_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_quant_l1_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_quant_l1_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
+# API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
+# output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
+# Graphviz (dot) adds include and call graphs when it is installed.
+find_package(Doxygen OPTIONAL_COMPONENTS dot)
+if(DOXYGEN_FOUND)
+    set(DOXYGEN_PROJECT_NAME "tt-zkml")
+    set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/docs")
+    set(DOXYGEN_RECURSIVE YES)
+    set(DOXYGEN_FILE_PATTERNS *.hpp *.cpp *.md)
+    set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+    set(DOXYGEN_STRIP_FROM_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+    set(DOXYGEN_EXTRACT_ALL YES)  # also list entities that have no doc comment yet
+    set(DOXYGEN_JAVADOC_AUTOBRIEF YES)
+    set(DOXYGEN_SOURCE_BROWSER YES)
+    set(DOXYGEN_GENERATE_LATEX NO)
+    set(DOXYGEN_QUIET YES)
+    set(DOXYGEN_WARN_IF_UNDOCUMENTED NO)
+    if(DOXYGEN_DOT_FOUND)
+        set(DOXYGEN_HAVE_DOT YES)
+    endif()
+    doxygen_add_docs(
+        docs
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/README.md
+        COMMENT "Generating API documentation with Doxygen"
+    )
+endif()

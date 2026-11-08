@@ -7,7 +7,7 @@ CompileFlags:
 ---
 # Device kernels: borrow flags from tt-metal's build (fake kernel target)
 If:
-  PathMatch: src/operations/.*/kernels/.*
+  PathMatch: (src/operations|tools)/.*/kernels/.*
 CompileFlags:
   CompilationDatabase: @TT_METAL_BUILD_DIR@
   # Kernels include shared headers from src/ (e.g. common/kernel_debug.hpp); at runtime the program
@@ -15,6 +15,10 @@ CompileFlags:
   # build directory, so this path is absolute and generated per machine.
   Add:
     - -I@ZKML_SRC_DIR@
+    # sfpi.h (SFPU programming interface, used by pot_scale_sfpu.hpp) is not on the fake target's include path.
+    - -I@TT_METAL_HOME@/runtime/sfpi/include
+    # tensix_types.h (defines DataFormat). The fake target points at a directory tt-metal has moved.
+    - -I@TT_METAL_HOME@/tt_metal/hw/inc/internal/tt-1xx/wormhole/wormhole_b0_defines
   Remove:
     - -fno-tree-loop-distribute-patterns
     - -mcpu=*
@@ -23,15 +27,17 @@ CompileFlags:
 # Fixes following errors: 
 #  - ovl_no_viable_function_in_call on get_arg_val<>() function
 #  - constexpr_var_requires_const_init on get_compile_time_arg_val() function
-#  - constexpr_if_condition_expression_is_not_constant is required because of the error above
+#  - constexpr_if_condition_expression_is_not_constant and static_assert_expression_is_not_constant
+#    are caused by the error above: static_assert(get_compile_time_arg_val(...) ...)
 #  - incomplete_nested_name_spec on DataFormat::...: tensix_types.h, which defines DataFormat, is not found
 If:
-  PathMatch: src/operations/.*/kernels/.*
+  PathMatch: (src/operations|tools)/.*/kernels/.*
 Diagnostics:
   Suppress:
     - ovl_no_viable_function_in_call
     - constexpr_var_requires_const_init
     - constexpr_if_condition_expression_is_not_constant
+    - static_assert_expression_is_not_constant
     - incomplete_nested_name_spec
   Includes:
     IgnoreHeader:
@@ -45,3 +51,15 @@ If:
 Diagnostics:
   Suppress:
     - pp_file_not_found
+---
+# SFPI code (pot_scale_sfpu.hpp): sfpi.h is written for tt-metal's RISC-V compiler, where int32_t is `long`
+# and `int` is a different type. clangd parses it for x86, where both are `int`, which gives two false errors
+# on code that builds fine on the device:
+#  - typecheck_ambiguous_condition: `v_if(field > 254)`, vInt has constructors for both int and int32_t
+#  - typecheck_expression_not_modifiable_lvalue: `sfpi::dst_reg[0] = x`
+If:
+  PathMatch: .*/kernels/compute/pot_scale_sfpu\.hpp
+Diagnostics:
+  Suppress:
+    - typecheck_ambiguous_condition
+    - typecheck_expression_not_modifiable_lvalue

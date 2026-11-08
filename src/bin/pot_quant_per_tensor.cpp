@@ -21,13 +21,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include "common/pot_reference.hpp"
+#include "pot_reference.hpp"
 #include "operations/pot_quantization/per_tensor/pot_quantize_per_tensor.hpp"
 
 using namespace ttnn;
 using tt::tt_metal::DataType;
+using zkml::prim::BitWidth;
 
-static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, uint32_t bits) {
+static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width) {
+    const uint32_t bit_count = width.bits();
     const uint32_t H = 64, W = 96;
     std::vector<float> data(H * W);
     for (size_t i = 0; i < data.size(); i++) {
@@ -42,7 +44,7 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, uint32_t bits) 
     Tensor in = Tensor::from_vector(data, spec, dev);
     const std::vector<float> x = in.to_vector<float>();  // what the device sees (bf16 rounds)
 
-    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, bits, out_dt);
+    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt);
     std::vector<int32_t> q;
     if (out_dt == DataType::INT8) {
         auto v = out.to_vector<int8_t>();
@@ -53,8 +55,8 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, uint32_t bits) 
     const float got_scaler = scaler.to_vector<float>().at(0);
 
     const float absmax = zkml::reference::absmax(x);
-    const int32_t k = zkml::reference::pot_k(absmax, bits);
-    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, bits);
+    const int32_t k = zkml::reference::pot_k(absmax, bit_count);
+    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, bit_count);
 
     size_t bad = 0;
     for (size_t i = 0; i < x.size(); i++) {
@@ -70,7 +72,7 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, uint32_t bits) 
         "in=%s out=%s bits=%u: absmax=%g, device scaler=%g (k=%g), reference k=%d%s, %zu/%zu mismatches\n",
         in_dt == DataType::FLOAT32 ? "f32" : "bf16",
         out_dt == DataType::INT8 ? "int8" : "int32",
-        bits,
+        bit_count,
         absmax,
         got_scaler,
         std::log2(got_scaler),
@@ -82,17 +84,17 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, uint32_t bits) 
 }
 
 int main(int argc, char** argv) {
-    std::vector<uint32_t> widths;
+    std::vector<BitWidth> widths;
     for (int i = 1; i < argc; i++) {
-        const auto b = static_cast<uint32_t>(std::strtoul(argv[i], nullptr, 10));
+        const auto b = std::strtoul(argv[i], nullptr, 10);
         if (b != 8 && b != 16 && b != 32) {
             std::fprintf(stderr, "usage: %s [bit_width ...]   (bit widths: 8, 16, 32)\n", argv[0]);
             return 2;
         }
-        widths.push_back(b);
+        widths.push_back(static_cast<BitWidth::Value>(b));
     }
     if (widths.empty()) {
-        widths = {8, 16, 32};
+        widths = {BitWidth::Bits8, BitWidth::Bits16, BitWidth::Bits32};
     }
 
     // TT_METAL_RUNTIME_ROOT, if set, takes precedence over this.
@@ -100,11 +102,11 @@ int main(int argc, char** argv) {
 
     auto dev = open_mesh_device(0, DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE);
     int fails = 0;
-    for (uint32_t bits : widths) {
+    for (BitWidth width : widths) {
         for (auto in_dt : {DataType::FLOAT32, DataType::BFLOAT16}) {
-            fails += run(dev.get(), in_dt, DataType::INT32, bits);
-            if (bits == 8) {
-                fails += run(dev.get(), in_dt, DataType::INT8, bits);
+            fails += run(dev.get(), in_dt, DataType::INT32, width);
+            if (width == BitWidth::Bits8) {
+                fails += run(dev.get(), in_dt, DataType::INT8, width);
             }
         }
     }
