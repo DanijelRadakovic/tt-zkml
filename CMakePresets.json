@@ -2,10 +2,14 @@
   "version": 6,
   "configurePresets": [{
     "name": "default",
-    "binaryDir": "build",
-    "toolchainFile": "$env{TT_METAL_HOME}/cmake/x86_64-linux-clang-20-libstdcpp-toolchain.cmake",
+    "displayName": "Default Config",
+    "description": "Default build of all the code using Ninja",
+    "generator": "Ninja",
+    "binaryDir": "${sourceDir}/.build/default",
     "cacheVariables": {
-      "CMAKE_BUILD_TYPE": "Release"
-    }
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+    },
+    "toolchainFile": "$env{TT_METAL_HOME}/cmake/x86_64-linux-clang-20-libstdcpp-toolchain.cmake"
   }]
 }
