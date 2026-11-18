@@ -33,37 +33,48 @@ void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
     TT_FATAL(
         !attributes.output_memory_config.is_sharded(), "pot_quantize: sharded output is not supported");
     TT_FATAL(
+        attributes.bit_width == 8 || attributes.bit_width == 16 || attributes.bit_width == 32,
+        "pot_quantize: bit_width must be 8, 16 or 32, got {}",
+        attributes.bit_width);
+    TT_FATAL(
         attributes.output_dtype == DataType::INT32 || attributes.output_dtype == DataType::INT8,
         "pot_quantize: output dtype must be INT32 or INT8, got {}",
         attributes.output_dtype);
-    // 2^k must be a normal fp32 so it reaches the device unchanged. 
-    // Tensix flushes denormals (k <= -127) to 0, which would quantize every element to 0, and 2^128 and up overflow to Inf.
-    // See how Tensix handles special values because it's not fully IEEE-754 compliant:
-    // https://github.com/tenstorrent/tt-metal/blob/v0.81.0/tech_reports/Handling_Special_Value/special_values.md
     TT_FATAL(
-        attributes.k >= -126 && attributes.k <= 127, "pot_quantize: k must be in [-126, 127], got {}", attributes.k);
+        attributes.output_dtype != DataType::INT8 || attributes.bit_width == 8,
+        "pot_quantize: INT8 output requires bit_width 8, got {}",
+        attributes.bit_width);
 }
 
 PotQuantizePerTensorOperation::spec_return_value_t PotQuantizePerTensorOperation::compute_output_specs(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
     const auto& input = tensor_args.input;
-    return tt::tt_metal::TensorSpec(
-        input.logical_shape(),
-        tt::tt_metal::TensorLayout(
-            attributes.output_dtype, tt::tt_metal::PageConfig(Layout::TILE), attributes.output_memory_config));
+    const tt::tt_metal::PageConfig tile_page(Layout::TILE);
+    return {
+        tt::tt_metal::TensorSpec(
+            input.logical_shape(),
+            tt::tt_metal::TensorLayout(attributes.output_dtype, tile_page, attributes.output_memory_config)),
+        // One tile holding 2^k in every element; the logical shape exposes one of them.
+        tt::tt_metal::TensorSpec(
+            ttnn::Shape({1, 1}),
+            tt::tt_metal::TensorLayout(DataType::FLOAT32, tile_page, attributes.output_memory_config)),
+    };
 }
 
 PotQuantizePerTensorOperation::tensor_return_value_t PotQuantizePerTensorOperation::create_output_tensors(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
-    return ttnn::create_device_tensor(compute_output_specs(attributes, tensor_args), tensor_args.input.device());
+    const auto [quantized_spec, scaler_spec] = compute_output_specs(attributes, tensor_args);
+    auto* device = tensor_args.input.device();
+    return {ttnn::create_device_tensor(quantized_spec, device), ttnn::create_device_tensor(scaler_spec, device)};
 }
 
 ttsl::hash::hash_t PotQuantizePerTensorOperation::compute_program_hash(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
-    // Seed only: input spec, output dtype, output memory config.
-    // Remove k from the seed, override_runtime_arguments rewrites it as runtime arg.
     return ttsl::hash::hash_objects_with_default_seed(
-        tensor_args.input.tensor_spec(), attributes.output_dtype, attributes.output_memory_config);
+        tensor_args.input.tensor_spec(),
+        attributes.bit_width,
+        attributes.output_dtype,
+        attributes.output_memory_config);
 }
 
 }  // namespace zkml::operations::pot_quantization
