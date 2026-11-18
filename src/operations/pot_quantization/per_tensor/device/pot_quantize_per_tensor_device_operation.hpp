@@ -5,7 +5,7 @@
 // Per-tensor power-of-two (PoT) symmetric quantization. The device computes the scaler.
 //
 // The formulas are:
-//  - `Q = 2^(bit_width.bits() - 1) - 1`,
+//  - `Q = 2^(bit_width.bits() - 1) - 1`, or 2^30 - 1 at 32 bits with QuantRange::M31 (see pot_range.hpp),
 //  - `k = max{k : absmax(x) * 2^k <= Q}`,
 //  - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
 //
@@ -22,6 +22,7 @@
 
 #include "operations/pot_quantization/bit_width.hpp"
 #include "operations/pot_quantization/compute_unit.hpp"
+#include "operations/pot_quantization/pot_range.hpp"
 #include "ttnn/device_operation.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
@@ -47,6 +48,8 @@ struct PotQuantizePerTensorOperation {
         // Which unit multiplies by the scaler in pass 2. Auto resolves to the FPU for BFLOAT16 input at 16 or
         // 32 bits, and to the SFPU otherwise (see use_fpu).
         zkml::prim::ComputeUnit compute_unit;
+        // Full: Q = 2^(bits - 1) - 1. M31: 32 bits is capped at 2^30 - 1 so that pot_quant_m31 is injective.
+        zkml::prim::QuantRange range = zkml::prim::QuantRange::Full;
     };
 
     struct tensor_args_t {

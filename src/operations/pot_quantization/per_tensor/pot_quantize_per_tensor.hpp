@@ -10,6 +10,7 @@
 
 #include "operations/pot_quantization/bit_width.hpp"
 #include "operations/pot_quantization/compute_unit.hpp"
+#include "operations/pot_quantization/pot_range.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
 
@@ -19,7 +20,7 @@ namespace zkml::prim {
  * @brief Per-tensor power-of-two (PoT) symmetric quantization. The device computes the scaler.
  *
  * The formulas are:
- * - `Q = 2^(bit_width.bits() - 1) - 1`,
+ * - `Q = 2^(bit_width.bits() - 1) - 1` (127, 32767, 2^31 - 1), or `2^30 - 1` at 32 bits with `QuantRange::M31`,
  * - `k = max{k : absmax(x) * 2^k <= Q}`,
  * - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
  *
@@ -51,6 +52,9 @@ namespace zkml::prim {
  *        fused op and the FPU would be 2.3x slower). `Fpu` requires a BFLOAT16 input. The result does not
  *        depend on the unit: for BFLOAT16 the product is exact on both. Measurements:
  *        `tools/quant_tensor_fpu_vs_sfpu/README.md`.
+ * @param range `Full` (the default) uses every bit: `Q = 2^(bits - 1) - 1`, so the caller can map `q` into any field.
+ *        `M31` caps 32 bits at `Q = 2^30 - 1` (8 and 16 bits are the same), which `pot_quant_m31` needs to map `q`
+ *        injectively into M31 (with `Q = 2^31 - 1 = p` the values -p, 0 and p would be the same field element).
  * @return `(quantized, scaler)`.
  *         - `quantized` has the shape of `input` and TILE layout.
  *         - `scaler` is a FLOAT32 tensor of shape `[1, 1]` holding `2^k`.
@@ -63,6 +67,7 @@ std::tuple<ttnn::Tensor, ttnn::Tensor> pot_quantize_per_tensor(
     const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt,
     uint32_t noc_read_tile_batch_size = 16,
     uint32_t cb_in_size_factor = 2,
-    ComputeUnit compute_unit = ComputeUnit::Auto);
+    ComputeUnit compute_unit = ComputeUnit::Auto,
+    QuantRange range = QuantRange::Full);
 
 }  // namespace zkml::prim

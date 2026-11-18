@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 // On-device test for zkml::prim::pot_quantize_per_tensor against a CPU reference:
-//   Q = 2^(bits - 1) - 1,  k = max{k <= 127 : absmax(x) * 2^k <= Q},
+//   Q = 2^(bits - 1) - 1 (2^30 - 1 at 32 bits with QuantRange::M31),  k = max{k <= 127 : absmax(x) * 2^k <= Q},
 //   q = clamp(round_half_even(x * 2^k), -Q, Q)
 // Checks both outputs: the scaler 2^k the device derived from the data, and q.
 //
@@ -40,6 +40,7 @@
 #include <ttnn/tensor/tensor.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -52,6 +53,7 @@ using namespace ttnn;
 using tt::tt_metal::DataType;
 using zkml::prim::BitWidth;
 using zkml::prim::ComputeUnit;
+using zkml::prim::QuantRange;
 
 namespace {
 
@@ -93,14 +95,15 @@ Result run(
     bool verbose = true,
     uint32_t batch = 16,
     uint32_t factor = 2,
-    ComputeUnit unit = ComputeUnit::Auto) {
+    ComputeUnit unit = ComputeUnit::Auto,
+    QuantRange range = QuantRange::Full) {
     tt::tt_metal::TensorSpec spec(
         Shape({H, W}), tt::tt_metal::TensorLayout(in_dt, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
     Tensor in = Tensor::from_vector(data, spec, dev);
     // The reference uses the values the device actually sees (BFLOAT16 rounds the input).
     const std::vector<float> x = in.to_vector<float>();
 
-    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, batch, factor, unit);
+    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, batch, factor, unit, range);
 
     std::vector<int32_t> q;
     if (out_dt == DataType::INT8) {
@@ -111,9 +114,9 @@ Result run(
     }
     const float got_scaler = scaler.to_vector<float>().at(0);
 
-    const int32_t k = zkml::reference::pot_k(zkml::reference::absmax(x), width.bits());
+    const int32_t k = zkml::reference::pot_k(zkml::reference::absmax(x), width.bits(), range);
     const float ref_scaler = std::ldexp(1.0f, k);
-    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, width.bits());
+    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, width.bits(), range);
 
     bool ok = true;
     if (got_scaler != ref_scaler) {
@@ -388,6 +391,42 @@ void run_tiny_inputs(MeshDevice* dev) {
     }
 }
 
+// QuantRange::M31 caps 32 bits at Q = 2^30 - 1; 8 and 16 bits are unchanged. Against Full, which uses 2^31 - 1.
+// The spikes sit just below Q for each range, so k is the largest that keeps |q| <= Q, and the outputs are compared
+// with the reference for that range.
+void run_m31_range(MeshDevice* dev) {
+    size_t cases = 0;
+    for (const auto& c : all_configs()) {
+        for (QuantRange range : {QuantRange::Full, QuantRange::M31}) {
+            auto go = [&](const char* label, const std::vector<float>& d) {
+                run(dev, label, 64, 96, d, c.in_dt, c.out_dt, c.width, false, 16, 2, c.unit, range);
+                cases++;
+            };
+            for (float m : {1.0f, 16.0f, 3e4f, 1e-3f}) {
+                char label[48];
+                std::snprintf(label, sizeof label, "range grid x %g", m);
+                go(label, grid(64 * 96, c.in_dt, m));
+            }
+            const float q_below_2_30 = 1073741760.0f, q_below_2_31 = 2147483520.0f;  // the largest fp32 below 2^30, 2^31
+            go("absmax just below 2^30", spike(64 * 96, 77, q_below_2_30));
+            go("absmax just below 2^31", spike(64 * 96, 78, -q_below_2_31));
+        }
+    }
+    // The largest 32-bit values really differ: Full reaches 2^31 - 128, M31 stays <= 2^30 - 1.
+    for (QuantRange range : {QuantRange::Full, QuantRange::M31}) {
+        auto r = run(dev, "32-bit extreme", 32, 32, spike(1024, 5, 2147483520.0f), DataType::FLOAT32, DataType::INT32,
+                     BitWidth::Bits32, false, 16, 2, ComputeUnit::Auto, range);
+        int32_t max_q = 0;
+        for (int32_t q : r.q) {
+            max_q = std::max(max_q, std::abs(q));
+        }
+        EXPECT_LE(static_cast<int64_t>(max_q), BitWidth(BitWidth::Bits32).qmax(range));
+        EXPECT_GT(static_cast<int64_t>(max_q), BitWidth(BitWidth::Bits32).qmax(range) / 2) << "k is not maximal";
+        cases++;
+    }
+    std::printf("range: %zu cases\n", cases);
+}
+
 class PotQuantizePerTensor : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
@@ -426,8 +465,8 @@ TEST_F(PotQuantizePerTensor, ProgramCacheKeyCoversEveryAttribute) {
     constexpr uint32_t n = 6;
     const auto data = tiled(n, DataType::BFLOAT16, 1.0f);
     auto call = [&](DataType out_dt, BitWidth width, uint32_t batch, uint32_t factor,
-                    ComputeUnit unit = ComputeUnit::Auto) {
-        run(dev(), "cache key", 32, 32 * n, data, DataType::BFLOAT16, out_dt, width, false, batch, factor, unit);
+                    ComputeUnit unit = ComputeUnit::Auto, QuantRange range = QuantRange::Full) {
+        run(dev(), "cache key", 32, 32 * n, data, DataType::BFLOAT16, out_dt, width, false, batch, factor, unit, range);
         return dev()->num_program_cache_entries();
     };
     const size_t base = call(DataType::INT32, BitWidth::Bits8, 2, 2);
@@ -438,9 +477,11 @@ TEST_F(PotQuantizePerTensor, ProgramCacheKeyCoversEveryAttribute) {
     EXPECT_EQ(call(DataType::INT32, BitWidth::Bits16, 2, 2), base + 3) << "bit_width";
     EXPECT_EQ(call(DataType::INT8, BitWidth::Bits8, 2, 2), base + 4) << "output_dtype";
     EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 2, ComputeUnit::Sfpu), base + 5) << "compute_unit";
-    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 3, 2), base + 5) << "an earlier variant must still hit";
+    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 2, ComputeUnit::Auto, QuantRange::M31), base + 6) << "range";
+    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 3, 2), base + 6) << "an earlier variant must still hit";
 }
 
+TEST_F(PotQuantizePerTensor, M31Range) { run_m31_range(dev()); }
 TEST_F(PotQuantizePerTensor, ExtremeValues) { run_extreme_values(dev()); }
 TEST_F(PotQuantizePerTensor, DISABLED_TinyInputs) { run_tiny_inputs(dev()); }  // known limitation, see above
 TEST_F(PotQuantizePerTensor, PositionSweeps) { run_position_sweeps(dev()); }
