@@ -267,8 +267,8 @@ Setup build(const Params& p, uint32_t n_cores) {
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack),
             .math_approx_mode = false,
-            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, FPU multiply
-            .compile_args = {p.out_int8 ? 1u : 0u, p.bits, in_cb_pages, dst_tiles, p.fpu ? 1u : 0u},
+            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, FPU multiply, full range
+            .compile_args = {p.out_int8 ? 1u : 0u, p.bits, in_cb_pages, dst_tiles, p.fpu ? 1u : 0u, 0u},
             .compiler_include_paths = {zkml::common::kernel_include_dir()}});
 
     for (uint32_t i = 0; i < n_cores; i++) {

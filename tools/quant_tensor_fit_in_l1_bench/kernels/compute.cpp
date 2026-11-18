@@ -73,7 +73,7 @@ void kernel_main() {
     constexpr uint32_t cb_scale_out_id = tt::CBIndex::c_17;
     constexpr uint32_t zero_point_bits = 0;
 
-    constexpr float q_max = static_cast<float>((1ull << (bit_width - 1)) - 1);
+    constexpr float q_max = static_cast<float>(zkml::prim::pot_qmax(bit_width));
     constexpr uint32_t q_max_bits = __builtin_bit_cast(uint32_t, q_max);
     constexpr uint32_t q_min_bits = __builtin_bit_cast(uint32_t, -q_max);
     constexpr uint32_t dst_scale = DST_TILES - 1;
@@ -121,7 +121,7 @@ void kernel_main() {
     // ---- Scaler ----
     {
         DeviceZoneScopedN("SCALER");
-        MATH(zkml::sfpu::absmax_to_scaler<bit_width>(dst_scale));
+        MATH(zkml::sfpu::absmax_to_scaler<zkml::prim::pot_magnitude_bits(bit_width)>(dst_scale));
         tile_regs_commit();
         tile_regs_wait();
         pack_reconfig_data_format(cb_scale_id);

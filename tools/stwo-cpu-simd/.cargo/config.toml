@@ -1,0 +1,3 @@
+[build]
+# stwo's SIMD backend uses AVX-512 when the target has it.
+rustflags = ["-C", "target-cpu=native"]

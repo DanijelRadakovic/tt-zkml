@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     auto writer = CreateKernel(program, zkml::common::kernel_path(__FILE__, "kernels/writer.cpp"), core, WriterDataMovementConfig(wct));
     auto compute = CreateKernel(program, zkml::common::kernel_path(__FILE__, "kernels/compute.cpp"), core,
         ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = true, .math_approx_mode = false,
-                      .compile_args = {mode, REPS_}, .compiler_include_paths = {zkml::common::kernel_path(__FILE__, "../../../src/operations/pot_quantization/per_tensor/device/kernels/compute")}});
+                      .compile_args = {mode, REPS_}, .compiler_include_paths = {zkml::common::kernel_path(__FILE__, "../../../src/operations/pot_quantization/per_tensor/device/kernels/compute"), zkml::common::kernel_include_dir()}});
     SetRuntimeArgs(program, reader, core, {uint32_t(in_buf->address()), num_tiles});
     SetRuntimeArgs(program, writer, core, {uint32_t(out_buf->address())});
     SetRuntimeArgs(program, compute, core, {num_tiles});

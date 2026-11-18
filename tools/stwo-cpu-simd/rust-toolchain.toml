@@ -1,0 +1,3 @@
+[toolchain]
+# stwo needs nightly (portable_simd). Same pin as the stwo repository.
+channel = "nightly-2026-01-15"

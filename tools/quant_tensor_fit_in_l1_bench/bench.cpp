@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
             .math_approx_mode = false,
             // [0] unused (output_int8), bit_width, BLOCK_SIZE, DST_TILES, RESIDENT
             .compile_args = {0u, bits, block, dst_tiles, resident ? 1u : 0u},
-            .compiler_include_paths = {sfpu_dir}});
+            .compiler_include_paths = {sfpu_dir, zkml::common::kernel_include_dir()}});
 
     SetRuntimeArgs(program, reader, core, {static_cast<uint32_t>(in_buf->address()), num_tiles});
     SetRuntimeArgs(
