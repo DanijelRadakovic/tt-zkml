@@ -17,15 +17,23 @@
  * `2^k`, the second quantizes with it. Both passes consume the same tiles in the same order, so the
  * reader sends the whole tensor twice.
  *
- * | Circular buffer | Direction | Format                | Pages | Contents                           |
- * |-----------------|-----------|-----------------------|-------|------------------------------------|
- * | `c_0`           | produces  | Float32 or Float16_b  | 2     | Input tiles in page order, twice   |
+ * The reads are batched: `BATCH_SIZE` reads are issued in parallel (async) and then waited for with one barrier.
+ * The two passes form a single stream of `2 * num_tiles` reads (page = read index mod `num_tiles`), which is cut
+ * into batches. Only the very last batch can be shorter than `BATCH_SIZE`, and only when `BATCH_SIZE` does not
+ * divide `2 * num_tiles` (for example, with a prime tile count).
+ * The input buffer holds `BATCH_SIZE * cb_in_size_factor` tiles. With `cb_in_size_factor >= 2` there are enough
+ * slots for the compute kernel to process one batch while the reader fetches the next one.
+ *
+ * | Circular buffer | Direction | Format                | Pages            | Contents                         |
+ * |-----------------|-----------|-----------------------|------------------|----------------------------------|
+ * | `c_0`           | produces  | Float32 or Float16_b  | `BATCH_SIZE * F` | Input tiles in page order, twice |
  *
  * **Compile-time args**
  *
- * | Index | Name      | Description                              |
- * |-------|-----------|------------------------------------------|
- * | 0..   | `in_args` | `TensorAccessorArgs` of the input buffer |
+ * | Index | Name         | Description                                                                      |
+ * |-------|--------------|----------------------------------------------------------------------------------|
+ * | 0     | `BATCH_SIZE` | Tiles per NoC batch, `1 <= BATCH_SIZE <= num_tiles` (`noc_read_tile_batch_size`) |
+ * | 1..   | `in_args`    | `TensorAccessorArgs` of the input buffer                                         |
  *
  * **Runtime args**
  *
@@ -35,6 +43,7 @@
  * | 1     | `num_tiles` | uint32_t | Number of input tiles                               |
  *
  * @pre  The input tensor is interleaved, in TILE layout, and holds at least `num_tiles` pages.
+ * @pre  `c_0` has `BATCH_SIZE * cb_in_size_factor` pages, `cb_in_size_factor >= 2`, and `BATCH_SIZE <= num_tiles`.
  * @post `c_0` has received `2 * num_tiles` tiles.
  * @see ../compute/quantize.cpp, writer.cpp
  */
@@ -43,22 +52,29 @@ void kernel_main() {
     const uint32_t in_addr = get_arg_val<uint32_t>(0);
     const uint32_t num_tiles = get_arg_val<uint32_t>(1);
 
-    constexpr uint32_t cb_in_id = tt::CBIndex::c_0;
+    constexpr uint32_t BATCH_SIZE = get_compile_time_arg_val(0);  // 1 .. num_tiles, set on the host
     constexpr uint32_t num_passes = 2;  // absmax, then quantize
 
-    constexpr auto in_args = TensorAccessorArgs<0>();
+    constexpr auto in_args = TensorAccessorArgs<1>();
     const auto in = TensorAccessor(in_args, in_addr);
 
     Noc noc;
-    CircularBuffer cb_in(cb_in_id);
+    CircularBuffer cb_in(tt::CBIndex::c_0);
 
     const uint32_t tile_bytes = cb_in.get_tile_size();
-    for (uint32_t pass = 0; pass < num_passes; pass++) {
-        for (uint32_t t = 0; t < num_tiles; t++) {
-            cb_in.reserve_back(1);
-            noc.async_read(in, cb_in, tile_bytes, {.page_id = t}, {.offset_bytes = 0});
-            noc.async_read_barrier();
-            cb_in.push_back(1);
+    const uint32_t total_reads = num_passes * num_tiles;
+    uint32_t page = 0;  // next input page; wraps to 0 where pass 2 starts
+    for (uint32_t done = 0; done < total_reads; done += BATCH_SIZE) {
+        const uint32_t remaining = total_reads - done;
+        const uint32_t n = remaining < BATCH_SIZE ? remaining : BATCH_SIZE;  // short only at the end
+        cb_in.reserve_back(n);
+        for (uint32_t i = 0; i < n; i++) {
+            noc.async_read(in, cb_in, tile_bytes, {.page_id = page}, {.offset_bytes = i * tile_bytes});
+            if (++page == num_tiles) {
+                page = 0;
+            }
         }
+        noc.async_read_barrier();
+        cb_in.push_back(n);
     }
 }

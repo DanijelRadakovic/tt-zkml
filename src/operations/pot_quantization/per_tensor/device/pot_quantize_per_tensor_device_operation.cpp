@@ -4,9 +4,10 @@
 
 #include "pot_quantize_per_tensor_device_operation.hpp"
 
+#include <tt-metalium/tt_backend_api_types.hpp>
+
 #include "ttnn/device_operation.hpp"
 #include "ttnn/tensor/tensor_ops.hpp"
-#include <tt_stl/reflection.hpp>
 
 namespace zkml::operations::pot_quantization {
 
@@ -32,18 +33,26 @@ void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
     TT_FATAL(!input.memory_config().is_sharded(), "pot_quantize: sharded input is not supported");
     TT_FATAL(
         !attributes.output_memory_config.is_sharded(), "pot_quantize: sharded output is not supported");
+    // An enum class can still hold any number through a cast.
+    const uint32_t width = attributes.bit_width.bits();
     TT_FATAL(
-        attributes.bit_width == 8 || attributes.bit_width == 16 || attributes.bit_width == 32,
-        "pot_quantize: bit_width must be 8, 16 or 32, got {}",
-        attributes.bit_width);
+        width == 8 || width == 16 || width == 32, "pot_quantize: bit_width must be 8, 16 or 32 bits, got {}", width);
     TT_FATAL(
         attributes.output_dtype == DataType::INT32 || attributes.output_dtype == DataType::INT8,
         "pot_quantize: output dtype must be INT32 or INT8, got {}",
         attributes.output_dtype);
     TT_FATAL(
-        attributes.output_dtype != DataType::INT8 || attributes.bit_width == 8,
+        attributes.output_dtype != DataType::INT8 || attributes.bit_width == zkml::prim::BitWidth::Bits8,
         "pot_quantize: INT8 output requires bit_width 8, got {}",
-        attributes.bit_width);
+        width);
+    TT_FATAL(
+        attributes.noc_read_tile_batch_size >= 1,
+        "pot_quantize: noc_read_tile_batch_size must be at least 1, got {}",
+        attributes.noc_read_tile_batch_size);
+    TT_FATAL(
+        attributes.cb_in_size_factor >= 2,
+        "pot_quantize: cb_in_size_factor must be at least 2 (one batch being read, one being consumed), got {}",
+        attributes.cb_in_size_factor);
 }
 
 PotQuantizePerTensorOperation::spec_return_value_t PotQuantizePerTensorOperation::compute_output_specs(
@@ -66,15 +75,6 @@ PotQuantizePerTensorOperation::tensor_return_value_t PotQuantizePerTensorOperati
     const auto [quantized_spec, scaler_spec] = compute_output_specs(attributes, tensor_args);
     auto* device = tensor_args.input.device();
     return {ttnn::create_device_tensor(quantized_spec, device), ttnn::create_device_tensor(scaler_spec, device)};
-}
-
-ttsl::hash::hash_t PotQuantizePerTensorOperation::compute_program_hash(
-    const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
-    return ttsl::hash::hash_objects_with_default_seed(
-        tensor_args.input.tensor_spec(),
-        attributes.bit_width,
-        attributes.output_dtype,
-        attributes.output_memory_config);
 }
 
 }  // namespace zkml::operations::pot_quantization
