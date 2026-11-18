@@ -1,0 +1,53 @@
+# Cost per tile of the FPU/SFPU primitives, 16 bf16 tiles resident in L1, 32 repetitions (512 tile-ops), cycles at 1350 MHz
+# mode: 100 SFPU absmax+copy | 101 FPU col max pool | 102 FPU scalar max pool | 103 FPU mul_tiles | 104 copy+scaler copy+SFPU mul | 105 copy alone | 106 SFPU absmax alone
+mode 100
+TRISC_1  LOOP   cycles   118104  per tile   230.7
+mode 101
+TRISC_1  LOOP   cycles    15099  per tile    29.5
+mode 102
+TRISC_1  LOOP   cycles    27350  per tile    53.4
+mode 103
+TRISC_1  LOOP   cycles       18  per tile     0.0
+TRISC_1  LOOP2  cycles    45194  per tile    88.3
+mode 104
+TRISC_1  LOOP   cycles       18  per tile     0.0
+TRISC_1  LOOP2  cycles   121465  per tile   237.2
+mode 105
+TRISC_1  LOOP   cycles    23102  per tile    45.1
+mode 106
+TRISC_1  LOOP   cycles   107923  per tile   210.8
+
+# What the FPU max pool computes (mode 0: column max, scaler +1; mode 1: scaler -1; mode 2: whole-tile max), 4 tiles
+# 'face N row0' is the packed result tile; the host lines are the exact answers
+mode 0 tiles 4 pattern neg | global max -1 min -7.96875
+nonzero elements in result tile: 32
+face 0 row0: -1.039 -1.031 -1.164 -1.25 -1.109 -1.031 -1.016 -1.008 -1.102 -1.039 -1.086 -1.008 -1.164 -1.094 -1 -1.023
+face 1 row0: -1.125 -1.031 -1.047 -1.008 -1.094 -1.078 -1 -1.039 -1.07 -1 -1.008 -1 -1.047 -1.086 -1.008 -1.047
+host colmax[0..15]: -1.039 -1.031 -1.164 -1.25 -1.109 -1.031 -1.016 -1.008 -1.102 -1.039 -1.086 -1.008 -1.164 -1.094 -1 -1.023
+host colmax[16..31]: -1.125 -1.031 -1.047 -1.008 -1.094 -1.078 -1 -1.039 -1.07 -1 -1.008 -1 -1.047 -1.086 -1.008 -1.047
+host -colmin[0..15]: 7.969 7.875 7.938 7.969 7.906 7.969 7.938 7.812 7.938 7.906 7.969 7.875 7.938 7.906 7.969 7.969
+
+mode 0 tiles 4 pattern mixed | global max 7.96875 min -7.96875
+nonzero elements in result tile: 32
+face 0 row0: 7.875 7.906 7.594 7.406 7.719 7.906 7.938 7.938 7.75 7.875 7.781 7.969 7.594 7.75 7.969 7.938
+face 1 row0: 7.688 7.906 7.875 7.969 7.75 7.781 7.969 7.906 7.812 7.969 7.938 7.969 7.875 7.781 7.938 7.875
+host colmax[0..15]: 7.875 7.906 7.594 7.406 7.719 7.906 7.938 7.938 7.75 7.875 7.781 7.969 7.594 7.75 7.969 7.938
+host colmax[16..31]: 7.688 7.906 7.875 7.969 7.75 7.781 7.969 7.906 7.812 7.969 7.938 7.969 7.875 7.781 7.938 7.875
+host -colmin[0..15]: 7.969 7.719 7.875 7.969 7.844 7.969 7.875 7.625 7.875 7.812 7.969 7.719 7.906 7.781 7.969 7.969
+
+mode 1 tiles 4 pattern mixed | global max 7.96875 min -7.96875
+nonzero elements in result tile: 32
+face 0 row0: 7.875 7.906 7.594 7.406 7.719 7.906 7.938 7.938 7.75 7.875 7.781 7.969 7.594 7.75 7.969 7.938
+face 1 row0: 7.688 7.906 7.875 7.969 7.75 7.781 7.969 7.906 7.812 7.969 7.938 7.969 7.875 7.781 7.938 7.875
+host colmax[0..15]: 7.875 7.906 7.594 7.406 7.719 7.906 7.938 7.938 7.75 7.875 7.781 7.969 7.594 7.75 7.969 7.938
+host colmax[16..31]: 7.688 7.906 7.875 7.969 7.75 7.781 7.969 7.906 7.812 7.969 7.938 7.969 7.875 7.781 7.938 7.875
+host -colmin[0..15]: 7.969 7.719 7.875 7.969 7.844 7.969 7.875 7.625 7.875 7.812 7.969 7.719 7.906 7.781 7.969 7.969
+
+mode 2 tiles 4 pattern mixed | global max 7.96875 min -7.96875
+nonzero elements in result tile: 1
+face 0 row0: 7.969 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+face 1 row0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+host colmax[0..15]: 7.875 7.906 7.594 7.406 7.719 7.906 7.938 7.938 7.75 7.875 7.781 7.969 7.594 7.75 7.969 7.938
+host colmax[16..31]: 7.688 7.906 7.875 7.969 7.75 7.781 7.969 7.906 7.812 7.969 7.938 7.969 7.875 7.781 7.938 7.875
+host -colmin[0..15]: 7.969 7.719 7.875 7.969 7.844 7.969 7.875 7.625 7.875 7.812 7.969 7.719 7.906 7.781 7.969 7.969
+

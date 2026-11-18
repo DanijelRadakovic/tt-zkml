@@ -109,6 +109,23 @@ target_include_directories(zkml_quant_l1_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(zkml_quant_l1_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_quant_l1_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# SFPU against FPU multiply in pot_quantize_per_tensor: cycles, wall time, power. See
+# tools/quant_tensor_fpu_vs_sfpu/README.md
+add_executable(zkml_quant_fpu_vs_sfpu_bench tools/quant_tensor_fpu_vs_sfpu/bench.cpp)
+target_include_directories(
+    zkml_quant_fpu_vs_sfpu_bench
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+)
+target_link_libraries(zkml_quant_fpu_vs_sfpu_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_quant_fpu_vs_sfpu_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
+# Probe for the FPU primitives (max pool, mul_tiles) used to explain the benchmark above; see
+# tools/quant_tensor_fpu_vs_sfpu/probe/
+add_executable(zkml_fpu_probe tools/quant_tensor_fpu_vs_sfpu/probe/probe.cpp)
+target_include_directories(zkml_fpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_fpu_probe PRIVATE TT::Metalium)
+target_compile_definitions(zkml_fpu_probe PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.

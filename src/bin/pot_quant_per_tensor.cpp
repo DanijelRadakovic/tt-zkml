@@ -18,6 +18,7 @@
 #include <ttnn/types.hpp>
 #include <ttnn/tensor/tensor.hpp>
 #include <cmath>
+#include <optional>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -27,8 +28,9 @@
 using namespace ttnn;
 using tt::tt_metal::DataType;
 using zkml::prim::BitWidth;
+using zkml::prim::ComputeUnit;
 
-static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width) {
+static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width, ComputeUnit unit) {
     const uint32_t bit_count = width.bits();
     const uint32_t H = 64, W = 96;
     std::vector<float> data(H * W);
@@ -44,7 +46,7 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width)
     Tensor in = Tensor::from_vector(data, spec, dev);
     const std::vector<float> x = in.to_vector<float>();  // what the device sees (bf16 rounds)
 
-    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt);
+    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, 16, 2, unit);
     std::vector<int32_t> q;
     if (out_dt == DataType::INT8) {
         auto v = out.to_vector<int8_t>();
@@ -69,8 +71,9 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width)
     }
     const bool scaler_ok = got_scaler == std::ldexp(1.0f, k);
     std::printf(
-        "in=%s out=%s bits=%u: absmax=%g, device scaler=%g (k=%g), reference k=%d%s, %zu/%zu mismatches\n",
+        "in=%s unit=%s out=%s bits=%u: absmax=%g, device scaler=%g (k=%g), reference k=%d%s, %zu/%zu mismatches\n",
         in_dt == DataType::FLOAT32 ? "f32" : "bf16",
+        unit == ComputeUnit::Fpu ? "fpu" : "sfpu",
         out_dt == DataType::INT8 ? "int8" : "int32",
         bit_count,
         absmax,
@@ -103,10 +106,17 @@ int main(int argc, char** argv) {
     auto dev = open_mesh_device(0, DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE);
     int fails = 0;
     for (BitWidth width : widths) {
-        for (auto in_dt : {DataType::FLOAT32, DataType::BFLOAT16}) {
-            fails += run(dev.get(), in_dt, DataType::INT32, width);
+        // FLOAT32 only runs on the SFPU; BFLOAT16 runs on both units and must give the same result.
+        struct Case {
+            DataType in_dt;
+            ComputeUnit unit;
+        };
+        for (const Case c : {Case{DataType::FLOAT32, ComputeUnit::Sfpu},
+                             Case{DataType::BFLOAT16, ComputeUnit::Sfpu},
+                             Case{DataType::BFLOAT16, ComputeUnit::Fpu}}) {
+            fails += run(dev.get(), c.in_dt, DataType::INT32, width, c.unit);
             if (width == BitWidth::Bits8) {
-                fails += run(dev.get(), in_dt, DataType::INT8, width);
+                fails += run(dev.get(), c.in_dt, DataType::INT8, width, c.unit);
             }
         }
     }

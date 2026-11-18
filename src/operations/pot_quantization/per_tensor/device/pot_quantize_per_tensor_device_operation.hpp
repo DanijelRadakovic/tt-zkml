@@ -21,6 +21,7 @@
 #include <tt-metalium/host_api.hpp>
 
 #include "operations/pot_quantization/bit_width.hpp"
+#include "operations/pot_quantization/compute_unit.hpp"
 #include "ttnn/device_operation.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
@@ -43,6 +44,9 @@ struct PotQuantizePerTensorOperation {
         // - A larger factor lets the reader run further ahead when a read is slow.
         // - If noc_read_tile_batch_size * cb_in_size_factor tiles do not fit, the operation throws.
         uint32_t cb_in_size_factor;
+        // Which unit multiplies by the scaler in pass 2. Auto resolves to the FPU for BFLOAT16 input at 16 or
+        // 32 bits, and to the SFPU otherwise (see use_fpu).
+        zkml::prim::ComputeUnit compute_unit;
     };
 
     struct tensor_args_t {
@@ -79,6 +83,10 @@ struct PotQuantizePerTensorOperation {
     // A fp32 DST (fp32_dest_acc_en) with half sync holds 4 tiles.
     // The kernel static_asserts this value against the hardware limit.
     static constexpr uint32_t dst_tiles = 4;
+
+    /// True when pass 2 multiplies on the FPU: `compute_unit` is Fpu, or Auto with a BFLOAT16 input and 16 or
+    /// 32 bits.
+    static bool use_fpu(const operation_attributes_t& attributes, tt::tt_metal::DataType input_dtype);
 
     static program_factory_t select_program_factory(const operation_attributes_t&, const tensor_args_t&);
     static void validate_on_program_cache_miss(const operation_attributes_t&, const tensor_args_t&);
