@@ -13,6 +13,7 @@
 #include "api/compute/eltwise_unary/rounding.h"
 #include "api/compute/eltwise_unary/typecast.h"
 #include "api/dataflow/circular_buffer.h"
+#include "common/block_processing.hpp"
 #include "common/kernel_debug.hpp"
 #include "pot_scale_sfpu.hpp"
 
@@ -25,22 +26,22 @@
  * - `k = max{k : absmax(x) * 2^k <= Q}`,
  * - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
  *
- * It reads the input twice, in chunks sized to the DST tiles. A chunk is the next run of tiles in
- * `c_0`: at most the chunk size, and never across the end of the tensor or of the `c_0` ring,
+ * It reads the input twice, in blocks sized to the DST tiles. A block is the next run of tiles in
+ * `c_0`: at most the block size, and never across the end of the tensor or of the `c_0` ring,
  * because `copy_tile(cb, i, ...)` addresses page `read_ptr + i` without wrapping. The ring has
  * `IN_RING_PAGES` pages: `noc_read_tile_batch_size * cb_in_size_factor`, a whole number of reader
- * batches. A chunk can be longer than the ring (a tiny batch), then the ring cut shortens it.
+ * batches. A block can be longer than the ring (a tiny batch), then the ring cut shortens it.
  *
- * Pass 1, absmax: chunks of up to `DST_TILES` tiles are copied into DST slots 0.. and folded into a
+ * Pass 1, absmax: blocks of up to `DST_TILES` tiles are copied into DST slots 0.. and folded into a
  * running per-lane absmax that stays in an SFPU register (see pot_scale_sfpu.hpp). After the last
  * tile the 32 lanes are reduced and turned into the scaler `2^k`, still in the SFPU register.
  *
  * The scaler is then broadcast into a DST tile and packed to `c_1` (reused by pass 2) and to
  * `c_17` (returned to the host).
  *
- * Pass 2, quantize: chunks of up to `DST_TILES - 1` input tiles go into DST slots 0.., and the scaler
- * into the last slot, copied once per chunk instead of once per tile. Each SFPU op (and its init)
- * then runs over the whole chunk, and the chunk is packed with one MATH -> PACK handshake.
+ * Pass 2, quantize: blocks of up to `DST_TILES - 1` input tiles go into DST slots 0.., and the scaler
+ * into the last slot, copied once per block instead of once per tile. Each SFPU op (and its init)
+ * then runs over the whole block, and the block is packed with one MATH -> PACK handshake.
  * - 8 bits: `quant_tile` / `quant_int8_tile`. Their clamp is [-128, 127], not [-127, 127], but
  *   `|x * 2^k| <= 127` by the choice of k, so -128 is never produced.
  * - 16 and 32 bits: `quant_tile` clamps to the int8 range and its RNE trick only holds for
@@ -51,7 +52,7 @@
  * |-----------------|--------------------|---------------------------------|--------------------------------|
  * | `c_0`           | consumes           | Float32 or Float16_b            | Input tiles, twice             |
  * | `c_1`           | produces, consumes | Float32                         | Scaler tile (`2^k`), held      |
- * | `c_16`          | produces           | Int32, or UInt8 for Int8 output | Quantized tiles, 2 chunks      |
+ * | `c_16`          | produces           | Int32, or UInt8 for Int8 output | Quantized tiles, 2 blocks      |
  * | `c_17`          | produces           | Float32                         | Scaler tile for the host       |
  *
  * **Compile-time args**
@@ -72,34 +73,16 @@
  *
  * @pre  The program enables `fp32_dest_acc_en`. Float32 CBs use `UnpackToDestFp32`.
  * @pre  `c_16` has `2 * (DST_TILES - 1)` pages.
- * @note Chunking does not overlap copy_tile with the SFPU. With `UnpackToDestFp32` every copy_tile
+ * @note Working in blocks does not overlap copy_tile with the SFPU. With `UnpackToDestFp32` every copy_tile
  *       waits until the SFPU is idle before the unpacker may write DST
  *       (`math_unpack_to_dest_math_ready`), whichever slot it targets; with Float16_b input the copy
  *       already hides behind the SFPU. Pass 1 is bound by the SFPU absmax (~210 cycles per tile).
  *       Pass 2 gains from the shared scaler copy and from fewer inits and handshakes.
  * @pre  The input is finite. An Inf or NaN absmax gives a meaningless scaler.
  * @note Rounding is round-half-to-even. A ZK circuit that checks this result must use the same rule.
- * @see ../dataflow/reader.cpp, ../dataflow/writer.cpp, pot_scale_sfpu.hpp
+ * @see ../dataflow/reader.cpp, ../dataflow/writer.cpp, pot_scale_sfpu.hpp, common/block_processing.hpp
  */
 // clang-format on
-
-namespace {
-
-/// Tiles in the next chunk of `c_0`: at most `chunk`, and neither past the end of the tensor
-/// (`remaining`) nor across the end of the ring (`ring_pos` of `ring_pages`).
-inline uint32_t next_chunk(uint32_t chunk, uint32_t remaining, uint32_t ring_pos, uint32_t ring_pages) {
-    uint32_t n = chunk < remaining ? chunk : remaining;
-    const uint32_t to_ring_end = ring_pages - ring_pos;
-    return n < to_ring_end ? n : to_ring_end;
-}
-
-/// Advances a position in the `c_0` ring by `n` pages (n never crosses the end, see next_chunk).
-inline uint32_t advance_ring(uint32_t ring_pos, uint32_t n, uint32_t ring_pages) {
-    ring_pos += n;
-    return ring_pos == ring_pages ? 0 : ring_pos;
-}
-
-}  // namespace
 
 void kernel_main() {
     const uint32_t num_tiles = get_arg_val<uint32_t>(0);
@@ -119,23 +102,15 @@ void kernel_main() {
     constexpr uint32_t absmax_dst_slots = DST_TILES;
     // Pass 2 (quantize) keeps the last DST slot for the scaler.
     constexpr uint32_t quant_dst_slots = DST_TILES - 1;
-
-    // next_chunk() shortens a chunk that is longer than what is left in the tensor or the c_0 ring.
-    constexpr uint32_t out_ring_pages = 2 * quant_dst_slots;  // c_16 holds two chunks (see the host)
+    constexpr uint32_t out_ring_pages = 2 * quant_dst_slots;  // c_16 holds two blocks (see the host)
 
     constexpr uint32_t cb_in_id = tt::CBIndex::c_0;
     constexpr uint32_t cb_scale_id = tt::CBIndex::c_1;
     constexpr uint32_t cb_out_id = tt::CBIndex::c_16;
     constexpr uint32_t cb_scale_out_id = tt::CBIndex::c_17;
-    constexpr uint32_t zero_point_bits = 0;  // fp32 bits of 0.0f: symmetric quantization
+    constexpr uint32_t zero_point_bits = 0;  // fp32 bits of 0.0f: symmetric quantization    
 
-    // fp32 bit patterns of -Q and Q for the 16/32-bit clamp. 2^31 - 1 rounds to 2^31 in fp32; the
-    // fp32 -> int32 typecast saturates 2^31 to INT32_MAX, and |x * 2^k| <= Q keeps it unreachable.
-    constexpr float q_max = static_cast<float>((1ull << (bit_width - 1)) - 1);
-    constexpr uint32_t q_max_bits = __builtin_bit_cast(uint32_t, q_max);
-    constexpr uint32_t q_min_bits = __builtin_bit_cast(uint32_t, -q_max);
-
-    // DST slots: input tiles in 0 .. chunk - 1, the scaler in the last slot
+    // DST slots: input tiles in 0 .. block - 1, the scaler in the last slot
     constexpr uint32_t dst_scale = DST_TILES - 1;
 
     CircularBuffer cb_in(cb_in_id);
@@ -147,16 +122,16 @@ void kernel_main() {
 
     // ---- Pass 1: absmax over the whole tensor, kept in an SFPU register ----
     // The whole pass and the scaler below share one DST section: nothing is packed until the
-    // scaler, so one MATH -> PACK handshake replaces one per input tile. Each chunk overwrites
+    // scaler, so one MATH -> PACK handshake replaces one per input tile. Each block overwrites
     // slots 0 .. n - 1; the SFPU stall in absmax_tile orders it after the copies.
     MATH(zkml::sfpu::absmax_init());
     copy_init(cb_in_id);
     cb_scale.reserve_back(1);
     cb_scale_out.reserve_back(1);
-    uint32_t ring_pos = 0;  // position of the c_0 read pointer in its ring, shared by both passes
+    zkml::common::RingCursor in_ring(in_ring_pages);  // c_0 read position, shared by both passes
+    zkml::common::DstBlockMediator absmax_blocks(absmax_dst_slots, num_tiles, in_ring);
     tile_regs_acquire();
-    for (uint32_t done = 0; done < num_tiles;) {
-        const uint32_t n = next_chunk(absmax_dst_slots, num_tiles - done, ring_pos, in_ring_pages);
+    while (const uint32_t n = absmax_blocks.next()) {
         cb_in.wait_front(n);
         for (uint32_t i = 0; i < n; i++) {
             copy_tile(cb_in_id, i, i);
@@ -165,8 +140,7 @@ void kernel_main() {
             MATH(zkml::sfpu::absmax_tile(i));
         }
         cb_in.pop_front(n);
-        done += n;
-        ring_pos = advance_ring(ring_pos, n, in_ring_pages);
+        absmax_blocks.commit(n);
     }
 
     // ---- Scaler: SFPU register -> DST -> c_1 (for pass 2) and c_17 (for the host) ----
@@ -188,8 +162,6 @@ void kernel_main() {
     pack_reconfig_data_format(cb_out_id);
 
     // ---- Pass 2: quantize ----
-    // TODO(perf): pass 2 reads the whole input from DRAM a second time. Keeping the tiles in L1
-    // (when they fit) or fusing the absmax into a previous op would remove the re-read.
     if constexpr (bit_width == 8) {
         // Records the replay body and loads LREG constants, so it must come after pass 1.
         if constexpr (is_output_int8) {
@@ -198,27 +170,32 @@ void kernel_main() {
             quant_tile_init(zero_point_bits);
         }
     }
-
+    
+    // fp32 bit patterns of -Q and Q for the clamp for 16/32-bit scaler. 2^31 - 1 rounds to 2^31 in fp32; the
+    // fp32 -> int32 typecast saturates 2^31 to INT32_MAX, and |x * 2^k| <= Q keeps it unreachable.
+    constexpr float q_max = static_cast<float>((1ull << (bit_width - 1)) - 1);
+    constexpr uint32_t q_max_bits = __builtin_bit_cast(uint32_t, q_max);
+    constexpr uint32_t q_min_bits = __builtin_bit_cast(uint32_t, -q_max);
+    
     cb_scale.wait_front(1);
-    uint32_t out_pos = 0;  // position of the c_16 write pointer in its ring
-    for (uint32_t done = 0; done < num_tiles;) {
-        // A reserve/push must be contiguous in the CB: cut the chunk at the end of both rings.
-        uint32_t n = next_chunk(quant_dst_slots, num_tiles - done, ring_pos, in_ring_pages);
-        n = next_chunk(n, n, out_pos, out_ring_pages);
+    zkml::common::RingCursor out_ring(out_ring_pages);  // c_16 write position
+    // A reserve/push must be contiguous in the CB: the mediator cuts the block at the end of both rings.
+    zkml::common::DstBlockMediator quant_blocks(quant_dst_slots, num_tiles, in_ring, out_ring);
+    while (const uint32_t n = quant_blocks.next()) {
         cb_in.wait_front(n);
         cb_out.reserve_back(n);
 
         tile_regs_acquire();
         copy_init(cb_in_id);
         for (uint32_t i = 0; i < n; i++) {
-            DPRINT_UNPACK("Tile={}\n", done + i);
+            DPRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
             UNPACK(zkml::debug::print_tile_rows(cb_in_id, i));
             copy_tile(cb_in_id, i, i);
         }
         // The input may be Float16_b while the scaler is always Float32.
         reconfig_data_format_srca(cb_in_id, cb_scale_id);
         copy_init(cb_scale_id);
-        copy_tile(cb_scale_id, 0, dst_scale);  // once per chunk
+        copy_tile(cb_scale_id, 0, dst_scale);  // once per block
         if constexpr (bit_width == 8) {
             for (uint32_t i = 0; i < n; i++) {
                 if constexpr (is_output_int8) {
@@ -230,7 +207,7 @@ void kernel_main() {
             }
         } else {
             // TODO(perf): four SFPU passes. A fused 16/32-bit quant SFPU function (multiply, RNE,
-            // clamp, convert in one sweep over DST) would replace them. Each init runs once per chunk.
+            // clamp, convert in one sweep over DST) would replace them. Each init runs once per block.
             mul_binary_tile_init();
             for (uint32_t i = 0; i < n; i++) {
                 mul_binary_tile(i, dst_scale, i);  // x * 2^k, exact for a normal 2^k
@@ -261,14 +238,12 @@ void kernel_main() {
         }
         tile_regs_release();
         for (uint32_t i = 0; i < n; i++) {
-            DPRINT_PACK("Tile={}\n", done + i);
+            DPRINT_PACK("Tile={}\n", quant_blocks.done() + i);
             PACK(zkml::debug::print_tile_rows(cb_out_id, i));
         }
         cb_out.push_back(n);
         cb_in.pop_front(n);
-        done += n;
-        ring_pos = advance_ring(ring_pos, n, in_ring_pages);
-        out_pos = advance_ring(out_pos, n, out_ring_pages);
+        quant_blocks.commit(n);
     }
 
     cb_scale.pop_front(1);

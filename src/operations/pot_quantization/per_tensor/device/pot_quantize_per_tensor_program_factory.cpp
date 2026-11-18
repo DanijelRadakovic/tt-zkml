@@ -45,7 +45,7 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     // might perform fewer reads than the batch size, meaning that not all CB slots would be updated, which is fine.
     const uint32_t batch_tiles = std::min(attributes.noc_read_tile_batch_size, num_tiles);
     const uint32_t in_cb_pages = batch_tiles * attributes.cb_in_size_factor;
-    // c_16 holds two compute chunks (dst_tiles - 1 tiles each) so packing overlaps the writer.
+    // c_16 holds two compute blocks (dst_tiles - 1 tiles each) so packing overlaps the writer.
     const uint32_t out_cb_pages = 2 * (dst_tiles - 1);
 
     const uint32_t in_tile_bytes = tt::tile_size(in_format);
@@ -77,7 +77,7 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
 
     create_cb(cb_in, program, core, in_tile_bytes, in_cb_pages, in_format);      // factor reader batches
     create_cb(cb_scale, program, core, scale_tile_bytes, 1, scale_format);       // packed once, held by pass 2
-    create_cb(cb_out, program, core, out_tile_bytes, out_cb_pages, out_format);  // two compute chunks
+    create_cb(cb_out, program, core, out_tile_bytes, out_cb_pages, out_format);  // two compute blocks
     create_cb(cb_scale_out, program, core, scale_tile_bytes, 1, scale_format);   // scaler for the host
 
     // Reader: compile-time args = batch size, then TensorAccessorArgs for input
