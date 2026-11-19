@@ -12,8 +12,9 @@ rest of the prover witness, see the root `README.md`.)
 
 ## What is measured
 
-BFLOAT16 input of `32 x 32*tiles` elements (1024 per tile), INT32 output, `ComputeUnit::Auto` (the FPU multiply at 16
-and 32 bits, the SFPU at 8), `QuantRange::M31`. Per call: n calls back to back with the program cache warm, then one
+BFLOAT16 input of `32 x 32*tiles` elements (1024 per tile), INT32 output, `QuantRange::M31`. (The `quantize` numbers in the
+table below were measured before the fused SFPU kernels, when 16 and 32 bits used the FPU multiply and composed ops; the quantizer is
+now faster, see `benchmarks/quant_tensor_fpu_vs_sfpu/results/lreg7_scaler.md`.) Per call: n calls back to back with the program cache warm, then one
 `Finish` on the command queue; the table shows the median of 5 such runs divided by n. The time is wall clock, so it includes
 the host-side dispatch of the op (about 10 us), which matters at 16 tiles.
 

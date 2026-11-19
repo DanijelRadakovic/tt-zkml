@@ -19,16 +19,6 @@ PotQuantizePerTensorOperation::program_factory_t PotQuantizePerTensorOperation::
     return SingleCore{};
 }
 
-bool PotQuantizePerTensorOperation::use_fpu(const operation_attributes_t& attributes, DataType input_dtype) {
-    using zkml::prim::ComputeUnit;
-    // Auto picks the FPU where it measured faster (tools/quant_tensor_fpu_vs_sfpu): 16 and 32 bits. At 8 bits
-    // the SFPU has the fused quant_tile (multiply, round, clamp, convert in one op); with the FPU multiply
-    // those become separate SFPU passes, which was 2.3x slower.
-    return attributes.compute_unit == ComputeUnit::Fpu ||
-           (attributes.compute_unit == ComputeUnit::Auto && input_dtype == DataType::BFLOAT16 &&
-            attributes.bit_width.bits() >= 16);
-}
-
 void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
     const auto& input = tensor_args.input;
@@ -41,10 +31,6 @@ void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
         "pot_quantize: input dtype must be FLOAT32 or BFLOAT16, got {}",
         input.dtype());
     TT_FATAL(!input.memory_config().is_sharded(), "pot_quantize: sharded input is not supported");
-    TT_FATAL(
-        !use_fpu(attributes, input.dtype()) || input.dtype() == DataType::BFLOAT16,
-        "pot_quantize: compute_unit Fpu needs a BFLOAT16 input (the FPU keeps at most 19 bits of an operand), got {}",
-        input.dtype());
     TT_FATAL(
         !attributes.output_memory_config.is_sharded(), "pot_quantize: sharded output is not supported");
     // An enum class can still hold any number through a cast.

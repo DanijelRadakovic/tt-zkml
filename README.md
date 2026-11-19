@@ -58,16 +58,17 @@ k = max{k <= 127 : absmax(x) * 2^k <= Q}
 q = clamp(round_half_even(x * 2^k), -Q, Q)      scaler = 2^k, so x ~= q / scaler
 ```
 
-The host program runs it for the given bit widths (default: 8 16 32), BFLOAT16 on both math units:
+The host program runs it for the given bit widths (default: 8 16 32), with FLOAT32 and BFLOAT16 input:
 
 ```bash
 .build/default/zkml_pot_quant_per_tensor 8 16
 ```
 
-**Math unit.** Pass 2 multiplies by the scaler on the FPU or the SFPU (`compute_unit` argument). The default,
-`Auto`, uses the FPU for BFLOAT16 input at 16 and 32 bits (about 10 % faster and 9 % less energy, bit-identical result)
-and the SFPU otherwise (at 8 bits the FPU would be 2.3x slower). The absmax of pass 1 always runs on the SFPU: the FPU
-has no abs and no min. Measurements: `tools/quant_tensor_fpu_vs_sfpu/README.md`.
+**Math unit.** The whole operation runs on the SFPU. Pass 1 finds the absmax and leaves the scaler `2^k` in an SFPU register
+(LReg7); pass 2 is one fused sweep per tile that multiplies by it, rounds half to even and converts to int32
+(`quant_sfpu.hpp`). An FPU multiply (`mul_tiles`) existed as an option and was removed: with the fused sweeps it is no
+faster (equal at 16 bits, 4 % slower at 32 bits). The absmax cannot run on the FPU anyway: it has no abs and no min.
+Measurements: `benchmarks/quant_tensor_fpu_vs_sfpu/` (`results/lreg7_scaler.md` for the current kernels).
 
 ### M31 and the witness for the stwo prover
 
@@ -87,7 +88,7 @@ shows what goes wrong otherwise).
 
 ```cpp
 auto [q, scaler] = zkml::prim::pot_quantize_per_tensor(x, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2,
-                                                       ComputeUnit::Auto, QuantRange::M31);
+                                                       QuantRange::M31);
 ttnn::Tensor m31 = zkml::prim::pot_quant_m31(q);
 ```
 

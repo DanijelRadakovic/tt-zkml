@@ -29,7 +29,6 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
 
     const uint32_t num_tiles = input.physical_volume() / TILE_HW;
     const bool is_output_int8 = attributes.output_dtype == DataType::INT8;
-    const bool use_fpu = PotQuantizePerTensorOperation::use_fpu(attributes, input.dtype());
 
     Program program{};
     const CoreCoord core{0, 0};
@@ -46,9 +45,9 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     // might perform fewer reads than the batch size, meaning that not all CB slots would be updated, which is fine.
     const uint32_t batch_tiles = std::min(attributes.noc_read_tile_batch_size, num_tiles);
     const uint32_t in_cb_pages = batch_tiles * attributes.cb_in_size_factor;
-    // c_16 holds two compute blocks so packing overlaps the writer. A block is dst_tiles - 1 tiles: the last DST
-    // slot holds the scaler. With the FPU multiply the scaler is read through SrcB, so a block is dst_tiles tiles.
-    const uint32_t block_tiles = use_fpu ? dst_tiles : dst_tiles - 1;
+    // Pass 2 keeps the scaler in an SFPU register (LReg7): no scaler CB and no DST slot for it, so a block is dst_tiles
+    // tiles. c_16 holds two blocks so packing overlaps the writer.
+    const uint32_t block_tiles = dst_tiles;
     const uint32_t out_cb_pages = 2 * block_tiles;
 
     const uint32_t in_tile_bytes = tt::tile_size(in_format);
@@ -56,19 +55,16 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     const uint32_t scale_tile_bytes = tt::tile_size(scale_format);
 
     constexpr uint32_t cb_in = CBIndex::c_0;
-    constexpr uint32_t cb_scale = CBIndex::c_1;
     constexpr uint32_t cb_out = CBIndex::c_16;
     constexpr uint32_t cb_scale_out = CBIndex::c_17;
 
-    zkml::common::check_if_cbs_can_fit_in_l1(
-        input.device(),
-        {{
-            {cb_in, in_cb_pages, in_tile_bytes},
-            {cb_scale, 1, scale_tile_bytes},
-            {cb_out, out_cb_pages, out_tile_bytes},
-            {cb_scale_out, 1, scale_tile_bytes},
-        }},
-        "Lower noc_read_tile_batch_size or cb_in_size_factor.");
+    // In the order the program creates them (the check repeats tt-metal's placement).
+    const std::vector<zkml::common::CbSpec> cbs = {
+        {cb_in, in_cb_pages, in_tile_bytes},
+        {cb_out, out_cb_pages, out_tile_bytes},
+        {cb_scale_out, 1, scale_tile_bytes},
+    };
+    zkml::common::check_if_cbs_can_fit_in_l1(input.device(), cbs, "Lower noc_read_tile_batch_size or cb_in_size_factor.");
 
     log_debug(
         tt::LogOp,
@@ -79,7 +75,6 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
         in_cb_pages * in_tile_bytes);
 
     create_cb(cb_in, program, core, in_tile_bytes, in_cb_pages, in_format);      // factor reader batches
-    create_cb(cb_scale, program, core, scale_tile_bytes, 1, scale_format);       // packed once, held by pass 2
     create_cb(cb_out, program, core, out_tile_bytes, out_cb_pages, out_format);  // two compute blocks
     create_cb(cb_scale_out, program, core, scale_tile_bytes, 1, scale_format);   // scaler for the host
 
@@ -89,8 +84,9 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     const KernelHandle reader_id = CreateKernel(
         program, kernel_path(__FILE__, "kernels/dataflow/reader.cpp"), core, ReaderDataMovementConfig(reader_ct_args));
 
-    // Writer: compile-time args = TensorAccessorArgs for the quantized output, then for the scaler
-    std::vector<uint32_t> writer_ct_args;
+    // Writer: compile-time args = batch (one compute block), c_16 ring size, then TensorAccessorArgs for the quantized
+    // output and for the scaler
+    std::vector<uint32_t> writer_ct_args = {block_tiles, out_cb_pages};
     TensorAccessorArgs(*quantized.buffer()).append_to(writer_ct_args);
     TensorAccessorArgs(*scaler.buffer()).append_to(writer_ct_args);
     const KernelHandle writer_id = CreateKernel(
@@ -102,8 +98,6 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     if (in_format == DataFormat::Float32) {
         unpack_to_dest_mode[cb_in] = UnpackToDestMode::UnpackToDestFp32;
     }
-    // The scaler goes to DST (copy_tile) when the SFPU multiplies, and to SrcB (mul_tiles) when the FPU does.
-    unpack_to_dest_mode[cb_scale] = use_fpu ? UnpackToDestMode::Default : UnpackToDestMode::UnpackToDestFp32;
 
     const KernelHandle compute_id = CreateKernel(
         program,
@@ -114,13 +108,12 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack_to_dest_mode),
             .math_approx_mode = false,
-            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, FPU multiply, M31 range
+            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, M31 range
             .compile_args =
                 {is_output_int8 ? 1u : 0u,
                  attributes.bit_width.bits(),
                  in_cb_pages,
                  dst_tiles,
-                 use_fpu ? 1u : 0u,
                  attributes.range == zkml::prim::QuantRange::M31 ? 1u : 0u},
             // Lets the kernel include shared headers from src/, e.g. common/kernel_debug.hpp
             .compiler_include_paths = {kernel_include_dir()},

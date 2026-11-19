@@ -1,5 +1,8 @@
 # quant_tensor_fpu_vs_sfpu
 
+> **Update:** the tables below were measured with tt-metal's `quant_tile` (8 bits) and its composed ops (16 and 32 bits), with the scaler tile in DST. The op now uses its own fused SFPU kernels with the scaler in LReg7 (`quant_sfpu.hpp`) at every width: pass 2 takes 0 to 33% fewer cycles at 8 bits (most with Int8 output), 69 to 77% fewer at 16 bits and 37 to 47% fewer at 32 bits; see `results/lreg7_scaler.md`. The FPU multiply no longer wins at 16 and 32 bits (equal at 16, 4% slower at 32 for bf16 input), and the writer now batches its writes (one flush per block instead of a write barrier per tile: another 0 to 50% fewer pass-2 cycles at 8 and 16 bits), so the conclusions about the FPU below are outdated, and the FPU path (the `use_fpu` kernel argument and the `ComputeUnit` knob) has been removed from the op.
+
+
 **Input type.** All measurements use a BFLOAT16 input tile, on both units. The FPU cannot take FLOAT32 (it keeps
 19 bits of an operand), so there is no FPU result to compare an fp32 SFPU run with; no FLOAT32 row was measured.
 
@@ -42,9 +45,9 @@ dominate.
   The rest of pass 2 (round, clamp, convert) stays on the SFPU, always as separate ops. For INT8 output the byte has
   to be masked (`& 0xFF`): the UInt8 packer **saturates**, so a negative int32 would come out as 255.
   (`quant_int8_tile` leaves the byte, 256 + q for a negative q, in the DST for the same reason.)
-- The op got a knob `ComputeUnit compute_unit` (`Auto`, `Sfpu`, `Fpu`; in `operations/pot_quantization/compute_unit.hpp`).
-  `Auto` is the FPU for BFLOAT16 at 16 or 32 bits and the SFPU otherwise. `Fpu` on a FLOAT32 input throws (the FPU
-  would cut the input to 19 bits).
+- The op got a knob `ComputeUnit compute_unit` (`Auto`, `Sfpu`, `Fpu`). `Auto` was the FPU for BFLOAT16 at 16 or 32 bits and the
+  SFPU otherwise. **The FPU path and the knob have since been removed** (see the update above): `bench.cpp` accepts only `sfpu`
+  now, and this README is the record of the comparison.
 - The kernel has profiler zones `PASS1`, `SCALER`, `PASS2` (no code unless `TT_METAL_DEVICE_PROFILER=1`).
 - Tests (`test_pot_quantize_per_tensor`) run BFLOAT16 on both units for every width, tile count and batch sweep.
 

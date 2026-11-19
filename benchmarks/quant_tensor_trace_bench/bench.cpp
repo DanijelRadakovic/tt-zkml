@@ -32,7 +32,6 @@
 using namespace ttnn;
 using tt::tt_metal::DataType;
 using zkml::prim::BitWidth;
-using zkml::prim::ComputeUnit;
 using zkml::prim::QuantRange;
 using Clock = std::chrono::steady_clock;
 
@@ -113,7 +112,7 @@ int main(int argc, char** argv) {
             const DataType out_dt = DataType::INT32;
 
             auto quantize = [&] {
-                return zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, 16, 2, ComputeUnit::Auto, QuantRange::M31);
+                return zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, 16, 2, QuantRange::M31);
             };
             // The scaler is returned only so the lambda gives a tensor; the queue is waited for as a whole.
             const double q_ms = per_call_ms(dev.get(), [&] { return std::get<1>(quantize()); });
