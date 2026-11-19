@@ -41,12 +41,12 @@ PotQuantM31Operation::SingleCore::cached_program_t PotQuantM31Operation::SingleC
     create_cb(cb_in, program, core, in_tile_bytes, ring_pages, in_format);
     create_cb(cb_out, program, core, out_tile_bytes, ring_pages, out_format);
 
-    std::vector<uint32_t> reader_ct_args;
+    std::vector<uint32_t> reader_ct_args = {block_tiles};
     TensorAccessorArgs(*input.buffer()).append_to(reader_ct_args);
     const KernelHandle reader_id = CreateKernel(
         program, kernel_path(__FILE__, "kernels/dataflow/reader.cpp"), core, ReaderDataMovementConfig(reader_ct_args));
 
-    std::vector<uint32_t> writer_ct_args;
+    std::vector<uint32_t> writer_ct_args = {block_tiles};
     TensorAccessorArgs(*output.buffer()).append_to(writer_ct_args);
     const KernelHandle writer_id = CreateKernel(
         program, kernel_path(__FILE__, "kernels/dataflow/writer.cpp"), core, WriterDataMovementConfig(writer_ct_args));
