@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 // Host-side reference for per-tensor PoT quantization (see
-// operations/pot_quantization/per_tensor/pot_quantize_per_tensor.hpp):
+// operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp):
 //   Q = 2^(bits - 1) - 1, or 2^30 - 1 at 32 bits with QuantRange::M31 (operations/pot_quantization/pot_range.hpp)
 //   k = max{k <= 127 : absmax(x) * 2^k <= Q}
 //   q = clamp(round_half_even(x * 2^k), -Q, Q)

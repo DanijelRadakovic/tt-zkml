@@ -46,12 +46,12 @@ endif()
 # the factories locate them relative to their own __FILE__ (see src/common/kernel_path.hpp).
 add_library(
     zkml_ops
-    src/operations/pot_quantization/per_tensor/pot_quantize_per_tensor.cpp
-    src/operations/pot_quantization/per_tensor/device/pot_quantize_per_tensor_device_operation.cpp
-    src/operations/pot_quantization/per_tensor/device/pot_quantize_per_tensor_program_factory.cpp
-    src/operations/pot_quantization/m31/pot_quant_m31.cpp
-    src/operations/pot_quantization/m31/device/pot_quant_m31_device_operation.cpp
-    src/operations/pot_quantization/m31/device/pot_quant_m31_program_factory.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_device_operation.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_program_factory.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize_m31/pot_quant_m31.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_device_operation.cpp
+    src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_program_factory.cpp
 )
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
@@ -63,8 +63,8 @@ add_executable(zkml_pot_quant_per_tensor src/bin/pot_quant_per_tensor.cpp)
 target_link_libraries(zkml_pot_quant_per_tensor PRIVATE zkml_ops)
 target_compile_definitions(zkml_pot_quant_per_tensor PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
-# NoC / DRAM microbenchmark (latency per bank and per core distance, bandwidth); see tools/noc_bench/
-add_executable(zkml_noc_bench tools/noc_bench/noc_bench.cpp)
+# NoC / DRAM microbenchmark (latency per bank and per core distance, bandwidth); see benchmarks/noc_bench/
+add_executable(zkml_noc_bench benchmarks/noc_bench/noc_bench.cpp)
 target_include_directories(zkml_noc_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_noc_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_noc_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
@@ -107,20 +107,20 @@ zkml_add_test(test_pot_quant_m31 tests/cpp/operations/pot_quantization/test_pot_
 zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
 
 # Does keeping the tensor in L1 between the two passes help? Profiler-based bench; see
-# tools/quant_tensor_fit_in_l1_bench/README.md
-add_executable(zkml_quant_l1_bench tools/quant_tensor_fit_in_l1_bench/bench.cpp)
+# benchmarks/quant_tensor_fit_in_l1_bench/README.md
+add_executable(zkml_quant_l1_bench benchmarks/quant_tensor_fit_in_l1_bench/bench.cpp)
 target_include_directories(zkml_quant_l1_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_quant_l1_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_quant_l1_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
 # SFPU against FPU multiply in pot_quantize_per_tensor: cycles, wall time, power. See
-# Wall-clock benchmark of the execution-trace operations (trace flag, pot_quant_m31); see tools/quant_tensor_trace_bench/
-add_executable(zkml_quant_trace_bench tools/quant_tensor_trace_bench/bench.cpp)
+# Wall-clock benchmark of the execution-trace operations (pot_quant_m31); see benchmarks/quant_tensor_trace_bench/
+add_executable(zkml_quant_trace_bench benchmarks/quant_tensor_trace_bench/bench.cpp)
 target_link_libraries(zkml_quant_trace_bench PRIVATE zkml_ops)
 target_compile_definitions(zkml_quant_trace_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
-# tools/quant_tensor_fpu_vs_sfpu/README.md
-add_executable(zkml_quant_fpu_vs_sfpu_bench tools/quant_tensor_fpu_vs_sfpu/bench.cpp)
+# benchmarks/quant_tensor_fpu_vs_sfpu/README.md
+add_executable(zkml_quant_fpu_vs_sfpu_bench benchmarks/quant_tensor_fpu_vs_sfpu/bench.cpp)
 target_include_directories(
     zkml_quant_fpu_vs_sfpu_bench
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
@@ -129,8 +129,8 @@ target_link_libraries(zkml_quant_fpu_vs_sfpu_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_quant_fpu_vs_sfpu_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
 # Probe for the FPU primitives (max pool, mul_tiles) used to explain the benchmark above; see
-# tools/quant_tensor_fpu_vs_sfpu/probe/
-add_executable(zkml_fpu_probe tools/quant_tensor_fpu_vs_sfpu/probe/probe.cpp)
+# benchmarks/quant_tensor_fpu_vs_sfpu/probe/
+add_executable(zkml_fpu_probe benchmarks/quant_tensor_fpu_vs_sfpu/probe/probe.cpp)
 target_include_directories(zkml_fpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_fpu_probe PRIVATE TT::Metalium)
 target_compile_definitions(zkml_fpu_probe PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
