@@ -224,12 +224,12 @@ The output column of one step is the input column of the next (same trace cells)
 
 *Recommendation.* B is the better fit for a sound proof: every step is an integer relation with a small witness, and the activation is a lookup. A is useful as a reference to measure how much accuracy B loses, and it is the natural way to check a layer by eye. Both start with the same quantize and matmul, so `pot_quantize` and the matmul are shared, and the separate `pot_requantize_per_tensor` and `dequantize` operations let a developer check each step on its own.
 
-*Open points for B.* (1) The post-ReLU tensor can have a smaller absmax than the accumulator (if the largest entry was negative), so the next layer's $k_"out"$ is valid but not maximal for the data it sees. Applying ReLU to the int32 accumulator before the requantize avoids this, and is exact. (2) int16 $times$ int16 products overflow the int32 accumulator; decide the supported width pairs first. (3) For a table activation, the table's input scale must be fixed or part of the table's key.
+*Open points for B.* (1) Resolved in `execute_layer`: the ReLU is applied to the int32 accumulator before the requantize, which is exact, and the requantization scale is the one of the activated tensor (the largest entry cannot be a discarded negative). (2) int16 $times$ int16 products overflow the int32 accumulator; decide the supported width pairs first. `execute_layer` is int8 only, with $K <= 66560$ so that $K dot 127^2 < 2^30$. (3) For a table activation, the table's input scale must be fixed or part of the table's key.
 
 #pagebreak()
 = The layer as one operation: `execute_layer`, workflow B
 
-The diagram follows one layer from the float inputs to the next layer's input, with the numbers of the example above. The five integer tensors in the last box are the outputs of the device operations. The columns of the proof trace are built by the host from them (next part).
+The diagram follows one layer from the float inputs to the next layer's input, with the numbers of the example above, in the order the device operation `zkml::prim::execute_layer` runs it: quantize, matmul, ReLU on the integer accumulator, requantize. The tensors in the last box are the outputs of the operation. The columns of the proof trace are built by the host from them (next part), and the section after the trace describes how the device computes each step.
 
 #grid(columns: (1fr, 1fr), column-gutter: 8pt,
 [#block(breakable: false, width: 100%, stroke: 0.6pt, radius: 4pt, inset: 7pt, fill: luma(248))[
@@ -286,19 +286,19 @@ The diagram follows one layer from the float inputs to the next layer's input, w
 ]
 #align(center)[#text(size: 15pt)[#sym.arrow.b]]
 #block(breakable: false, width: 100%, stroke: 0.6pt, radius: 4pt, inset: 7pt, fill: luma(248))[
-  #text(weight: "bold", size: 9.5pt)[`pot_requantize_per_tensor` (dynamic)]
+  #text(weight: "bold", size: 9.5pt)[integer activation on the accumulator: ReLU]
   #v(2pt)
-  absmax $= 5088$, bit length $13$, $s = 13 - 7 = 6$. Check: $5088 / 2^5 = 159 > 127$, so $s = 5$ is too small. $k_"out" = 12 - 6 = 6$, scaler $2^(-6)$. \ $q_"out" = "round"("acc" / 64)$, ties to even ($5088 / 64 = 79.5 arrow.r 80$)#text(size: 8.5pt)[$ mat(
-    "−45", "−58", "72";
-    "80", "−31", "−13";
-    "−28", "74", "−2"
+  $"acc"' = max(0, "acc")$, scale unchanged ($2^(-12)$). The accumulator itself is also returned, before the activation.#text(size: 8.5pt)[$ mat(
+    "0", "0", "4616";
+    "5088", "0", "0";
+    "0", "4758", "0"
 ) $]
 ]
 #align(center)[#text(size: 15pt)[#sym.arrow.b]]
 #block(breakable: false, width: 100%, stroke: 0.6pt, radius: 4pt, inset: 7pt, fill: luma(248))[
-  #text(weight: "bold", size: 9.5pt)[integer activation: ReLU]
+  #text(weight: "bold", size: 9.5pt)[requantize $"acc"'$ (dynamic, per tensor)]
   #v(2pt)
-  $"out" = max(0, q_"out")$, scale unchanged, $k = 6$#text(size: 8.5pt)[$ mat(
+  absmax $= 5088$, bit length $13$, $s = 13 - 7 = 6$. Check: $5088 / 2^5 = 159 > 127$, so $s = 5$ is too small. $k_"out" = 12 - 6 = 6$, scaler $2^(-6)$. \ $"out" = "round"("acc"' / 64)$, ties to even ($5088 / 64 = 79.5 arrow.r 80$)#text(size: 8.5pt)[$ mat(
     "0", "0", "72";
     "80", "0", "0";
     "0", "74", "0"
@@ -306,21 +306,67 @@ The diagram follows one layer from the float inputs to the next layer's input, w
 ]
 #align(center)[#text(size: 15pt)[#sym.arrow.b]]
 #block(breakable: false, width: 100%, stroke: 0.6pt, radius: 4pt, inset: 7pt, fill: rgb("#eef7ee"))[
-  #text(weight: "bold", size: 9.5pt)[Outputs of the device operations (all integer, the host builds the trace from them)]
+  #text(weight: "bold", size: 9.5pt)[Outputs of `execute_layer` (all integer, the host builds the trace from them)]
   #v(2pt)
   #table(columns: (auto, 1fr, auto), inset: 4pt, stroke: 0.4pt + luma(170), align: (left, left, left),
   [*tensor*], [*values*], [*scalers*],
-  [`x_q` int8], [$((16,-40,24),(64,3,-19),(-10,35,29))$], [$32$ ($k_x = 5$)],
-  [`W_q` int8], [$((51,-26,13),(38,102,-64),(-90,32,77))$], [$128$ ($k_w = 7$)],
-  [`acc` int32], [$((-2864,-3728,4616),(5088,-1966,-823),(-1790,4758,-137))$], [scale $2^(-12)$],
-  [`q_out` int8], [$((-45,-58,72),(80,-31,-13),(-28,74,-2))$], [$2^(-6)$ ($s = 6$)],
-  [`out` int8 (ReLU)], [$((0,0,72),(80,0,0),(0,74,0))$], [$k_"out" = 6$]
+  [`out` uint8 (sign-magnitude bytes)], [$((0,0,72),(80,0,0),(0,74,0))$], [$2^6$ ($k_"out" = 6$)],
+  [`acc` uint32 (raw sign-magnitude int32)], [$((-2864,-3728,4616),$ \ $(5088,-1966,-823),$ \ $(-1790,4758,-137))$ \ for example $-2864$ is `0x80000B30`], [scale $2^(-12)$],
+  [`scaler_x`, `scaler_w`, `scaler_out`], [$32, 128, 2^(-6)$ (fp32 tensors of one element)], []
 )
+  #v(2pt)
+  #text(size: 8.5pt)[`x_q` and `W_q` are not outputs for now: the host recomputes them from `x` and `W` (a linear pass, unlike the matmul), and they are the $q$ columns of C1 and C2. They can be added as outputs later.]
 ]
+
+= How the device computes it
+
+`zkml::prim::execute_layer(x, w, activation)` runs the whole layer on one Tensix core, with $x$ of shape $[M, K]$ and $W$ of shape $[K, N]$ in fp32. It returns `(out, acc, scaler_x, scaler_w, scaler_out)`. Everything stays in L1 between the stages; the dataflow kernels only read $x$, $W$ and write the outputs (in batches, one flush per batch).
+
+== The stages
+
+#table(columns: (auto, 1fr), inset: 4pt, stroke: 0.4pt + luma(170), align: (left, left),
+  [*stage*], [*what the compute kernel does*],
+  [quantize `x`, `W` (the same code twice)], [Pass 1: `copy_tile` into DST, absmax of every tile with one SFPSWAP per row pair against a running max and min (the 32 lanes are reduced at the end); the scaler $2^k$ stays in an SFPU register (LReg7) and is packed to its output tensor. Pass 2: multiply by $2^k$, add the magic number $1.5 dot 2^23$ (this rounds half to even in the fp32 adder), subtract its bits, one `SFPCAST` to sign-magnitude, and the *Int8 packer* writes sign + 7 magnitude bits into an Int8 circular buffer. That is exactly the format of the FPU's int8 type, so no conversion is needed.],
+  [matmul], [The FPU multiplies the two Int8 buffers at HiFi4 into an int32 accumulator in DST, exact. Output blocks of 4 tiles: the K loop, then one short SFPU sweep, then the packer drains the block while the FPU starts the next one.],
+  [activation + absmax], [The sweep after each block folds the integer absmax of the activated accumulator into LReg7 (one SFPSWAP per row; with ReLU a negative entry never beats the running max, so there is no masking). The tile itself is not modified.],
+  [`acc`], [The packer writes the block as Int32 into the resident accumulator buffer, which the writer returns as `acc`: the raw sign-magnitude bits, no conversion (the FPU's native format).],
+  [requantize], [Scaler from the integer absmax, then one integer sweep over the accumulator (below), packed as UInt8 to `out`.]
+)
+
+== Why `acc` is sign-magnitude
+
+The FPU accumulates in sign-magnitude (bit 31 is the sign, bits 0 to 30 the magnitude): $-2864$ is `0x80000B30`. The first version of the operation converted every accumulator tile to two's complement on the SFPU before packing it, and converted back to fp32 for the requantization. Returning the raw bits removes that conversion, and the requantization works on the magnitude directly. The host decodes `acc` as $(-1)^"sign" dot "mag"$, which is as easy as two's complement. Because the accumulator never goes through fp32, there is no 24-bit limit: $K <= 66560$ (the sum stays below $2^30$) instead of 1024.
+
+== The integer requantizer
+
+Let $A$ be the largest magnitude of the activated accumulator (a lane-wise maximum, then a reduction over the 32 lanes, all integers).
++ Bit length $t = 32 - "clz"(A)$ (one `SFPLZ`) and $k = 7 - t$, so $A dot 2^k < 128$. For $k >= 0$ this is already $<= 127$. For $k < 0$ the quotient is a fraction that may lie in $(127, 128)$: if $A > 127 dot 2^(-k)$ then $k$ becomes $k - 1$. Here $A = 5088$, $t = 13$, $k = -6$, $127 dot 64 = 8128 >= 5088$, so $k = -6$ ($k_"out" = 12 - 6 = 6$ in the example's convention, $s = -k$). For $A = 0$ the scaler is $2^127$.
++ The fp32 scaler tile $2^k$ is built from the exponent bits (`SFPSETEXP`) and packed to `scaler_out`.
++ Per element, with $K_24 = 24 + k$ in LReg7: $z = "mag" << K_24$ puts $q$ in bits 24 to 30 and the fraction below it (the sign bit shifts out, so no mask is needed), then $q = (z + "0x7FFFFF" + ((z >> 24) and 1)) >> 24$, which is round half to even. Without ReLU the sign comes back as bit 7 of the byte, but only if $q != 0$ (no negative zero); with ReLU a negative accumulator is set to 0 first. Written as hand-made SFPU instructions it is 11 (ReLU) or 13 instructions per 4 rows $times$ 8 lanes, without branches.
+
+Example, the element $5088$ ($k = -6$, $K_24 = 18$): $z = 5088 dot 2^18 = 79.5 dot 2^24$, the integer part $79$ is odd, so the rounding adds $"0x7FFFFF" + 1 = "0x800000"$ and $q = 80$ (the tie goes to the even neighbour). The element $4616$: $z = 72.125 dot 2^24$, $q = 72$. The element $-2864$ with ReLU: set to 0.
+
+== What it costs
+
+One core, device profiler cycles at 1.35 GHz, $x$ of $128 times 256$, $W$ of $256 times 128$ (Mt, Kt, Nt = 4, 8, 4), ReLU. Per zone, from the first version to now (the details and the intermediate variants are in `benchmarks/execute_layer_2s_vs_sm_acc`):
+
+#align(center)[#text(size: 8.5pt)[#table(columns: 4, inset: 4pt, stroke: 0.4pt + luma(170), align: (left, right, right, right),
+  [*zone*], [*first version*], [*now*], [*change*],
+  [quantize `x` (32 tiles)], [26577], [21211], [−20%],
+  [quantize `W` (32 tiles)], [24954], [19326], [−23%],
+  [matmul + activation sweep], [19331], [10755], [−44%],
+  [requantize], [12406], [8380], [−32%],
+  [*sum*], [*83268*], [*59672*], [*−28%*],
+  [host time per call (cached program)], [62.5 µs], [45.6 µs], [−27%]
+)]]
+
+The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up. The activation sweep does not overlap with the matmul of the next block.
+
+Not covered by this operation yet: more than one core, a pre-quantized weight input, `q_x` and `q_w` as outputs, bf16/fp16 inputs (an Int8 buffer cannot share a program with a bf16 one), and activations other than ReLU.
 
 = Trace the host builds and its constraints
 
-The host adds the remainders, the significand and exponent of each float, the flags and the lookup values to the five tensors above. All values are residues mod $p = 2^31 - 1$ (a negative $v$ is stored as $p - |v|$). The tables show the signed values for readability.
+The host adds the remainders, the significand and exponent of each float, the flags and the lookup values to the tensors above (and recomputes $x_q$, $W_q$). All values are residues mod $p = 2^31 - 1$ (a negative $v$ is stored as $p - |v|$). The tables show the signed values for readability.
 
 == C1: quantize `x` (9 rows)
 
@@ -371,59 +417,59 @@ Constraints:
 + Links: $a_t$ is the $q$ column of C1 at $(i, t)$ and $b_t$ is the $q$ column of C2 at $(t, j)$ (lookup into the other component, same values).
 + Public values: $k_"acc" = k_x + k_w = 12$.
 
-== C4: requantize (9 rows plus one maximality row)
-
-#align(center)[#text(size: 7.5pt)[#table(columns: 8, inset: 3.5pt, stroke: 0.4pt + luma(170), align: center,
-  [*i*], [*acc*], [*q_out*], [*R*], [*R + 32*], [*tie*], [*is_max*], [*q_out mod p*],
-  [0], [−2864], [−45], [16], [48], [0], [0], [2147483602],
-  [1], [−3728], [−58], [−16], [16], [0], [0], [2147483589],
-  [2], [4616], [72], [8], [40], [0], [0], [72],
-  [3], [5088], [80], [−32], [0], [1], [1], [80],
-  [4], [−1966], [−31], [18], [50], [0], [0], [2147483616],
-  [5], [−823], [−13], [9], [41], [0], [0], [2147483634],
-  [6], [−1790], [−28], [2], [34], [0], [0], [2147483619],
-  [7], [4758], [74], [22], [54], [0], [0], [74],
-  [8], [−137], [−2], [−9], [23], [0], [0], [2147483645]
-)]]
-
-Constraints:
-+ $"acc" = q_"out" dot 2^s + R$ with $s = 6$ and $2^s = 64$ from the lookup.
-+ $|R| <= 2^(s-1) = 32$: range check of $R + 32$ and $32 - R$ ($R + 32$ is in the table above).
-+ Tie: if $|R| = 32$ then $q_"out"$ is even (row 3: $R = -32$, $q_"out" = 80$).
-+ $|q_"out"| <= 127$.
-+ Maximality of $s$ (extra row for the `is_max` element, row 3): $|"acc"| = 5088 = 159 dot 2^5 + 0$, and $159 >= 128$, so $s - 1 = 5$ would have overflowed. Skipped when $s = 0$.
-+ $k_"out" = k_"acc" - s = 12 - 6 = 6$ (public).
-+ Link: `acc` is the $"acc"$ column of C3.
-
-== C5: integer ReLU (9 rows)
+== C4: integer ReLU on the accumulator (9 rows)
 
 #align(center)[#text(size: 7.5pt)[#table(columns: 5, inset: 3.5pt, stroke: 0.4pt + luma(170), align: center,
-  [*i*], [*q*], [*neg*], [*a*], [*out*],
-  [0], [−45], [1], [45], [0],
-  [1], [−58], [1], [58], [0],
-  [2], [72], [0], [72], [72],
-  [3], [80], [0], [80], [80],
-  [4], [−31], [1], [31], [0],
-  [5], [−13], [1], [13], [0],
-  [6], [−28], [1], [28], [0],
-  [7], [74], [0], [74], [74],
-  [8], [−2], [1], [2], [0]
+  [*i*], [*acc*], [*neg*], [*a*], [*acc'*],
+  [0], [−2864], [1], [2864], [0],
+  [1], [−3728], [1], [3728], [0],
+  [2], [4616], [0], [4616], [4616],
+  [3], [5088], [0], [5088], [5088],
+  [4], [−1966], [1], [1966], [0],
+  [5], [−823], [1], [823], [0],
+  [6], [−1790], [1], [1790], [0],
+  [7], [4758], [0], [4758], [4758],
+  [8], [−137], [1], [137], [0]
 )]]
 
 Constraints:
 + $"neg" dot ("neg" - 1) = 0$.
-+ $q = (1 - 2 dot "neg") dot a$ and $0 <= a <= 127$ (range check). The sign is then determined by $a$ and $q$, so a cheating prover cannot flip it.
-+ $"out" = (1 - "neg") dot a$.
-+ Link: $q$ is the $q_"out"$ column of C4. The $"out"$ column is the $x_q$ column of the next layer (the same cells, not a copy).
++ $"acc" = (1 - 2 dot "neg") dot a$ and $0 <= a < 2^30$ (range check, the accumulator has 31 magnitude bits and the op limits $K$ so that it stays below $2^30$). The sign is then determined by $a$ and `acc`, so a cheating prover cannot flip it.
++ $"acc"' = (1 - "neg") dot a$.
++ Link: `acc` is the $"acc"$ column of C3.
+
+== C5: requantize $"acc"'$ (9 rows plus one maximality row)
+
+#align(center)[#text(size: 7.5pt)[#table(columns: 7, inset: 3.5pt, stroke: 0.4pt + luma(170), align: center,
+  [*i*], [*acc'*], [*out*], [*R*], [*R + 32*], [*tie*], [*is_max*],
+  [0], [0], [0], [0], [32], [0], [0],
+  [1], [0], [0], [0], [32], [0], [0],
+  [2], [4616], [72], [8], [40], [0], [0],
+  [3], [5088], [80], [−32], [0], [1], [1],
+  [4], [0], [0], [0], [32], [0], [0],
+  [5], [0], [0], [0], [32], [0], [0],
+  [6], [0], [0], [0], [32], [0], [0],
+  [7], [4758], [74], [22], [54], [0], [0],
+  [8], [0], [0], [0], [32], [0], [0]
+)]]
+
+Constraints:
++ $"acc"' = "out" dot 2^s + R$ with $s = 6$ and $2^s = 64$ from the lookup.
++ $|R| <= 2^(s-1) = 32$: range check of $R + 32$ and $32 - R$ ($R + 32$ is in the table above).
++ Tie: if $|R| = 32$ then `out` is even (row 3: $R = -32$, $"out" = 80$).
++ $0 <= "out" <= 127$.
++ Maximality of $s$ (extra row for the `is_max` element, row 3): $5088 = 159 dot 2^5 + 0$, and $159 >= 128$, so $s - 1 = 5$ would have overflowed. Skipped when $s = 0$.
++ $k_"out" = k_"acc" - s = 12 - 6 = 6$ (public).
++ Link: $"acc"'$ is the $"acc"'$ column of C4. The $"out"$ column is the $x_q$ column of the next layer (the same cells, not a copy).
 
 == Tables that are not trace rows
 
-- *pow2 lookup* (preprocessed): $(e, 2^e)$ for the exponents that occur, used by C1, C2 and C4.
+- *pow2 lookup* (preprocessed): $(e, 2^e)$ for the exponents that occur, used by C1, C2 and C5.
 - *range-check tables* (preprocessed): small limbs (for example 8 or 11 bit) used to prove the bounds above.
 - *Public inputs and outputs:* $k_x = 5$, $k_w = 7$, $s = 6$, $k_"out" = 6$, the commitment to `x` and `W` (their $X$ and $E$ columns), and the commitment to the `out` column.
 
 == Final result of the host
 
 #note[
-  Layer output: $"out" = ((0,0,72),(80,0,0),(0,74,0))$ with $k_"out" = 6$. As floats, $"out" dot 2^(-6) = ((0,0,1.125),(1.25,0,0),(0,1.15625,0))$. All residues of `out` are the integers themselves, since none is negative. Trace size for this layer: 5 components of 9 rows each (plus the maximality rows), about 8 columns per quantize row, 9 for the matmul and 8 for the requantize.
+  Layer output: $"out" = ((0,0,72),(80,0,0),(0,74,0))$ with $k_"out" = 6$. As floats, $"out" dot 2^(-6) = ((0,0,1.125),(1.25,0,0),(0,1.15625,0))$. All residues of `out` are the integers themselves, since none is negative. Trace size for this layer: 5 components of 9 rows each (plus the maximality rows), about 8 columns per quantize row, 9 for the matmul, 5 for the ReLU and 7 for the requantize.
 ]
