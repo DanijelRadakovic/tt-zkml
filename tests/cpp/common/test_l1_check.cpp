@@ -108,7 +108,7 @@ protected:
     // Finds the largest last CB the check accepts and requires tt-metal to agree on both sides:
     // it runs at that size and refuses one page more.
     static void expect_same_boundary_as_tt_metal(const std::vector<CbSpec>& fixed) {
-        uint32_t lo = 0;  // accepted (the fixed CBs alone must fit)
+        uint32_t lo = 0;             // accepted (the fixed CBs alone must fit)
         uint32_t hi = max_cb_pages;  // rejected
         ASSERT_TRUE(check_accepts(with_last(fixed, lo)));
         ASSERT_FALSE(check_accepts(with_last(fixed, hi))) << "the filler leaves more than 1 MB free";

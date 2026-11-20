@@ -9,7 +9,8 @@
 //   TWOS_OWN        n in [-128, 127]: (n + 128) ^ 0x80 = the two's complement byte                (1 instruction: XOR)
 //                   a copy of the library kernel, to show that this file adds no overhead of its own
 //   SM_INT8_PACK    n in [-127, 127]: SFPCAST to sign-magnitude, the Int8 packer takes sign + 7 magnitude bits   (1)
-//   SM_UINT8_PACK   n in [-127, 127]: byte = |n| | ((n >>> 24) & 0x80), packed by the UInt8 packer     (4: abs, shift, and, or)
+//   SM_UINT8_PACK   n in [-127, 127]: byte = |n| | ((n >>> 24) & 0x80), packed by the UInt8 packer     (4: abs, shift,
+//   and, or)
 //
 // TWOS_LIB is the library function itself (quant_int8_tile), not defined here.
 
@@ -33,8 +34,8 @@ namespace zkml_bench {
 using namespace ckernel;
 using namespace ckernel::sfpu;
 
-// Like _rne_clamp_init_ in ckernel_sfpu_quant.h but with the lower clamp LO as a parameter. T = LREG2 holds the zero point
-// on entry and -bits(t) (+128 with BIAS) on exit; LREG5, LREG12 and LREG13 are loaded as in the library.
+// Like _rne_clamp_init_ in ckernel_sfpu_quant.h but with the lower clamp LO as a parameter. T = LREG2 holds the zero
+// point on entry and -bits(t) (+128 with BIAS) on exit; LREG5, LREG12 and LREG13 are loaded as in the library.
 template <int LO, int HI, bool BIAS>
 inline void rne_clamp_init() {
     constexpr int IMM12_MASK = 0xfff;
@@ -49,7 +50,8 @@ inline void rne_clamp_init() {
     TTI_SFPCONFIG(0, p_sfpu::LREG12, 0);
     TTI_SFPIADD(HI & IMM12_MASK, p_sfpu::LREG2, p_sfpu::LREG0, sfpi::SFPIADD_MOD1_ARG_IMM | sfpi::SFPIADD_MOD1_CC_NONE);
     TTI_SFPCONFIG(0, p_sfpu::LREG13, 0);
-    TTI_SFPIADD(0, p_sfpu::LCONST_0, p_sfpu::LREG2, sfpi::SFPIADD_MOD1_ARG_2SCOMP_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
+    TTI_SFPIADD(
+        0, p_sfpu::LCONST_0, p_sfpu::LREG2, sfpi::SFPIADD_MOD1_ARG_2SCOMP_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
     if constexpr (BIAS) {
         TTI_SFPIADD(-LO, p_sfpu::LREG2, p_sfpu::LREG2, sfpi::SFPIADD_MOD1_ARG_IMM | sfpi::SFPIADD_MOD1_CC_NONE);
     }
@@ -83,9 +85,9 @@ inline void quant_init(const uint zero_point) {
         TTI_SFPCAST(p_sfpu::LREG0, p_sfpu::LREG0, sfpi::SFPCAST_MOD1_INT32_TO_SM32);  // sign bit 31 + magnitude
     } else {
         TTI_SFPCAST(p_sfpu::LREG0, p_sfpu::LREG1, sfpi::SFPCAST_MOD1_INT32_ABS);  // LREG1 = |n|
-        TTI_SFPSHFT((-24) & 0xfff, p_sfpu::LREG0, p_sfpu::LREG0, 1);               // LREG0 = n >>> 24 (0xFF if n < 0)
-        TTI_SFPAND(0, p_sfpu::LREG3, p_sfpu::LREG0, 0);                            // LREG0 &= 0x80
-        TTI_SFPOR(0, p_sfpu::LREG1, p_sfpu::LREG0, 0);                             // LREG0 |= |n|
+        TTI_SFPSHFT((-24) & 0xfff, p_sfpu::LREG0, p_sfpu::LREG0, 1);              // LREG0 = n >>> 24 (0xFF if n < 0)
+        TTI_SFPAND(0, p_sfpu::LREG3, p_sfpu::LREG0, 0);                           // LREG0 &= 0x80
+        TTI_SFPOR(0, p_sfpu::LREG1, p_sfpu::LREG0, 0);                            // LREG0 |= |n|
     }
 }
 

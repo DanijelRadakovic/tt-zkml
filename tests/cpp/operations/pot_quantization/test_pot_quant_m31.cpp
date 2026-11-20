@@ -105,8 +105,24 @@ TEST_F(PotQuantM31, Int32EdgeValuesAndTileCounts) {
         std::mt19937 gen(tiles);
         for (size_t i = 0; i < q.size(); i++) {
             // Rotate through the extremes of every width, then random values of any magnitude up to 2^30 - 1.
-            static const int32_t edge[] = {0, 1, -1, 127, -127, 32767, -32767, 1073741823, -1073741823, 1073741822,
-                                           -1073741822, 536870912, -536870912, 65536, -65536, 2, -2};
+            static const int32_t edge[] = {
+                0,
+                1,
+                -1,
+                127,
+                -127,
+                32767,
+                -32767,
+                1073741823,
+                -1073741823,
+                1073741822,
+                -1073741822,
+                536870912,
+                -536870912,
+                65536,
+                -65536,
+                2,
+                -2};
             q[i] = (i % 3 == 0) ? edge[(i / 3) % (sizeof edge / sizeof edge[0])]
                                 : static_cast<int32_t>(gen() % 2147483647u) / 2 * ((gen() & 1) ? 1 : -1);
         }
@@ -145,8 +161,11 @@ TEST_F(PotQuantM31, AfterQuantizer) {
         BitWidth width;
         DataType out_dt;
     };
-    for (const Case c : {Case{BitWidth::Bits8, DataType::INT8}, Case{BitWidth::Bits8, DataType::INT32},
-                         Case{BitWidth::Bits16, DataType::INT32}, Case{BitWidth::Bits32, DataType::INT32}}) {
+    for (const Case c :
+         {Case{BitWidth::Bits8, DataType::INT8},
+          Case{BitWidth::Bits8, DataType::INT32},
+          Case{BitWidth::Bits16, DataType::INT32},
+          Case{BitWidth::Bits32, DataType::INT32}}) {
         {
             tt::tt_metal::TensorSpec spec(
                 Shape({H, W}),
@@ -162,8 +181,12 @@ TEST_F(PotQuantM31, AfterQuantizer) {
                 q = quantized.to_vector<int32_t>();
             }
             char label[48];
-            std::snprintf(label, sizeof label, "quantizer %u bits %s", c.width.bits(),
-                          c.out_dt == DataType::INT8 ? "int8" : "int32");
+            std::snprintf(
+                label,
+                sizeof label,
+                "quantizer %u bits %s",
+                c.width.bits(),
+                c.out_dt == DataType::INT8 ? "int8" : "int32");
             EXPECT_TRUE(check_residues(label, q, zkml::prim::pot_quant_m31(quantized))) << label;
         }
     }
@@ -176,11 +199,12 @@ TEST_F(PotQuantM31, FullRangeDoesNotFitM31) {
     std::vector<float> x(H * W, 0.5f);
     x[3] = 2147483520.0f;  // the largest fp32 below 2^31
     tt::tt_metal::TensorSpec spec(
-        Shape({H, W}), tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+        Shape({H, W}),
+        tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
     Tensor in = Tensor::from_vector(x, spec, dev());
     for (auto range : {zkml::prim::QuantRange::Full, zkml::prim::QuantRange::M31}) {
-        auto result = zkml::prim::pot_quantize_per_tensor(
-            in, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2, range);
+        auto result =
+            zkml::prim::pot_quantize_per_tensor(in, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2, range);
         const auto q = std::get<0>(result).to_vector<int32_t>();
         const auto m = zkml::prim::pot_quant_m31(std::get<0>(result)).to_vector<uint32_t>();
         const bool all_read_back = [&] {
@@ -220,50 +244,52 @@ TEST_F(PotQuantM31, CrossCheckWithRust) {
         return v;
     };
     for (uint32_t bits : {8u, 16u, 32u}) {
-      for (const auto range : {zkml::prim::QuantRange::Full, zkml::prim::QuantRange::M31}) {
-        const std::string b = "b" + std::to_string(bits) + (range == zkml::prim::QuantRange::Full ? "_full" : "_m31");
-        std::ifstream meta(dir + "/" + b + ".meta");
-        uint32_t H = 0, W = 0, file_bits = 0, argmax = 0;  // argmax is in the file, the device no longer returns it
-        int32_t k = 0;
-        ASSERT_TRUE(static_cast<bool>(meta >> H >> W >> file_bits >> k >> argmax)) << b;
-        ASSERT_EQ(file_bits, bits);
-        const auto x = load(b + ".x.f32", 0.0f);
-        const auto want_q = load(b + ".q.i32", int32_t{0});
-        const auto want_m31 = load(b + ".m31.u32", uint32_t{0});
-        ASSERT_EQ(x.size(), size_t{H} * W);
+        for (const auto range : {zkml::prim::QuantRange::Full, zkml::prim::QuantRange::M31}) {
+            const std::string b =
+                "b" + std::to_string(bits) + (range == zkml::prim::QuantRange::Full ? "_full" : "_m31");
+            std::ifstream meta(dir + "/" + b + ".meta");
+            uint32_t H = 0, W = 0, file_bits = 0, argmax = 0;  // argmax is in the file, the device no longer returns it
+            int32_t k = 0;
+            ASSERT_TRUE(static_cast<bool>(meta >> H >> W >> file_bits >> k >> argmax)) << b;
+            ASSERT_EQ(file_bits, bits);
+            const auto x = load(b + ".x.f32", 0.0f);
+            const auto want_q = load(b + ".q.i32", int32_t{0});
+            const auto want_m31 = load(b + ".m31.u32", uint32_t{0});
+            ASSERT_EQ(x.size(), size_t{H} * W);
 
-        struct Case {
-            DataType in_dt;
-            DataType out_dt;
-        };
-        std::vector<Case> cases = {{DataType::FLOAT32, DataType::INT32}, {DataType::BFLOAT16, DataType::INT32}};
-        if (bits == 8) {
-            cases.push_back({DataType::BFLOAT16, DataType::INT8});
-        }
-        for (const auto& c : cases) {
-            tt::tt_metal::TensorSpec spec(
-                Shape({H, W}),
-                tt::tt_metal::TensorLayout(c.in_dt, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
-            Tensor in = Tensor::from_vector(x, spec, dev());  // the values are bf16-exact: both dtypes see the same x
-            auto [quantized, scaler_tensor] = zkml::prim::pot_quantize_per_tensor(
-                in, BitWidth(static_cast<BitWidth::Value>(bits)), c.out_dt, std::nullopt, 16, 2, range);
-            std::vector<int32_t> q;
-            if (c.out_dt == DataType::INT8) {
-                auto v = quantized.to_vector<int8_t>();
-                q.assign(v.begin(), v.end());
-            } else {
-                q = quantized.to_vector<int32_t>();
+            struct Case {
+                DataType in_dt;
+                DataType out_dt;
+            };
+            std::vector<Case> cases = {{DataType::FLOAT32, DataType::INT32}, {DataType::BFLOAT16, DataType::INT32}};
+            if (bits == 8) {
+                cases.push_back({DataType::BFLOAT16, DataType::INT8});
             }
-            const float scaler = scaler_tensor.to_vector<float>().at(0);
-            const auto m31 = zkml::prim::pot_quant_m31(quantized).to_vector<uint32_t>();  // injective for M31 only
-            const std::string label = b + (c.in_dt == DataType::FLOAT32 ? " f32" : " bf16") +
-                                      (c.out_dt == DataType::INT8 ? " int8" : " int32");
-            EXPECT_EQ(scaler, std::ldexp(1.0f, k)) << label;
-            EXPECT_EQ(q, want_q) << label;
-            if (range == zkml::prim::QuantRange::M31) {
-                EXPECT_EQ(m31, want_m31) << label;
+            for (const auto& c : cases) {
+                tt::tt_metal::TensorSpec spec(
+                    Shape({H, W}),
+                    tt::tt_metal::TensorLayout(c.in_dt, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+                Tensor in =
+                    Tensor::from_vector(x, spec, dev());  // the values are bf16-exact: both dtypes see the same x
+                auto [quantized, scaler_tensor] = zkml::prim::pot_quantize_per_tensor(
+                    in, BitWidth(static_cast<BitWidth::Value>(bits)), c.out_dt, std::nullopt, 16, 2, range);
+                std::vector<int32_t> q;
+                if (c.out_dt == DataType::INT8) {
+                    auto v = quantized.to_vector<int8_t>();
+                    q.assign(v.begin(), v.end());
+                } else {
+                    q = quantized.to_vector<int32_t>();
+                }
+                const float scaler = scaler_tensor.to_vector<float>().at(0);
+                const auto m31 = zkml::prim::pot_quant_m31(quantized).to_vector<uint32_t>();  // injective for M31 only
+                const std::string label = b + (c.in_dt == DataType::FLOAT32 ? " f32" : " bf16") +
+                                          (c.out_dt == DataType::INT8 ? " int8" : " int32");
+                EXPECT_EQ(scaler, std::ldexp(1.0f, k)) << label;
+                EXPECT_EQ(q, want_q) << label;
+                if (range == zkml::prim::QuantRange::M31) {
+                    EXPECT_EQ(m31, want_m31) << label;
+                }
             }
         }
-      }
     }
 }

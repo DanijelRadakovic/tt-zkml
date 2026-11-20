@@ -96,7 +96,7 @@ void kernel_main() {
     static_assert(
         DST_TILES <= ckernel::get_dest_max_tiles<DST_SYNC_MODE, DST_ACCUM_MODE, ckernel::DstTileShape::Tile32x32>(),
         "DST_TILES exceeds one DST section");
-    
+
     // Both passes use every DST slot for input: the scaler of pass 2 is in LReg7.
     constexpr uint32_t absmax_dst_slots = DST_TILES;
     constexpr zkml::prim::QuantRange range =

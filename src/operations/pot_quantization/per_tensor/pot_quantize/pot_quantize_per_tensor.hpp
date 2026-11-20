@@ -41,7 +41,7 @@ namespace zkml::prim {
  *        - Must be at least 1. It is capped at the tile count of the input.
  *        - A smaller batch lets compute start sooner.
  *        - A larger batch keeps the reader ahead of compute.
- * @param cb_in_size_factor Size of the input CB in batches. 
+ * @param cb_in_size_factor Size of the input CB in batches.
  *        The CB holds `noc_read_tile_batch_size * cb_in_size_factor` tiles.
  *        - Must be at least 2, so the reader can fill one batch while compute drains the other.
  *        - A larger factor lets the reader run further ahead when reads are slow.

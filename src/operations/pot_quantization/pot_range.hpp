@@ -46,7 +46,6 @@ constexpr int64_t pot_qmax(uint32_t bits, QuantRange range = QuantRange::Full) {
     return (int64_t{1} << pot_magnitude_bits(bits, range)) - 1;
 }
 
-static_assert(
-    pot_qmax(32, QuantRange::M31) <= (int64_t{m31_modulus} - 1) / 2, "Q must fit the signed range of M31");
+static_assert(pot_qmax(32, QuantRange::M31) <= (int64_t{m31_modulus} - 1) / 2, "Q must fit the signed range of M31");
 
 }  // namespace zkml::prim

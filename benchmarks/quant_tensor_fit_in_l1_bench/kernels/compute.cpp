@@ -176,9 +176,12 @@ void kernel_main() {
                 for (uint32_t i = 0; i < n; i++) {
                     clamp_tile(i, q_min_bits, q_max_bits);
                 }
-                typecast_tile_init<static_cast<uint32_t>(DataFormat::Float32), static_cast<uint32_t>(DataFormat::Int32)>();
+                typecast_tile_init<
+                    static_cast<uint32_t>(DataFormat::Float32),
+                    static_cast<uint32_t>(DataFormat::Int32)>();
                 for (uint32_t i = 0; i < n; i++) {
-                    typecast_tile<static_cast<uint32_t>(DataFormat::Float32), static_cast<uint32_t>(DataFormat::Int32)>(i);
+                    typecast_tile<static_cast<uint32_t>(DataFormat::Float32), static_cast<uint32_t>(DataFormat::Int32)>(
+                        i);
                 }
             }
             reconfig_data_format_srca(cb_scale_id, cb_in_id);

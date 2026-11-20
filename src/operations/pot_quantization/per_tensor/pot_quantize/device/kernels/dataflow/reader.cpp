@@ -53,7 +53,7 @@ void kernel_main() {
     const uint32_t num_tiles = get_arg_val<uint32_t>(1);
 
     constexpr uint32_t BATCH_SIZE = get_compile_time_arg_val(0);  // 1 .. num_tiles, set on the host
-    constexpr uint32_t num_passes = 2;  // absmax, then quantize
+    constexpr uint32_t num_passes = 2;                            // absmax, then quantize
 
     constexpr auto in_args = TensorAccessorArgs<1>();
     const auto in = TensorAccessor(in_args, in_addr);

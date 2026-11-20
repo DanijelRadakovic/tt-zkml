@@ -53,7 +53,7 @@ constexpr uint32_t dst_scale = DST_TILES - 1;
 constexpr uint32_t magnitude_bits = 7;  // Q = 127
 
 constexpr uint32_t c_x = tt::CBIndex::c_0, c_w = tt::CBIndex::c_1;
-constexpr uint32_t c_qx = tt::CBIndex::c_2, c_qw = tt::CBIndex::c_3;      // UInt8: the packer
+constexpr uint32_t c_qx = tt::CBIndex::c_2, c_qw = tt::CBIndex::c_3;        // UInt8: the packer
 constexpr uint32_t c_qx_i8 = tt::CBIndex::c_4, c_qw_i8 = tt::CBIndex::c_5;  // Int8: the FPU
 constexpr uint32_t c_acc = tt::CBIndex::c_6;
 constexpr uint32_t c_out = tt::CBIndex::c_16;
@@ -88,8 +88,8 @@ ALWI void scale_pass(uint32_t tiles) {
     scaler.push_back(1);
 }
 
-// Pass 2: quantize the `tiles` resident tiles of `cb_in` with the scaler in LReg7 into sign-magnitude bytes in `cb_out`, a ring of
-// `out_pages` pages (the whole tensor for q_x and q_w).
+// Pass 2: quantize the `tiles` resident tiles of `cb_in` with the scaler in LReg7 into sign-magnitude bytes in
+// `cb_out`, a ring of `out_pages` pages (the whole tensor for q_x and q_w).
 template <uint32_t cb_in, uint32_t cb_out>
 ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     CircularBuffer in(cb_in), out(cb_out);

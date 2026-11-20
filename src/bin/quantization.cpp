@@ -86,8 +86,7 @@ PotQuant quantize_pot(const std::vector<float>& x) {
 // see what an Int16 or Int32 accumulator would have to hold.
 // ---------------------------------------------------------------------------
 
-std::vector<int64_t> matmul_int(
-    const std::vector<int32_t>& a, const std::vector<int32_t>& b, int M, int K, int N) {
+std::vector<int64_t> matmul_int(const std::vector<int32_t>& a, const std::vector<int32_t>& b, int M, int K, int N) {
     std::vector<int64_t> c(static_cast<size_t>(M) * N, 0);
     for (int m = 0; m < M; m++) {
         for (int kk = 0; kk < K; kk++) {

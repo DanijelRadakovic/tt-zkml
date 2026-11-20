@@ -98,7 +98,9 @@ int main(int argc, char** argv) {
             std::vector<float> x(static_cast<size_t>(H) * W);
             uint64_t s = 0x9E3779B97F4A7C15ull;
             for (auto& v : x) {  // xorshift64*, uniform in [-8, 8), bf16-exact
-                s ^= s >> 12; s ^= s << 25; s ^= s >> 27;
+                s ^= s >> 12;
+                s ^= s << 25;
+                s ^= s >> 27;
                 const float u = static_cast<float>((s * 0x2545F4914F6CDD1Dull) >> 40) / 16777216.0f;
                 uint32_t b;
                 const float f = u * 16.0f - 8.0f;
@@ -107,7 +109,8 @@ int main(int argc, char** argv) {
                 std::memcpy(&v, &b, 4);
             }
             tt::tt_metal::TensorSpec spec(
-                Shape({H, W}), tt::tt_metal::TensorLayout(DataType::BFLOAT16, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+                Shape({H, W}),
+                tt::tt_metal::TensorLayout(DataType::BFLOAT16, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
             Tensor in = Tensor::from_vector(x, spec, dev.get());
             const DataType out_dt = DataType::INT32;
 
@@ -132,8 +135,9 @@ int main(int argc, char** argv) {
 
             const double n = static_cast<double>(x.size());
             auto row = [&](const char* op, double ms) {
-                csv += std::to_string(bits) + "," + std::to_string(t) + "," + std::to_string(x.size()) + "," + op + "," +
-                       std::to_string(ms) + "," + std::to_string(n / (ms * 1e3)) + "," + std::to_string(ms * 1e6 / t) + "\n";
+                csv += std::to_string(bits) + "," + std::to_string(t) + "," + std::to_string(x.size()) + "," + op +
+                       "," + std::to_string(ms) + "," + std::to_string(n / (ms * 1e3)) + "," +
+                       std::to_string(ms * 1e6 / t) + "\n";
             };
             row("quantize", q_ms);
             row("to_m31", m_ms);

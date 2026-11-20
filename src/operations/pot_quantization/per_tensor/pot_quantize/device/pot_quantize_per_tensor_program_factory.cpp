@@ -64,7 +64,8 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
         {cb_out, out_cb_pages, out_tile_bytes},
         {cb_scale_out, 1, scale_tile_bytes},
     };
-    zkml::common::check_if_cbs_can_fit_in_l1(input.device(), cbs, "Lower noc_read_tile_batch_size or cb_in_size_factor.");
+    zkml::common::check_if_cbs_can_fit_in_l1(
+        input.device(), cbs, "Lower noc_read_tile_batch_size or cb_in_size_factor.");
 
     log_debug(
         tt::LogOp,

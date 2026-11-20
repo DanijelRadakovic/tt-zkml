@@ -45,11 +45,16 @@ int main(int argc, char** argv) {
     std::mt19937 rng(7);
     std::uniform_real_distribution<float> d(-2.f, 2.f);
     std::vector<float> x(static_cast<size_t>(M) * K), w(static_cast<size_t>(K) * N);
-    for (auto& v : x) v = d(rng);
-    for (auto& v : w) v = d(rng);
+    for (auto& v : x) {
+        v = d(rng);
+    }
+    for (auto& v : w) {
+        v = d(rng);
+    }
     auto spec = [&](uint32_t h, uint32_t wd) {
         return tt::tt_metal::TensorSpec(
-            Shape({h, wd}), tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+            Shape({h, wd}),
+            tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
     };
     Tensor tx = Tensor::from_vector(x, spec(M, K), dev.get());
     Tensor tw = Tensor::from_vector(w, spec(K, N), dev.get());
@@ -76,7 +81,14 @@ int main(int argc, char** argv) {
             runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count() / iters);
         }
         std::sort(runs.begin(), runs.end());
-        std::printf("wall Mt %u Kt %u Nt %u %s: %.1f us per call (median of 5 x %d calls)\n", Mt, Kt, Nt, argv[5], runs[2], iters);
+        std::printf(
+            "wall Mt %u Kt %u Nt %u %s: %.1f us per call (median of 5 x %d calls)\n",
+            Mt,
+            Kt,
+            Nt,
+            argv[5],
+            runs[2],
+            iters);
     }
     dev->close();
     return 0;

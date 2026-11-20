@@ -50,7 +50,8 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
     const uint32_t out_cb_pages = 2 * dst_tiles;
     const uint32_t out_tiles = Mt * Nt;
 
-    // In the order the program creates them (the check repeats tt-metal's placement). c_4 / c_5 share the memory of c_2 / c_3.
+    // In the order the program creates them (the check repeats tt-metal's placement).
+    // c_4 / c_5 share the memory of c_2 / c_3.
     const std::vector<zkml::common::CbSpec> cbs = {
         {c_x, Mt * Kt, f32_bytes},
         {c_w, Kt * Nt, f32_bytes},
@@ -67,15 +68,16 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
 
     auto create_cb = [&](uint32_t index, uint32_t pages, uint32_t page_bytes, DataFormat format) {
         CreateCircularBuffer(
-            program, core, CircularBufferConfig(pages * page_bytes, {{index, format}}).set_page_size(index, page_bytes));
+            program,
+            core,
+            CircularBufferConfig(pages * page_bytes, {{index, format}}).set_page_size(index, page_bytes));
     };
     // The same bytes under two formats: the packer writes through the UInt8 CB, the FPU reads through the Int8 CB.
     auto create_aliased_cb = [&](uint32_t u8_index, uint32_t i8_index, uint32_t pages) {
         CreateCircularBuffer(
             program,
             core,
-            CircularBufferConfig(
-                pages * u8_bytes, {{u8_index, DataFormat::UInt8}, {i8_index, DataFormat::Int8}})
+            CircularBufferConfig(pages * u8_bytes, {{u8_index, DataFormat::UInt8}, {i8_index, DataFormat::Int8}})
                 .set_page_size(u8_index, u8_bytes)
                 .set_page_size(i8_index, u8_bytes));
     };

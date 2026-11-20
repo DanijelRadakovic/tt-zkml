@@ -58,8 +58,8 @@ inline void absmax_accumulate_face() {
 }
 
 // Reduce the 32 lanes of SCALE_LREG to the tensor absmax, then replace it with the scaler 2^k:
-//   Q = 2^MAG - 1 (MAG = pot_magnitude_bits(bits, range): 7, 15, 31 or 30),  k = the largest integer with absmax * 2^k <= Q,
-//   capped at 127.
+//   Q = 2^MAG - 1 (MAG = pot_magnitude_bits(bits, range): 7, 15, 31 or 30),  k = the largest integer with absmax * 2^k
+//   <= Q, capped at 127.
 // Every lane ends up holding the same 2^k.
 template <uint32_t MAG>
 inline void absmax_reduce_to_scaler() {

@@ -12,10 +12,11 @@
 /**
  * @brief Writer of pot_quant_m31: drains `c_16` (UInt32 tiles) to the output tensor in batches.
  *
- * It waits for `BATCH_SIZE` tiles (one compute block), issues their writes back to back, waits once until they have left
- * L1 (`async_writes_flushed`) and pops the batch. One wait per batch instead of one write barrier per tile. The compute
- * kernel starts every block at a multiple of `BATCH_SIZE` and `c_16` holds two blocks, so a batch never wraps the ring;
- * only the last one can be shorter. The only full `async_write_barrier` (the data has arrived in DRAM) is the last statement.
+ * It waits for `BATCH_SIZE` tiles (one compute block), issues their writes back to back, waits once until they have
+ * left L1 (`async_writes_flushed`) and pops the batch. One wait per batch instead of one write barrier per tile. The
+ * compute kernel starts every block at a multiple of `BATCH_SIZE` and `c_16` holds two blocks, so a batch never wraps
+ * the ring; only the last one can be shorter. The only full `async_write_barrier` (the data has arrived in DRAM) is the
+ * last statement.
  *
  * **Compile-time args**: `[0]` `BATCH_SIZE` (the compute block size), then `TensorAccessorArgs` of the output.
  * **Runtime args**: `[0]` output DRAM address, `[1]` number of tiles.
