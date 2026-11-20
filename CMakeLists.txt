@@ -46,15 +46,15 @@ endif()
 # the factories locate them relative to their own __FILE__ (see src/common/kernel_path.hpp).
 add_library(
     zkml_ops
-    src/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.cpp
-    src/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_device_operation.cpp
-    src/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_program_factory.cpp
-    src/operations/pot_quantization/per_tensor/pot_quantize_m31/pot_quant_m31.cpp
-    src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_device_operation.cpp
-    src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_program_factory.cpp
-    src/operations/layer_execution/execute_layer.cpp
-    src/operations/layer_execution/device/execute_layer_device_operation.cpp
-    src/operations/layer_execution/device/execute_layer_program_factory.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_device_operation.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_program_factory.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize_m31/pot_quant_m31.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_device_operation.cpp
+    src/device/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_program_factory.cpp
+    src/device/operations/layer_execution/execute_layer.cpp
+    src/device/operations/layer_execution/device/execute_layer_device_operation.cpp
+    src/device/operations/layer_execution/device/execute_layer_program_factory.cpp
 )
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)

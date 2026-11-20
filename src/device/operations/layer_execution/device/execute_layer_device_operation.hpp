@@ -12,7 +12,7 @@
 
 #include <tt-metalium/host_api.hpp>
 
-#include "operations/layer_execution/execute_layer.hpp"
+#include "device/operations/layer_execution/execute_layer.hpp"
 #include "ttnn/device_operation.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"

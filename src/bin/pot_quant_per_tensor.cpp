@@ -25,7 +25,7 @@
 #include <cstdlib>
 #include <vector>
 #include "pot_reference.hpp"
-#include "operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
+#include "device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
 
 using namespace ttnn;
 using tt::tt_metal::DataType;
