@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Debug helpers for compute kernels (compiled by tt-metal at runtime), built on DEVICE_PRINT, tt-metal's fmt-style device
-// print (tech_reports/Debugging/DEVICE_PRINT_replaces_DPRINT.md in tt-metal). The legacy stream-style DPRINT is gone: DPRINT is
-// only an alias of DEVICE_PRINT now.
+// Debug helpers for compute kernels (compiled by tt-metal at runtime), built on DEVICE_PRINT, tt-metal's fmt-style
+// device print (tech_reports/Debugging/DEVICE_PRINT_replaces_DPRINT.md in tt-metal). The legacy stream-style DPRINT is
+// gone: DPRINT is only an alias of DEVICE_PRINT now.
 //
 // Printing is on when the kernel is built with DEBUG_PRINT_ENABLED, which tt-metal sets for the cores listed in
 // TT_METAL_DPRINT_CORES (for example TT_METAL_DPRINT_CORES="(0,0)"); everything below is an empty function otherwise.
@@ -73,8 +73,8 @@ inline void print_tile_rows(uint32_t cb_id, uint32_t tile_id, uint8_t row_begin 
     constexpr uint8_t half_width = 16;
     for (uint8_t r = row_begin; r < row_end; ++r) {
         const uint8_t r_next = static_cast<uint8_t>(r + 1);
-        // One message per row: the two 16-column slices (about 80 bytes each) fit one DEVICE_PRINT message, which can carry
-        // up to 1023 bytes of payload.
+        // One message per row: the two 16-column slices (about 80 bytes each) fit one DEVICE_PRINT message, which can
+        // carry up to 1023 bytes of payload.
         DEVICE_PRINT(
             "{}: {} {}\n",
             r,

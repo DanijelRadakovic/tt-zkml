@@ -113,8 +113,7 @@ int main(int argc, char** argv) {
     }
     unpack[1] = UnpackToDestMode::UnpackToDestFp32;
     // pot_scale_sfpu.hpp lives with the real kernel; the bench compute kernel includes it from there.
-    const std::string sfpu_dir = zkml::common::kernel_path(
-        __FILE__, "../../src/device/kernels/compute");
+    const std::string sfpu_dir = zkml::common::kernel_path(__FILE__, "../../src/device/kernels/compute");
     const auto compute = CreateKernel(
         program,
         zkml::common::kernel_path(__FILE__, "kernels/compute.cpp"),

@@ -5,10 +5,10 @@
 // Benchmark of pot_quantize_per_tensor on the device: cycles per pass, wall time and power.
 //
 // It runs the REAL kernels of the op (reader, compute, writer under
-// src/device/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
-// builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU multiply with
-// an FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only `sfpu` is
-// accepted. The results in results/ and the README are the record of that comparison.
+// src/device/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program
+// factory builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU
+// multiply with an FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only
+// `sfpu` is accepted. The results in results/ and the README are the record of that comparison.
 //
 // Usage:
 //   zkml_quant_fpu_vs_sfpu profile <bf16|f32> <sfpu|fpu> <bits 8|16|32> <int32|int8> <tiles> <iters>

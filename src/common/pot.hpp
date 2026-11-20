@@ -4,7 +4,8 @@
 
 // The vocabulary of a power-of-two (PoT) quantization, shared by the host and the device kernels:
 //   - QuantRange, m31_modulus, pot_magnitude_bits(), pot_qmax(): the value range (plain constexpr integer code),
-//   - BitWidth: the width of the quantized integers as an attribute type of the host-side operations (not compiled into device
+//   - BitWidth: the width of the quantized integers as an attribute type of the host-side operations (not compiled into
+//   device
 //     kernels: tt-metal defines KERNEL_BUILD for those).
 //
 // The value range:
