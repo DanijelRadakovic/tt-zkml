@@ -148,7 +148,7 @@ void kernel_main() {
     {
         DeviceZoneScopedN("SCALER");
         MATH(zkml::sfpu::absmax_to_scaler<magnitude_bits>(dst_scale));
-        DPRINT_MATH("Scaler in DST {}:\n", dst_scale);
+        DEVICE_PRINT_MATH("Scaler in DST {}:\n", dst_scale);
         zkml::debug::print_dest_tile_rows(dst_scale, DataFormat::Float32, 0, 1);
         tile_regs_commit();
         tile_regs_wait();
@@ -178,7 +178,7 @@ void kernel_main() {
         tile_regs_acquire();
         copy_init(cb_in_id);
         for (uint32_t i = 0; i < n; i++) {
-            DPRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
+            DEVICE_PRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
             UNPACK(zkml::debug::print_tile_rows(cb_in_id, i));
             copy_tile(cb_in_id, i, i);
         }
@@ -192,7 +192,7 @@ void kernel_main() {
             }
         }
         for (uint32_t i = 0; i < n; i++) {
-            DPRINT_MATH("Contents of DST {} after quantization:\n", i);
+            DEVICE_PRINT_MATH("Contents of DST {} after quantization:\n", i);
             zkml::debug::print_dest_tile_rows(i, DataFormat::Int32);
         }
         tile_regs_commit();
@@ -203,7 +203,7 @@ void kernel_main() {
         }
         tile_regs_release();
         for (uint32_t i = 0; i < n; i++) {
-            DPRINT_PACK("Tile={}\n", quant_blocks.done() + i);
+            DEVICE_PRINT_PACK("Tile={}\n", quant_blocks.done() + i);
             PACK(zkml::debug::print_tile_rows(cb_out_id, i));
         }
         cb_out.push_back(n);
