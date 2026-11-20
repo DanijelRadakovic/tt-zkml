@@ -6,7 +6,7 @@
 
 #include <optional>
 
-#include "operations/pot_quantization/pot_range.hpp"
+#include "common/pot.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
 

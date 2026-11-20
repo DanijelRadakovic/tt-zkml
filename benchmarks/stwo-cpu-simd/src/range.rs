@@ -2,12 +2,12 @@
 //
 // SPDX-License-Identifier: MIT
 
-//! The value range of a PoT quantization (same as `src/operations/pot_quantization/pot_range.hpp`).
+//! The value range of a PoT quantization (same as `src/common/pot.hpp`).
 
 /// The Mersenne prime of the M31 field.
 pub const M31_P: u32 = 0x7FFF_FFFF;
 
-/// Which range of integers a quantization uses (same as `QuantRange` in `pot_range.hpp`).
+/// Which range of integers a quantization uses (same as `QuantRange` in `common/pot.hpp`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuantRange {
     /// `Q = 2^(bits - 1) - 1`: every bit of the integer.

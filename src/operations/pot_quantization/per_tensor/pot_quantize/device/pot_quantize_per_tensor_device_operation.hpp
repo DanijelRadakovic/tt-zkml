@@ -5,7 +5,7 @@
 // Per-tensor power-of-two (PoT) symmetric quantization. The device computes the scaler.
 //
 // The formulas are:
-//  - `Q = 2^(bit_width.bits() - 1) - 1`, or 2^30 - 1 at 32 bits with QuantRange::M31 (see pot_range.hpp),
+//  - `Q = 2^(bit_width.bits() - 1) - 1`, or 2^30 - 1 at 32 bits with QuantRange::M31 (see common/pot.hpp),
 //  - `k = max{k : absmax(x) * 2^k <= Q}`,
 //  - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
 //
@@ -20,8 +20,7 @@
 
 #include <tt-metalium/host_api.hpp>
 
-#include "operations/pot_quantization/bit_width.hpp"
-#include "operations/pot_quantization/pot_range.hpp"
+#include "common/pot.hpp"
 #include "ttnn/device_operation.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"

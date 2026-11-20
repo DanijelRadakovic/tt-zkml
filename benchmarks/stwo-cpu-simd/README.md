@@ -27,7 +27,7 @@ the remainder and the argmax follow from `(x, q, k)`, which the host has anyway,
 |---|---|
 | `src/reference.rs` | Scalar oracle in f64 / i64, written for clarity. |
 | `src/simd.rs` | `std::simd` (16 lanes of f32), single thread or a rayon pool. `k` comes from the exponent bits as on the device (not from the oracle's search), rounding is the `(\|y\| + 2^23) - 2^23` trick, the residues go into stwo's `BaseColumn` of `PackedM31` through `m31_column`. |
-| `src/range.rs` | `QuantRange` (`Full`, `M31`), `Q`, the M31 map and its inverse, the tile-order rank (same rules as `pot_range.hpp`). |
+| `src/range.rs` | `QuantRange` (`Full`, `M31`), `Q`, the M31 map and its inverse, the tile-order rank (same rules as `common/pot.hpp`). |
 | `src/bin/bench.rs` | The benchmark. |
 | `src/bin/dump.rs` | Writes reference cases (inputs, `q`, remainder, residues, `k`, argmax) for the device test, which compares `q`, `k` and the residues. |
 | `tests/agree.rs` | Oracle against SIMD on 7 shapes x 5 magnitudes x 3 widths, with 1 and 4 threads; `k` by search against `k` by exponent bits on 60 000 values; the prover's invariants; the tile-order argmax; the M31 column. |

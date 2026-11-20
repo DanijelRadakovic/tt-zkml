@@ -7,10 +7,10 @@ CompileFlags:
 ---
 # Device kernels: borrow flags from tt-metal's build (fake kernel target)
 If:
-  PathMatch: (src/operations|tools)/.*/kernels/.*
+  PathMatch: (src/operations/.*|src/device|benchmarks/.*)/kernels/.*
 CompileFlags:
   CompilationDatabase: @TT_METAL_BUILD_DIR@
-  # Kernels include shared headers from src/ (e.g. common/kernel_debug.hpp); at runtime the program
+  # Kernels include shared headers from src/ (e.g. device/kernels/compute/kernel_debug.hpp); at runtime the program
   # factory passes src/ via compiler_include_paths. clangd resolves a relative -I against tt-metal's
   # build directory, so this path is absolute and generated per machine.
   Add:
@@ -31,7 +31,7 @@ CompileFlags:
 #    are caused by the error above: static_assert(get_compile_time_arg_val(...) ...)
 #  - incomplete_nested_name_spec on DataFormat::...: tensix_types.h, which defines DataFormat, is not found
 If:
-  PathMatch: (src/operations|tools)/.*/kernels/.*
+  PathMatch: (src/operations/.*|src/device|benchmarks/.*)/kernels/.*
 Diagnostics:
   Suppress:
     - ovl_no_viable_function_in_call
@@ -43,11 +43,11 @@ Diagnostics:
     IgnoreHeader:
       - api/.*
 ---
-# Kernel-only headers outside a kernels/ folder (e.g. src/common/kernel_debug.hpp): clangd guesses
+# Kernel-only headers outside a kernels/ folder (e.g. src/device/kernels/compute/kernel_debug.hpp): clangd guesses
 # their flags from an unrelated tt-metal host file, so tt-metal's kernel headers are not found when
 # the header is opened on its own. Kernels that include it are checked with kernel flags and are fine.
 If:
-  PathMatch: src/common/kernel_debug\.hpp
+  PathMatch: src/device/kernels/compute/kernel_debug\.hpp
 Diagnostics:
   Suppress:
     - pp_file_not_found

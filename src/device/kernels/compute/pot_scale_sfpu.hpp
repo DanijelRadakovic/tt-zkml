@@ -20,7 +20,7 @@
 
 #include <cstdint>
 
-#include "operations/pot_quantization/pot_range.hpp"
+#include "common/pot.hpp"
 
 #ifdef TRISC_MATH
 #include "llk_math_eltwise_unary_sfpu_init.h"
