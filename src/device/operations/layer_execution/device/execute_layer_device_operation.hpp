@@ -30,10 +30,14 @@ struct ExecuteLayerOperation {
         const ttnn::Tensor& w;
     };
 
-    // (out, scaler_x, scaler_w, scaler_out)
-    using spec_return_value_t = std::
-        tuple<tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec>;
-    using tensor_return_value_t = std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor>;
+    // (out, acc, scaler_x, scaler_w, scaler_out)
+    using spec_return_value_t = std::tuple<
+        tt::tt_metal::TensorSpec,
+        tt::tt_metal::TensorSpec,
+        tt::tt_metal::TensorSpec,
+        tt::tt_metal::TensorSpec,
+        tt::tt_metal::TensorSpec>;
+    using tensor_return_value_t = std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor>;
 
     struct SingleCore {
         struct shared_variables_t {
@@ -57,7 +61,7 @@ struct ExecuteLayerOperation {
     /// A fp32 DST (fp32_dest_acc_en) with half sync holds 4 tiles.
     static constexpr uint32_t dst_tiles = 4;
     /// Largest K in tiles: |acc| <= K * 127 * 127 stays below 2^24, so the int32 -> fp32 conversion is exact.
-    static constexpr uint32_t max_k_tiles = 32;
+    static constexpr uint32_t max_k_tiles = 2080;
 
     static program_factory_t select_program_factory(const operation_attributes_t&, const tensor_args_t&);
     static void validate_on_program_cache_miss(const operation_attributes_t&, const tensor_args_t&);

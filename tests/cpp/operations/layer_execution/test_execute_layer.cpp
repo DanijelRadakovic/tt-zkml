@@ -32,8 +32,9 @@ namespace {
 
 struct Model {
     float scaler_x, scaler_w, scaler_out;
-    std::vector<uint8_t> out;  // sign-magnitude bytes
-    std::vector<int32_t> acc;  // after the activation
+    std::vector<uint8_t> out;      // sign-magnitude bytes
+    std::vector<int32_t> acc_raw;  // the matmul, before the activation (the `acc` output)
+    std::vector<int32_t> acc;      // after the activation
 };
 
 Model host_model(
@@ -46,25 +47,49 @@ Model host_model(
     m.scaler_x = std::ldexp(1.0f, kx);
     m.scaler_w = std::ldexp(1.0f, kw);
     m.acc.assign(static_cast<size_t>(M) * N, 0);
+    m.acc_raw.assign(static_cast<size_t>(M) * N, 0);
     for (uint32_t i = 0; i < M; i++) {
         for (uint32_t j = 0; j < N; j++) {
             int64_t sum = 0;
             for (uint32_t k = 0; k < K; k++) {
                 sum += static_cast<int64_t>(qx[i * K + k]) * qw[k * N + j];
             }
+            m.acc_raw[i * N + j] = static_cast<int32_t>(sum);
             if (act == Activation::ReLU) {
                 sum = std::max<int64_t>(sum, 0);
             }
             m.acc[i * N + j] = static_cast<int32_t>(sum);
         }
     }
-    std::vector<float> acc_f(m.acc.begin(), m.acc.end());
-    const int32_t ko = zkml::reference::pot_k(zkml::reference::absmax(acc_f), 8);
+    // The requantization in integers: k = the largest with A * 2^k <= 127, round half to even.
+    int64_t A = 0;
+    for (int32_t v : m.acc) {
+        A = std::max<int64_t>(A, std::llabs(v));
+    }
+    int32_t ko = 127;
+    if (A != 0) {
+        int t = 0;
+        while ((A >> t) != 0) {
+            t++;
+        }
+        ko = 7 - t;
+        if (ko < 0 && A > (int64_t{127} << -ko)) {
+            ko--;
+        }
+    }
     m.scaler_out = std::ldexp(1.0f, ko);
-    const auto q = zkml::reference::pot_quantize(acc_f, ko, 8);
-    m.out.resize(q.size());
-    for (size_t i = 0; i < q.size(); i++) {
-        m.out[i] = q[i] < 0 ? static_cast<uint8_t>(0x80 | (-q[i])) : static_cast<uint8_t>(q[i]);
+    m.out.resize(m.acc.size());
+    for (size_t i = 0; i < m.acc.size(); i++) {
+        const int64_t mag = std::llabs(m.acc[i]);
+        int64_t q;
+        if (ko >= 0) {
+            q = ko > 40 ? 0 : mag << ko;
+        } else {
+            const int s = -ko;
+            const int64_t half = int64_t{1} << (s - 1);
+            q = (mag + half - 1 + ((mag >> s) & 1)) >> s;
+        }
+        m.out[i] = (m.acc[i] < 0 && q != 0) ? static_cast<uint8_t>(0x80 | q) : static_cast<uint8_t>(q);
     }
     return m;
 }
@@ -109,8 +134,9 @@ protected:
         };
         Tensor tx = Tensor::from_vector(x, spec(M, K), dev());
         Tensor tw = Tensor::from_vector(w, spec(K, N), dev());
-        auto [out, sx, sw, so] = zkml::prim::execute_layer(tx, tw, act);
+        auto [out, acc, sx, sw, so] = zkml::prim::execute_layer(tx, tw, act);
         const auto got = out.to_vector<uint8_t>();
+        const auto got_acc = acc.to_vector<uint32_t>();
         const float gsx = sx.to_vector<float>().at(0), gsw = sw.to_vector<float>().at(0),
                     gso = so.to_vector<float>().at(0);
         const Model m = host_model(x, w, M, K, N, act);
@@ -130,9 +156,24 @@ protected:
             }
         }
         EXPECT_EQ(bad, 0u) << label;
+        // The accumulator is returned before the activation: negative entries stay negative with ReLU.
+        EXPECT_EQ(got_acc.size(), m.acc_raw.size()) << label;
+        size_t bad_acc = 0;
+        for (size_t i = 0; i < std::min(got_acc.size(), m.acc_raw.size()); i++) {
+            const int32_t got_v =
+                (got_acc[i] >> 31) ? -static_cast<int32_t>(got_acc[i] & 0x7FFFFFFF) : static_cast<int32_t>(got_acc[i]);
+            if (got_v != m.acc_raw[i]) {
+                if (bad_acc < 5) {
+                    std::printf("  [%s] acc i=%zu got=%d want=%d\n", label.c_str(), i, got_acc[i], m.acc_raw[i]);
+                }
+                bad_acc++;
+            }
+        }
+        EXPECT_EQ(bad_acc, 0u) << label << ": acc";
+        bad += bad_acc;
         if (verbose || bad) {
             std::printf(
-                "%-4s %-28s M=%u K=%u N=%u act=%s scalers %g %g %g, %zu/%zu bytes wrong\n",
+                "%-4s %-28s M=%u K=%u N=%u act=%s scalers %g %g %g, %zu/%zu entries wrong (out bytes + acc)\n",
                 bad ? "FAIL" : "ok",
                 label.c_str(),
                 M,
@@ -143,7 +184,7 @@ protected:
                 gsw,
                 gso,
                 bad,
-                got.size());
+                2 * got.size());
         }
         return bad;
     }
@@ -176,7 +217,7 @@ TEST_F(ExecuteLayer, Shapes) {
 }
 
 TEST_F(ExecuteLayer, LongestK) {
-    // K = 1024: |acc| can reach 1024 * 127 * 127 < 2^24, the limit of the exact int32 -> fp32 conversion.
+    // K = 1024: |acc| can reach 2^24 and more.
     const uint32_t M = 64, K = 1024, N = 64;
     for (Activation act : {Activation::None, Activation::ReLU}) {
         run("K = 1024",
@@ -190,6 +231,47 @@ TEST_F(ExecuteLayer, LongestK) {
     // The worst case of the accumulator: every product is 127 * 127 and all add up.
     std::vector<float> x(static_cast<size_t>(M) * K, 1.0f), w(static_cast<size_t>(K) * N, 1.0f);
     run("all ones, K = 1024", x, w, M, K, N, Activation::ReLU);
+}
+
+TEST_F(ExecuteLayer, VeryLongK) {
+    // K = 2048: all-ones gives acc = 2048 * 127 * 127 = 33M > 2^24, which fp32 could not hold exactly.
+    const uint32_t M = 32, K = 2048, N = 32;
+    std::vector<float> x(static_cast<size_t>(M) * K, 1.0f), w(static_cast<size_t>(K) * N, 1.0f);
+    run("all ones, K = 2048", x, w, M, K, N, Activation::ReLU);
+    for (Activation act : {Activation::None, Activation::ReLU}) {
+        run("K = 2048",
+            uniform(static_cast<size_t>(M) * K, 51, -1.f, 1.f),
+            uniform(static_cast<size_t>(K) * N, 52, -1.f, 1.f),
+            M,
+            K,
+            N,
+            act);
+    }
+    // An odd accumulator above 2^24: the integer requantization keeps the low bits.
+    for (size_t i = 0; i < x.size(); i++) {
+        x[i] = (i % 7 == 0) ? 0.99f : 1.0f;
+    }
+    run("odd acc, K = 2048", x, w, M, K, N, Activation::None);
+}
+
+TEST_F(ExecuteLayer, QuantizationTies) {
+    // x * 2^5 = m / 2: every half-integer of [-127, 127] (ties round to even), tiny negatives (round to 0, never "-0"),
+    // and the absmax 127 / 32 itself, for both x and w.
+    const uint32_t M = 32, K = 64, N = 32;
+    auto make = [](size_t n, int salt) {
+        std::vector<float> v(n);
+        for (size_t i = 0; i < n; i++) {
+            const int m = static_cast<int>((i * 37 + salt) % 509) - 254;
+            v[i] = static_cast<float>(m) / 64.0f;
+        }
+        v[0] = 127.0f / 32.0f;
+        v[1] = -1.0f / 1024.0f;
+        v[2] = -1.0f / 128.0f;
+        return v;
+    };
+    for (Activation act : {Activation::None, Activation::ReLU}) {
+        run("ties", make(static_cast<size_t>(M) * K, 3), make(static_cast<size_t>(K) * N, 11), M, K, N, act);
+    }
 }
 
 TEST_F(ExecuteLayer, AllNegativeReLU) {
