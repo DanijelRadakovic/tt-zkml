@@ -18,5 +18,9 @@ tt-zkml = { path = "lib/tt-zkml" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The proof side (the stwo prover and the AIR constraints, reusing LuminAIR's) is added here and used by lib/tt-zkml:
-#   stwo, stwo-constraint-framework, ...
+# The proof side: the stwo Circle STARK prover and its constraint framework (the same revision as tt-zkml-core/benchmarks/stwo-cpu-simd).
+# Needs nightly Rust (portable_simd), pinned in rust-toolchain.toml.
+stwo = { git = "https://github.com/starkware-libs/proving", rev = "c87ea10db87a3de13c8633f5d44ede1df62299bc", default-features = false, features = ["std", "prover", "parallel"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/proving", rev = "c87ea10db87a3de13c8633f5d44ede1df62299bc", default-features = false, features = ["std", "prover", "parallel"] }
+num-traits = "0.2"
+itertools = "0.14"

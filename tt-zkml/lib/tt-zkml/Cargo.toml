@@ -10,7 +10,10 @@ build = "build.rs"
 tt-zkml-sys.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# stwo and the constraint framework come here (see the workspace Cargo.toml)
+stwo.workspace = true
+stwo-constraint-framework.workspace = true
+num-traits.workspace = true
+itertools.workspace = true
 
 [[test]]
 name = "abi"
