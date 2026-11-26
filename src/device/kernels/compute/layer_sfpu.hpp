@@ -122,10 +122,17 @@ inline void scaler_from_k_face() {
     }
 }
 
-// LReg7 = k + 24: the shift amount of requant_tile.
+// LReg7 = k + 24: the shift amount of requant_tile, from the scaler 2^k that scaler_from_k_face has just written into
+// the tile. Not from the k that reduce_to_k left in LReg7: the compiler allocates LReg7 for its own temporaries in the
+// SFPI functions in between (observed: LReg7 was 0.5f when the layers were inlined into one kernel), so only a value
+// read back from DEST and put into LReg7 by hand-written instructions, right before the sweep that needs it, is
+// reliable.
 inline void k_to_shift() {
-    const sfpi::vInt k = sfpi::vInt(sfpi::l_reg[SCALE_LREG]);
-    sfpi::l_reg[SCALE_LREG] = sfpi::vFloat((k + 24).get());
+    TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::FP32, ADDR_MOD_7, 0);
+    TTI_SFPNOP;
+    TTI_SFPEXEXP(0, p_sfpu::LREG0, SCALE_LREG_ID, sfpi::SFPEXEXP_MOD1_DEBIAS);
+    TTI_SFPNOP;
+    TTI_SFPIADD(24, SCALE_LREG_ID, SCALE_LREG_ID, sfpi::SFPIADD_MOD1_ARG_IMM | sfpi::SFPIADD_MOD1_CC_NONE);
 }
 
 inline void acc_absmax_to_scaler(uint32_t idst) {

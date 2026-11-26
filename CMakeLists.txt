@@ -55,6 +55,9 @@ add_library(
     src/device/operations/layer_execution/execute_layer.cpp
     src/device/operations/layer_execution/device/execute_layer_device_operation.cpp
     src/device/operations/layer_execution/device/execute_layer_program_factory.cpp
+    src/device/operations/network_execution/execute_network.cpp
+    src/device/operations/network_execution/device/execute_network_device_operation.cpp
+    src/device/operations/network_execution/device/execute_network_program_factory.cpp
 )
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
@@ -108,6 +111,8 @@ zkml_add_test(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization
 # check_if_cbs_can_fit_in_l1 on its own; deliberately not part of the op tests
 zkml_add_test(test_pot_quant_m31 tests/cpp/operations/pot_quantization/test_pot_quant_m31.cpp zkml_ops)
 zkml_add_test(test_execute_layer tests/cpp/operations/layer_execution/test_execute_layer.cpp zkml_ops)
+zkml_add_test(test_execute_network tests/cpp/operations/network_execution/test_execute_network.cpp zkml_ops)
+zkml_add_test(test_sequential tests/cpp/nn/test_sequential.cpp zkml_ops)
 zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
 
 # Does keeping the tensor in L1 between the two passes help? Profiler-based bench; see

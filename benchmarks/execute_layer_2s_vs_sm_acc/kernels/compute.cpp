@@ -11,8 +11,8 @@
 #include "api/dataflow/circular_buffer.h"
 #include "api/debug/kernel_profiler.hpp"
 #include "device/kernels/block_processing.hpp"
-#include "device/operations/layer_execution/device/kernels/compute/layer_sfpu.hpp"  // variant 2: sm_int (production)
-#include "variant_sfpu.hpp"                                                         // variants 0, 1
+#include "device/kernels/compute/layer_sfpu.hpp"  // variant 2: sm_int (production)
+#include "variant_sfpu.hpp"                       // variants 0, 1
 #include "device/kernels/compute/pot_scale_sfpu.hpp"
 #include "device/kernels/compute/quant_sfpu.hpp"
 
