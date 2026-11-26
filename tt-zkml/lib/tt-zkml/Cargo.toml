@@ -1,0 +1,18 @@
+[package]
+name = "tt-zkml"
+description = "zkML on Tenstorrent: runs the quantized network on the device (tt-zkml core, through the C ABI) and proves the execution trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+tt-zkml-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# stwo and the constraint framework come here (see the workspace Cargo.toml)
+
+[[test]]
+name = "abi"
+path = "tests/abi.rs"
+harness = false

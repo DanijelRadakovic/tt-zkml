@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "lib/tt-zkml-sys",   # raw bindings to the C ABI (abi/)
+    "lib/tt-zkml",       # the library: safe API over the ABI, the AIR constraints, the prover
+    "bin/tt-zkml",       # the command-line tool: load a model, run the forward pass, generate the output and the proof
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/DanijelRadakovic/tt-zkml"
+
+[workspace.dependencies]
+tt-zkml-sys = { path = "lib/tt-zkml-sys" }
+tt-zkml = { path = "lib/tt-zkml" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The proof side (the stwo prover and the AIR constraints, reusing LuminAIR's) is added here and used by lib/tt-zkml:
+#   stwo, stwo-constraint-framework, ...

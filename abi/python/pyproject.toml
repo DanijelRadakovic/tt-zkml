@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tt-zkml"
+version = "0.1.0"
+description = "Python bindings of tt-zkml-core (the C ABI in api/include/tt_zkml/tt_zkml.h)"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[tool.setuptools]
+packages = ["tt_zkml"]

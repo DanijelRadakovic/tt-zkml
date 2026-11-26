@@ -1,0 +1,10 @@
+.build
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.benchmarks/
+
+# written by the tt-metal runtime into the working directory (fabric mapping, inspector, watcher logs)
+generated/

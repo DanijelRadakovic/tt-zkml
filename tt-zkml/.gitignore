@@ -1,0 +1,5 @@
+# Rust
+target/
+
+# written by the tt-metal runtime into the working directory (fabric mapping, inspector, watcher logs)
+generated/

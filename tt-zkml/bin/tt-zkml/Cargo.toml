@@ -1,0 +1,16 @@
+[package]
+name = "tt-zkml-cli"
+description = "Command-line tool of tt-zkml: load a model, run the forward pass on a Tenstorrent device, generate the output and the proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "tt-zkml"
+path = "src/main.rs"
+
+[dependencies]
+tt-zkml.workspace = true
+tt-zkml-sys.workspace = true
+clap.workspace = true
