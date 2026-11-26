@@ -25,8 +25,11 @@ struct NetworkPlan {
     uint32_t layers = 0;
     uint32_t Mt = 0;                        // tiles of the batch dimension
     bool fp32_in = true;                    // fp32 or bf16 inputs
+    bool pre_quantized = false;             // the weights are UINT8 tensors (sign-magnitude bytes), quantized beforehand (no c_1, no weight quantization)
     std::vector<uint32_t> Kt, Nt;           // per layer: tiles of the input and of the output features
     std::vector<uint32_t> relu;             // per layer: 1 with ReLU
+    std::vector<uint32_t> nt_off;           // per layer: the first column tile of its accumulator in the packed acc output
+    uint32_t total_nt = 0;                  // column tiles of the packed acc output (sum of Nt)
     uint32_t cap_w = 0;                     // tiles of the weight buffer (the largest layer)
     uint32_t cap_qw = 0;                    // tiles of the quantized-weight buffer
     uint32_t cap_acc = 0;                   // tiles of the accumulator buffer
@@ -42,7 +45,9 @@ struct NetworkPlan {
     static NetworkPlan make(
         const ttnn::Tensor& x,
         const std::vector<ttnn::Tensor>& weights,
-        const std::vector<zkml::prim::Activation>& activations) {
+        const std::vector<zkml::prim::Activation>& activations,
+        bool pre_quantized = false,
+        const std::vector<ttnn::Tensor>& weight_scalers = {}) {
         namespace n = zkml::network;
         using tt::tt_metal::DataType;
         TT_FATAL(!weights.empty(), "execute_network: at least one weight tensor is needed");
@@ -56,27 +61,41 @@ struct NetworkPlan {
             "execute_network: {} activations for {} layers",
             activations.size(),
             weights.size());
-        auto check_tensor = [&](const ttnn::Tensor& t, const char* what) {
+        // x: FLOAT32 or BFLOAT16. The weights: the dtype of x, or (pre-quantized) UINT8.
+        auto check_tensor = [&](const ttnn::Tensor& t, const char* what, DataType want) {
             TT_FATAL(t.storage_type() == ttnn::StorageType::DEVICE, "execute_network: {} must be on device", what);
             TT_FATAL(t.buffer() != nullptr, "execute_network: {} must be allocated on device", what);
             TT_FATAL(t.layout() == ttnn::Layout::TILE, "execute_network: {} must be in TILE layout", what);
-            TT_FATAL(
-                t.dtype() == DataType::FLOAT32 || t.dtype() == DataType::BFLOAT16,
-                "execute_network: {} must be FLOAT32 or BFLOAT16, got {}",
-                what,
-                t.dtype());
+            TT_FATAL(t.dtype() == want, "execute_network: {} must be {}, got {}", what, want, t.dtype());
             TT_FATAL(!t.memory_config().is_sharded(), "execute_network: sharded {} is not supported", what);
             TT_FATAL(t.logical_shape().rank() == 2, "execute_network: {} must be 2-D", what);
-            TT_FATAL(t.dtype() == x.dtype(), "execute_network: {} must have the dtype of x ({})", what, x.dtype());
         };
-        check_tensor(x, "x");
+        TT_FATAL(
+            x.dtype() == DataType::FLOAT32 || x.dtype() == DataType::BFLOAT16,
+            "execute_network: x must be FLOAT32 or BFLOAT16, got {}",
+            x.dtype());
+        check_tensor(x, "x", x.dtype());
         for (const auto& w : weights) {
-            check_tensor(w, "a weight");
+            check_tensor(w, "a weight", pre_quantized ? DataType::UINT8 : x.dtype());
+        }
+        if (pre_quantized) {
+            TT_FATAL(
+                weight_scalers.size() == weights.size(),
+                "execute_network: {} weight scalers for {} weights",
+                weight_scalers.size(),
+                weights.size());
+            for (const auto& s : weight_scalers) {
+                check_tensor(s, "a weight scaler", DataType::FLOAT32);
+                TT_FATAL(s.logical_shape()[0] == 1 && s.logical_shape()[1] == 1, "execute_network: a weight scaler must be [1, 1]");
+            }
+        } else {
+            TT_FATAL(weight_scalers.empty(), "execute_network: weight scalers are only for pre-quantized weights");
         }
 
         NetworkPlan p;
         p.layers = static_cast<uint32_t>(weights.size());
         p.fp32_in = x.dtype() == DataType::FLOAT32;
+        p.pre_quantized = pre_quantized;
         const uint32_t m = x.logical_shape()[0];
         uint32_t k = x.logical_shape()[1];
         TT_FATAL(
@@ -111,6 +130,8 @@ struct NetworkPlan {
             k = nw;
         }
         for (uint32_t l = 0; l < p.layers; l++) {
+            p.nt_off.push_back(p.total_nt);
+            p.total_nt += p.Nt[l];
             p.cap_w = std::max(p.cap_w, p.w_tiles(l));
             p.cap_acc = std::max(p.cap_acc, p.out_tiles(l));
             p.cap_act = std::max(p.cap_act, p.Mt * p.Kt[l]);  // the input of layer l; the output of layer l is the input of l + 1
@@ -123,14 +144,18 @@ struct NetworkPlan {
         const uint32_t i32_bytes = tt::tile_size(tt::DataFormat::Int32);
         const uint32_t f32_bytes = tt::tile_size(tt::DataFormat::Float32);
         p.cbs.push_back({n::c_x, p.x_tiles(), in_bytes});
-        p.cbs.push_back({n::c_w, p.cap_w, in_bytes});
+        if (!pre_quantized) {
+            p.cbs.push_back({n::c_w, p.cap_w, in_bytes});
+        }
         p.cbs.push_back({n::c_qw, p.cap_qw, u8_bytes});
         p.cbs.push_back({n::c_acc, p.cap_acc, i32_bytes});
         p.cbs.push_back({n::c_act_a, p.cap_act, u8_bytes});
         p.cbs.push_back({n::c_act_b, p.cap_act, u8_bytes});
         p.cbs.push_back({n::c_out, p.out_ring_pages, u8_bytes});
         p.cbs.push_back({n::c_scale_x, n::scaler_pages, f32_bytes});
-        p.cbs.push_back({n::c_scale_w, n::scaler_pages, f32_bytes});
+        if (!pre_quantized) {
+            p.cbs.push_back({n::c_scale_w, n::scaler_pages, f32_bytes});
+        }
         p.cbs.push_back({n::c_scale_out, n::scaler_pages, f32_bytes});
         return p;
     }

@@ -18,7 +18,7 @@
 ]
 #v(6pt)
 
-This note explains a problem we measured in `execute_network`: on the chip the fused network is *faster* than running the layers one by one, but in wall-clock time it can be *slower*. The reason is not on the device. It is the work the host does inside one call, in particular allocating the output tensors, and the fact that this work must be finished before the device gets the program. Everything below is from this project's code and measurements (`benchmarks/nn_network`).
+This note explains a problem we measured in `execute_network`: on the chip the fused network is *faster* than running the layers one by one, but in wall-clock time it can be *slower*. The reason is not on the device. It is the work the host does inside one call, in particular allocating the output tensors, and the fact that this work must be finished before the device gets the program. Everything below is from this project's code and measurements (`benchmarks/nn_network`). The first sections describe the problem as we found it; the last two show the fix (packed outputs) and the numbers after it.
 
 #outline(indent: 1.2em, depth: 2)
 #pagebreak()
@@ -79,7 +79,7 @@ void Op::SingleCore::override_runtime_arguments(cached_program_t& cp, const oper
 
 Host cost of the call: one allocation (about 3.6 us, see the table below) plus the fixed part of a call.
 
-== Example 2: `execute_network`, many outputs
+== Example 2: `execute_network` as first written, many outputs
 
 `execute_network` must return everything the proof needs: the output, the input scaler, and for every layer the accumulator and two scalers: `2 + 3L` tensors (20 for six layers). Each one is a separate allocation and each address is a separate runtime argument:
 
@@ -107,7 +107,7 @@ for (uint32_t l = 0; l < L; l++) {
 }
 ```
 
-The device work per layer is the same as in `execute_layer`; the difference is that the host does `2 + 3L` allocations and `3L + 2` address writes before the single launch.
+The device work per layer is the same as in `execute_layer`; the difference is that the host does `2 + 3L` allocations and `3L + 2` address writes before the single launch. (Section 7 shows what replaced this.)
 
 = Timeline: why the loop hides the host cost and the fused call does not
 
@@ -125,7 +125,7 @@ The device work per layer is the same as in `execute_layer`; the difference is t
 ]
 The commands are asynchronous: after `execute_layer` has pushed layer 1, the host immediately prepares layer 2 while the device runs layer 1, and so on. Only the first host step is in front of the device; the rest is hidden behind device time. The fused call is one command, so all of its host work (the allocations of all outputs) is in front of the kernel. In the figure the bars are schematic; the measured numbers follow.
 
-= Measurements
+= Measurements before the fix
 
 Setup: Blackhole p100a, one core; `M = 128`, width 256 (`256 x 256` layers), bf16, program cached; `benchmarks/nn_network`.
 
@@ -156,14 +156,72 @@ Setup: Blackhole p100a, one core; `M = 128`, width 256 (`256 x 256` layers), bf1
 - The program hash, the cache key and the validation are each about 1 us or less, so the program cache is not the problem.
 - A single `execute_layer` call (24 us, five outputs) is cheaper than one fused call at L=4 (62 us), but the loop's four calls overlap with the device and the fused call does not.
 
-= Where this leaves the design
+= The fix: packed outputs, and an address that is a base plus an offset
 
-The host cost per output tensor is the lever. The intermediate results (`acc_l`, the scalers) are needed for the trace, so they cannot be dropped. Options that keep them, none implemented or measured yet:
+The intermediate results (`acc_l` and the scalers) are needed for the trace, so they cannot be dropped. What can change is how many tensors they are spread over. The fix is to allocate *three* output tensors however many layers there are, and to compute the position of every layer's data inside them:
 
 #tbl((auto, 1fr),
-  [*One packed output*], [Allocate a single UINT32 tensor large enough for all accumulators and scalers, and compute the per-layer addresses as `base + offset_l` in the factory (the offsets follow from the shapes, which are part of the cache key). One allocation and one base address instead of `3L + 1`; the writer arguments become offsets. The proof code would read slices of it. Expected: about 3.6 us instead of about 3.6 us #sym.times (3L + 1).],
-  [*Reuse the outputs*], [Allocate the outputs once and pass them in for every call (an "out" parameter). The call then has no allocation; only the address override remains. Needs a lifetime rule for results that are still being read.],
-  [*Trace replay*], [Capture the enqueue once (ttnn trace) and replay it for the same network on new inputs. The per-call host work disappears; fits a fixed network that runs repeatedly.],
+  [`out`], [UINT8 `[M, N_last]`, the quantized result of the last layer.],
+  [`scalers`], [FLOAT32 `[32 * S, 32]`, S tiles: tile 0 is `scaler_x`, then (when the weights are quantized in the kernel) the weight scalers of every layer, then the requantization scaler of every layer. Scaler `i` is page `i`.],
+  [`acc`], [UINT32 `[M, N_0 + ... + N_{L-1}]`: the raw accumulators of all layers side by side. Layer `l` is the column range starting at `N_0 + ... + N_{l-1}`.],
 )
 
-#good[Until one of these is done: the fused network is the better choice when the device time is short (width up to 128, where the host cost of L separate calls is larger), and the layer loop is slightly better in wall time for wider layers, even though it does more work on the chip.]
+The writer no longer receives one address per output tensor; it receives *three base addresses* and per layer a small offset, and builds the page index itself. A tile of the TILE-layout tensor `acc` is one page, in row-major tile order, so tile `(mt, c)` of layer `l` is page `mt * total_nt + nt_off_l + c`:
+
+```cpp
+// program factory: three addresses, then (Nt, first column tile) per layer
+std::vector<uint32_t> writer_args = {out_addr, scalers_addr, acc_addr, out_tiles, Mt, total_nt};
+for (uint32_t l = 0; l < L; l++) {
+    writer_args.push_back(plan.Nt[l]);
+    writer_args.push_back(plan.nt_off[l]);          // = N_0 + ... + N_{l-1}, in tiles
+}
+
+// on a cache hit: only the three addresses change (the offsets follow from the shapes, which are in the cache key)
+writer_args[0] = outputs[out_index()].buffer()->address();
+writer_args[1] = outputs[scalers_index()].buffer()->address();
+writer_args[2] = outputs[acc_index()].buffer()->address();
+
+// writer kernel (device side): tile c of row-block mt of layer l -> its page in the packed tensor
+noc.async_write(cb_acc, acc, acc_bytes, {.offset_bytes = i * acc_bytes},
+                {.page_id = mt * total_nt + nt_off + c});
+noc.async_write(cb_so, scalers, tile_bytes, {}, {.page_id = scaler_out_page(l)});   // scaler i = page i
+```
+
+So the "address" of every layer's result is still a runtime argument, but it is now a base address (one per tensor) plus an offset the kernel adds. The allocation still has to finish before the command can be built, but there are three allocations, not `2 + 3L`. The host reads one value with a helper that indexes into the packed tensor (`result.scaler_out(l)`, `result.acc_raw(l)`).
+
+The same change removed another host cost: with pre-quantized weights (`execute_network_quantized`) there are no weight-scaler outputs at all, because the scalers are inputs.
+
+= Measurements after the fix
+
+*Host time of one `execute_network` call* (`zkml_nn_network_bench hostprof`, M = 32, width 128, bf16, median of 100, in us). Before the fix: 62.2 us at L = 4 (14 outputs) and 88.5 us at L = 6 (20 outputs), at M = 128, width 256 (section 5).
+
+#tbl((auto, auto, auto, auto, auto, auto),
+  [*layers*], [*output tensors*], [*create outputs*], [*hash + key*], [*rest*], [*total*],
+  [1], [3], [11.0], [0.6], [6.3], [18.0],
+  [4], [3], [11.0], [1.2], [6.7], [18.9],
+  [8], [3], [11.0], [2.0], [11.0], [24.1],
+  [16], [3], [10.9], [3.1], [11.6], [26.0],
+)
+
+Creating the outputs is now a constant 11 us (three tensors) and the call is 18 to 26 us for 1 to 16 layers, against 88 us for six layers before. What still grows with the layer count is the program hash and the argument override, slowly.
+
+*Wall time of the whole network* (us, bf16, median of 20; the layer loop is `L` calls of `execute_layer`):
+
+#tbl((auto, auto, auto, auto, auto),
+  [*M x W, 8 layers*], [*layer loop*], [*fused, weights quantized each call*], [*fused, weights pre-quantized*], [*best CPU (VNNI)*],
+  [32 x 64], [194], [58], [51], [58],
+  [32 x 128], [195], [73], [49], [92],
+  [128 x 128], [204], [130], [100], [125],
+  [128 x 256], [423], [315], [217], [252],
+  [128 x 512], [1198], [1021], [608], [685],
+)
+
+Before the fix the fused call lost to the loop for wide layers (for example 32 x 256, 8 layers: 262 us against 217 us). Now the fused call is faster than the loop in every configuration we ran (the non-quantized one too: 182 us against 217 us for 32 x 256): 1.9x to 4.0x at 8 layers, and 2.0x to 8.0x at 32 layers (pre-quantized weights). The device kernel itself also got faster in this work (float requantizer, no weight quantization), which is why these numbers are lower than the host cost alone would explain; the host cost is no longer what decides the wall time.
+
+= Where this leaves the design
+
+- The host cost of an output tensor is the lever, and it is solved by packing: three allocations and three base addresses, offsets computed in the factory and the kernel.
+- Two further options remain, neither needed now: *reuse the outputs* (pass preallocated tensors in, so a call has no allocation) and *trace replay* (capture the enqueue once and replay it for a fixed network, which removes the per-call host work).
+- For a model that is run repeatedly with the same weights, quantize the weights once (`nn::Sequential::load_parameters` does this) and use `execute_network_quantized`: it removes 30% to 55% of the kernel time and needs no weight scaler outputs.
+
+#good[With packed outputs the fused network is the faster choice at every size we measured, against the layer loop. With pre-quantized weights it is also faster than the best CPU baseline (including AVX-512 VNNI) for networks of 8 or more layers at most widths, and loses only for short, narrow networks where fixed per-call costs dominate.]

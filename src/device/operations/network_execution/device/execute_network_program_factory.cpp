@@ -27,7 +27,8 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args, tensor_return_value_t& outputs) {
     const auto& x = tensor_args.x;
     const auto& weights = tensor_args.weights;
-    const NetworkPlan plan = NetworkPlan::make(x, weights, attributes.activations);
+    const NetworkPlan plan = NetworkPlan::make(x, weights, attributes.activations, attributes.pre_quantized, tensor_args.weight_scalers);
+    const bool pre_q = plan.pre_quantized;
     const uint32_t L = plan.layers;
 
     zkml::common::check_if_cbs_can_fit_in_l1(
@@ -52,19 +53,24 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
             CircularBufferConfig(pages * page_bytes, {{index, format}}).set_page_size(index, page_bytes));
     };
     create_cb(n::c_x, plan.x_tiles(), in_format);
-    create_cb(n::c_w, plan.cap_w, in_format);
+    if (!pre_q) {
+        create_cb(n::c_w, plan.cap_w, in_format);
+    }
     create_cb(n::c_qw, plan.cap_qw, DataFormat::UInt8);
     create_cb(n::c_acc, plan.cap_acc, DataFormat::Int32);
     create_cb(n::c_act_a, plan.cap_act, DataFormat::UInt8);
     create_cb(n::c_act_b, plan.cap_act, DataFormat::UInt8);
     create_cb(n::c_out, plan.out_ring_pages, DataFormat::UInt8);
     create_cb(n::c_scale_x, n::scaler_pages, DataFormat::Float32);
-    create_cb(n::c_scale_w, n::scaler_pages, DataFormat::Float32);
+    if (!pre_q) {
+        create_cb(n::c_scale_w, n::scaler_pages, DataFormat::Float32);
+    }
     create_cb(n::c_scale_out, n::scaler_pages, DataFormat::Float32);
 
     // ---- reader: x, then the weights of layer 0, 1, ... into c_1 ----
     constexpr uint32_t reader_batch = 16;
-    std::vector<uint32_t> reader_ct_args = {reader_batch, L, plan.cap_w};
+    // The weights go to c_1 and are quantized by compute, or (pre-quantized) straight into the quantized-weight buffer c_2.
+    std::vector<uint32_t> reader_ct_args = {reader_batch, L, plan.cap_w, pre_q ? n::c_qw : n::c_w};
     // The accessor arguments of interleaved tensors of one dtype and memory config are the same for all of them, so one set serves
     // every weight and the reader can loop over the layers.
     TensorAccessorArgs(*x.buffer()).append_to(reader_ct_args);
@@ -75,11 +81,10 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
         CreateKernel(program, kernel_path(__FILE__, "kernels/dataflow/reader.cpp"), core, reader_config);
 
     // ---- writer: scalers, accumulators and the output ----
-    std::vector<uint32_t> writer_ct_args = {n::dst_tiles, plan.out_ring_pages, L, plan.cap_acc};
+    std::vector<uint32_t> writer_ct_args = {n::dst_tiles, plan.out_ring_pages, L, plan.cap_acc, pre_q ? 1u : 0u};
     TensorAccessorArgs(*outputs[ExecuteNetworkOperation::out_index()].buffer()).append_to(writer_ct_args);
-    // one set each for the scalers (all FLOAT32 [1, 1]) and for the accumulators (all UINT32), see the reader
-    TensorAccessorArgs(*outputs[ExecuteNetworkOperation::scaler_x_index()].buffer()).append_to(writer_ct_args);
-    TensorAccessorArgs(*outputs[ExecuteNetworkOperation::acc_index(0)].buffer()).append_to(writer_ct_args);
+    TensorAccessorArgs(*outputs[ExecuteNetworkOperation::scalers_index()].buffer()).append_to(writer_ct_args);
+    TensorAccessorArgs(*outputs[ExecuteNetworkOperation::acc_index()].buffer()).append_to(writer_ct_args);
     auto writer_config = WriterDataMovementConfig(writer_ct_args);
     writer_config.compiler_include_paths = {kernel_include_dir()};
     const KernelHandle writer_id =
@@ -91,12 +96,12 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
     unpack_to_dest_mode[n::c_acc] = UnpackToDestMode::UnpackToDestFp32;
     if (plan.fp32_in) {
         unpack_to_dest_mode[n::c_x] = UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode[n::c_w] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode[n::c_w] = UnpackToDestMode::UnpackToDestFp32;  // (no c_w in a program with pre-quantized weights)
     }
     // Mt, fp32 input, output ring pages, capacities of the weight / quantized-weight / accumulator / activation buffers (tiles). The
     // layers are run-time arguments (below), so the kernel is the same for every number of layers.
     std::vector<uint32_t> compute_ct_args = {
-        plan.Mt, plan.fp32_in ? 1u : 0u, plan.out_ring_pages, plan.cap_w, plan.cap_qw, plan.cap_acc, plan.cap_act};
+        plan.Mt, plan.fp32_in ? 1u : 0u, plan.out_ring_pages, plan.cap_w, plan.cap_qw, plan.cap_acc, plan.cap_act, pre_q ? 1u : 0u};
     const KernelHandle compute_id = CreateKernel(
         program,
         kernel_path(__FILE__, "kernels/compute/execute_network.cpp"),
@@ -127,21 +132,22 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
         reader_args.push_back(plan.w_tiles(l));
     }
     SetRuntimeArgs(program, reader_id, core, reader_args);
-    // writer: [0] out address, [1] scaler_x address, [2] tiles of out, then per layer (acc, scaler_w, scaler_out
-    // addresses, acc tiles)
+    // writer: [0] out address, [1] scalers address, [2] acc address, [3] tiles of out, [4] Mt, [5] column tiles of the packed acc, then per
+    // layer (Nt, first column tile of its accumulator)
     std::vector<uint32_t> writer_args = {
         outputs[ExecuteNetworkOperation::out_index()].buffer()->address(),
-        outputs[ExecuteNetworkOperation::scaler_x_index()].buffer()->address(),
-        plan.out_tiles(L - 1)};
+        outputs[ExecuteNetworkOperation::scalers_index()].buffer()->address(),
+        outputs[ExecuteNetworkOperation::acc_index()].buffer()->address(),
+        plan.out_tiles(L - 1),
+        plan.Mt,
+        plan.total_nt};
     for (uint32_t l = 0; l < L; l++) {
-        writer_args.push_back(outputs[ExecuteNetworkOperation::acc_index(l)].buffer()->address());
-        writer_args.push_back(outputs[ExecuteNetworkOperation::scaler_w_index(L, l)].buffer()->address());
-        writer_args.push_back(outputs[ExecuteNetworkOperation::scaler_out_index(L, l)].buffer()->address());
-        writer_args.push_back(plan.out_tiles(l));
+        writer_args.push_back(plan.Nt[l]);
+        writer_args.push_back(plan.nt_off[l]);
     }
     SetRuntimeArgs(program, writer_id, core, writer_args);
 
-    return {std::move(program), {reader_id, writer_id, L}};
+    return {std::move(program), {reader_id, writer_id, L, pre_q}};
 }
 
 void ExecuteNetworkOperation::SingleCore::override_runtime_arguments(
@@ -162,12 +168,8 @@ void ExecuteNetworkOperation::SingleCore::override_runtime_arguments(
     }
     auto& writer_args = GetRuntimeArgs(program, shared.writer_id, core);
     writer_args[0] = outputs[ExecuteNetworkOperation::out_index()].buffer()->address();
-    writer_args[1] = outputs[ExecuteNetworkOperation::scaler_x_index()].buffer()->address();
-    for (uint32_t l = 0; l < L; l++) {
-        writer_args[3 + 4 * l] = outputs[ExecuteNetworkOperation::acc_index(l)].buffer()->address();
-        writer_args[4 + 4 * l] = outputs[ExecuteNetworkOperation::scaler_w_index(L, l)].buffer()->address();
-        writer_args[5 + 4 * l] = outputs[ExecuteNetworkOperation::scaler_out_index(L, l)].buffer()->address();
-    }
+    writer_args[1] = outputs[ExecuteNetworkOperation::scalers_index()].buffer()->address();
+    writer_args[2] = outputs[ExecuteNetworkOperation::acc_index()].buffer()->address();
 }
 
 }  // namespace zkml::operations::network_execution

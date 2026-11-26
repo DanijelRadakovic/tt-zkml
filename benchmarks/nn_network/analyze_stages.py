@@ -38,7 +38,7 @@ for r in sorted(runs)[2:]:
     kern = [(s, e) for risc in z for n, s, e in z[risc] if n.endswith("-KERNEL")]
     res["kernel"].append(us(max(e for _, e in kern) - min(s for s, _ in kern)))
     tot = defaultdict(float)
-    for risc, names in (("TRISC_1", ("QUANT_X", "WAIT_W", "QUANT_W", "WAIT_ACC", "MATMUL", "REQUANT")), ("NCRISC", ("READ_W",)), ("BRISC", ("WAIT_DONE", "WRITE"))):
+    for risc, names in (("TRISC_1", ("QUANT_X", "WAIT_W", "QUANT_W", "QW_SCALE", "QW_QUANT", "WAIT_ACC", "MATMUL", "REQUANT")), ("NCRISC", ("READ_W",)), ("BRISC", ("WAIT_DONE", "WRITE"))):
         for n, s, e in z.get(risc, []):
             if n in names:
                 tot[n] += us(e - s)
@@ -59,6 +59,9 @@ for n in ("QUANT_X", "WAIT_W", "QUANT_W", "WAIT_ACC", "MATMUL", "REQUANT"):
     acc += v
     extra = f"{v * mhz / tiles[n]:.0f} cycles/tile" if n in tiles else ""
     print(f"  {n:10s} {v:8.1f} {100 * v / k:11.1f}% {v / L:9.2f}  {notes[n]} {('- ' + extra) if extra else ''}")
+for n in ("QW_SCALE", "QW_QUANT"):
+    if n in med:
+        print(f"    {n:10s} {med[n]:8.1f} {100 * med[n] / k:11.1f}% {med[n] / L:9.2f}  (inside QUANT_W) - {med[n] * mhz / tiles['QUANT_W']:.0f} cycles/tile")
 print(f"  {'(rest)':10s} {k - acc:8.1f} {100 * (k - acc) / k:11.1f}%            start-up, kernel end, wait inside the stages not in a zone")
 if "MATMUL" in med:
     mm_calls = L * Mt * Wt * Wt

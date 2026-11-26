@@ -55,8 +55,9 @@
  *
  * | Index | Name            | Values     | Description                                                         |
  * |-------|-----------------|------------|---------------------------------------------------------------------|
- * | 0     | `output_int8`   | 0          | Int32 output, two's complement                                      |
+ * | 0     | `output_kind`   | 0          | Int32 output, two's complement                                      |
  * |       |                 | 1          | Int8 output, two's complement bytes packed through the UInt8 packer |
+ * |       |                 | 2          | UInt8 output, sign-magnitude bytes (bit 7 = sign): what the FPU reads as Int8 |
  * | 1     | `bit_width`     | 8, 16, 32  | Quantized width; Int8 output requires 8                             |
  * | 2     | `IN_RING_PAGES` | >= 2       | Pages of `c_0`: reader batch * `cb_in_size_factor`                  |
  * | 3     | `DST_TILES`     | 2 .. 4     | DST tiles used per section; the host passes `dst_tiles` (4)         |
@@ -86,7 +87,9 @@
 void kernel_main() {
     const uint32_t num_tiles = get_arg_val<uint32_t>(0);
 
-    constexpr bool is_output_int8 = get_compile_time_arg_val(0) == 1;
+    constexpr uint32_t output_kind = get_compile_time_arg_val(0);  // 0 Int32, 1 Int8 (two's complement), 2 UInt8 (sign-magnitude)
+    constexpr bool is_output_int8 = output_kind != 0;
+    constexpr bool sign_mag = output_kind == 2;
     constexpr uint32_t bit_width = get_compile_time_arg_val(1);
     constexpr uint32_t in_ring_pages = get_compile_time_arg_val(2);  // c_0 pages, checked on the host
     constexpr uint32_t DST_TILES = get_compile_time_arg_val(3);
@@ -164,7 +167,7 @@ void kernel_main() {
     if constexpr (bit_width == 32) {
         MATH(zkml::sfpu::quant32_init());
     } else {
-        MATH(zkml::sfpu::quant_small_init<is_output_int8>());
+        MATH((zkml::sfpu::quant_small_init<is_output_int8, sign_mag>()));
     }
 
     zkml::common::RingCursor out_ring(out_ring_pages);  // c_16 write position
@@ -188,7 +191,7 @@ void kernel_main() {
             if constexpr (bit_width == 32) {
                 MATH(zkml::sfpu::quant32_tile(i));
             } else {
-                MATH(zkml::sfpu::quant_small_tile<is_output_int8>(i));
+                MATH((zkml::sfpu::quant_small_tile<is_output_int8, sign_mag>(i)));
             }
         }
         for (uint32_t i = 0; i < n; i++) {

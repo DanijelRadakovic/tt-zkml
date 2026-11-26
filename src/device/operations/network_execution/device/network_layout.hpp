@@ -46,5 +46,7 @@ constexpr uint32_t dst_tiles = 4;
 constexpr uint32_t scaler_pages = 2;
 /// Largest K in tiles: K * 127 * 127 stays below 2^30 (31 magnitude bits of the accumulator).
 constexpr uint32_t max_k_tiles = 2080;
+/// Largest K in tiles for the float requantizer: |acc| <= K * 127 * 127 <= 2^24 converts to fp32 exactly (K <= 1024).
+constexpr uint32_t max_float_requant_kt = 32;
 
 }  // namespace zkml::network

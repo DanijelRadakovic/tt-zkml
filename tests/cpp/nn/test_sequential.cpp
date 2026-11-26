@@ -56,12 +56,12 @@ protected:
 
 void expect_same(const zkml::prim::NetworkResult& a, const zkml::prim::NetworkResult& b) {
     EXPECT_EQ(a.out.to_vector<uint8_t>(), b.out.to_vector<uint8_t>());
-    EXPECT_EQ(a.scaler_x.to_vector<float>(), b.scaler_x.to_vector<float>());
-    ASSERT_EQ(a.acc.size(), b.acc.size());
-    for (size_t l = 0; l < a.acc.size(); l++) {
-        EXPECT_EQ(a.acc[l].to_vector<uint32_t>(), b.acc[l].to_vector<uint32_t>()) << "layer " << l;
-        EXPECT_EQ(a.scaler_w[l].to_vector<float>(), b.scaler_w[l].to_vector<float>()) << "layer " << l;
-        EXPECT_EQ(a.scaler_out[l].to_vector<float>(), b.scaler_out[l].to_vector<float>()) << "layer " << l;
+    EXPECT_EQ(a.scaler_x(), b.scaler_x());
+    ASSERT_EQ(a.layers(), b.layers());
+    EXPECT_EQ(a.acc.to_vector<uint32_t>(), b.acc.to_vector<uint32_t>());
+    for (uint32_t l = 0; l < a.layers(); l++) {
+        EXPECT_EQ(a.scaler_w(l), b.scaler_w(l)) << "layer " << l;
+        EXPECT_EQ(a.scaler_out(l), b.scaler_out(l)) << "layer " << l;
     }
 }
 

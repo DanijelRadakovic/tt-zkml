@@ -141,6 +141,20 @@ inline void acc_absmax_to_scaler(uint32_t idst) {
     _llk_math_eltwise_unary_sfpu_params_(k_to_shift, idst, VectorMode::RC_custom);
 }
 
+// LReg7 = the scaler 2^k itself (fp32), read back from the tile that scaler_from_k_face has just written: the multiplier of the
+// float requantizer (requant_lm_tile). Hand-written for the reason given at k_to_shift.
+inline void scaler_to_lreg7() {
+    TTI_SFPLOAD(SCALE_LREG_ID, InstrModLoadStore::FP32, ADDR_MOD_7, 0);
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+}
+
+inline void acc_absmax_to_scaler_float(uint32_t idst) {
+    _llk_math_eltwise_unary_sfpu_params_(acc_absmax_reduce_to_k, idst, VectorMode::RC_custom);
+    _llk_math_eltwise_unary_sfpu_params_(scaler_from_k_face, idst, VectorMode::RC);
+    _llk_math_eltwise_unary_sfpu_params_(scaler_to_lreg7, idst, VectorMode::RC_custom);
+}
+
 // ---- the requantizer: hand-written SFPU instructions, 11 (ReLU) or 13 per 4 rows x 8 lanes, no branches ----
 //
 // With K24 = 24 + k in LReg7 (acc_absmax_to_scaler leaves it there) and mag the magnitude of the accumulator (< 2^30):
@@ -213,6 +227,73 @@ template <bool RELU>
 inline void requant_tile(uint32_t idst) {
     ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
     _llk_math_eltwise_binary_sfpu_params_(requant_face<RELU, 8>, idst, idst, idst, VectorMode::RC);
+}
+
+// ---- the float requantizer, pipelined with SFPLOADMACRO ----
+//
+// For K * 127 * 127 <= 2^24 (K <= 1024) the int32 accumulator converts to fp32 exactly (SFPCAST, sign-magnitude to fp32), and
+// RNE(acc * 2^k) is the magic-number rounding of quant_sm8_lm: m = acc * 2^k + 1.5 * 2^23, n = bits(m) - bits(1.5 * 2^23), then
+// the sign-magnitude form of n. Bit-exact with the integer requantizer (a power-of-two scale is exact, the conversion is exact, the
+// rounding is the same RNE). Per 4 rows x 8 lanes: 3 issue slots (the integer requantizer needs 11 to 13):
+//   3r      SFPLOADMACRO  load the raw sign-magnitude accumulator (macro 0 schedules the MAD, the cast and the store below)
+//   3r+1    SFPCAST       a = fp32(a)                              (issued normally, Simple sub-unit)
+//   3r+2    SFPIADD       n = a - bits(magic) of the row before    (issued normally, Simple sub-unit)
+//   3r+3    [MAD]         a = a * 2^k + magic                      (result at 3r+5)
+//   3r+5    SFPIADD       n = bits(a) - bits(magic)                (the regular instruction of slot 3(r+1)+2)
+//   3r+6    [Simple]      a = sign-magnitude(n)                    (SFPCAST INT32_TO_SM32, the Simple slot of cycle 3(r+2))
+//   3r+7    [Store]       Dst = a
+// Row r uses LREG(r & 3). Needs LREG4 = magic, LREG5 = -magic, LREG7 = 2^k (fp32). The result is the sign-magnitude int32 of the
+// byte: pack it with the Int8 packer (pack_reconfig_int8_view), like the quantized weights. No ReLU here: the caller applies it.
+inline void requant_lm_init() {
+    ckernel::llk_math_eltwise_unary_sfpu_init<SfpuType::unused, DST_ACCUM_MODE>();
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG4, RNE_MAGIC_BITS);
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, 0u - RNE_MAGIC_BITS);
+    // InstructionTemplate[0]: LReg[VD] = sign-magnitude(LReg[VC]) (two's complement integer in); the macro fills in VC and VD.
+    TTI_SFPCAST(0, 12, sfpi::SFPCAST_MOD1_INT32_TO_SM32);
+    // InstructionTemplate[1]: VD = VA * VB + VC with VA = 2^k, VC = magic; the macro fills in VB and VD.
+    TTI_SFPMAD(SCALE_LREG_ID, p_sfpu::LREG0, p_sfpu::LREG4, 13, 0);
+    // Macro 0. Sub-unit byte: 0x80 = the row register is VB, bits 5:3 = delay, bits 2:0 = 4 + template (3 = store).
+    // A delay d executes d + 1 cycles after the SFPLOADMACRO.
+    constexpr uint simple_bits = (5 << 3) | 4;         // template 0 (the cast), executes at 3r + 6
+    constexpr uint mad_bits = 0x80 | (2 << 3) | 5;     // template 1, executes at 3r + 3
+    constexpr uint round_bits = 0;
+    constexpr uint store_bits = (6 << 3) | 3;          // executes at 3r + 7
+    TTI_SFPLOADI(0, sfpi::SFPLOADI_MOD0_LOWER, (mad_bits << 8) | simple_bits);
+    TTI_SFPLOADI(0, sfpi::SFPLOADI_MOD0_UPPER, (store_bits << 8) | round_bits);
+    TTI_SFPCONFIG(0, 4 + 0, 0);
+    TTI_SFPNOP;
+    // Misc: StoreMod0 = INT32 (raw), delays count issued instructions on all four sub-units.
+    TTI_SFPCONFIG(0xF00 | static_cast<uint>(InstrModLoadStore::INT32), 8, 1);
+    TTI_SFPNOP;
+}
+
+inline void requant_lm_body() {
+    // see quant_sm8_lm_body: SFPLOADMACRO does not stall for an FPU write to Dst
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+#pragma GCC unroll 32
+    for (int d = 0; d < 32; d++) {
+        TT_SFPLOADMACRO((0 << 2) | (d & 3), InstrModLoadStore::INT32, ADDR_MOD_7, 2 * d);
+        TT_SFPCAST(p_sfpu::LREG0 + (d & 3), p_sfpu::LREG0 + (d & 3), sfpi::SFPCAST_MOD1_SM32_TO_FP32_RNE);
+        if (d == 0) {
+            TTI_SFPNOP;
+        } else {
+            TT_SFPIADD(0, p_sfpu::LREG5, p_sfpu::LREG0 + ((d - 1) & 3), sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
+        }
+    }
+    // slots 96 and 97, then the SFPIADD of row 31 (slot 98), then the scheduled cast and store of row 31 (cycles 99 and 100)
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TT_SFPIADD(0, p_sfpu::LREG5, p_sfpu::LREG0 + (31 & 3), sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+}
+
+inline void requant_lm_tile(uint32_t idst) {
+    _llk_math_eltwise_unary_sfpu_params_(requant_lm_body, idst, VectorMode::None);
 }
 
 #endif  // TRISC_MATH

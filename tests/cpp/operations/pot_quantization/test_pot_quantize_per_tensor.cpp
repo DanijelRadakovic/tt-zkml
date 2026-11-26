@@ -63,6 +63,7 @@ const char* name_of(DataType dt) {
         case DataType::BFLOAT16: return "bf16";
         case DataType::INT32: return "int32";
         case DataType::INT8: return "int8";
+        case DataType::UINT8: return "uint8-sm";
         default: return "?";
     }
 }
@@ -99,6 +100,11 @@ Result run(
     if (out_dt == DataType::INT8) {
         auto v = out.to_vector<int8_t>();
         q.assign(v.begin(), v.end());
+    } else if (out_dt == DataType::UINT8) {
+        // sign-magnitude bytes: bit 7 = sign, bits 0..6 = magnitude (the format the FPU reads as Int8)
+        for (uint8_t b : out.to_vector<uint8_t>()) {
+            q.push_back((b & 0x80) ? -static_cast<int32_t>(b & 0x7F) : static_cast<int32_t>(b));
+        }
     } else {
         q = out.to_vector<int32_t>();
     }
@@ -179,10 +185,12 @@ std::vector<Config> all_configs() {
     return std::vector<Config>{
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits8},
         {DataType::FLOAT32, DataType::INT8, BitWidth::Bits8},
+        {DataType::FLOAT32, DataType::UINT8, BitWidth::Bits8},
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits16},
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits32},
         {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits8},
         {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8},
+        {DataType::BFLOAT16, DataType::UINT8, BitWidth::Bits8},
         {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits16},
         {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32},
     };

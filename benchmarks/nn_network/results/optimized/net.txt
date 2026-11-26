@@ -1,0 +1,440 @@
+net cpu threads=1 M=32 W=64 L=2: net_us=28.9 layer_us=14.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=64 L=2: net_us=20.0 layer_us=10.0 (median of 20)
+net cpu threads=6 M=32 W=64 L=2: net_us=58.2 layer_us=29.1 (median of 20)
+net cpu-vnni threads=6 M=32 W=64 L=2: net_us=19.8 layer_us=9.9 (median of 20)
+net cpu threads=12 M=32 W=64 L=2: net_us=53.7 layer_us=26.9 (median of 20)
+net cpu-vnni threads=12 M=32 W=64 L=2: net_us=23.0 layer_us=11.5 (median of 20)
+net host-enqueue device fp32 M=32 W=64 L=2: enqueue_us=18.7
+net device fp32 M=32 W=64 L=2: net_us=31.3 layer_us=15.7 (median of 20)
+net host-enqueue device bf16 M=32 W=64 L=2: enqueue_us=18.2
+net device bf16 M=32 W=64 L=2: net_us=29.4 layer_us=14.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=64 L=2: enqueue_us=28.3
+net deviceq bf16 M=32 W=64 L=2: net_us=40.9 layer_us=20.4 (median of 20)
+net host-enqueue layers bf16 M=32 W=64 L=2: enqueue_us=48.7
+net layers bf16 M=32 W=64 L=2: net_us=58.3 layer_us=29.2 (median of 20)
+net cpu threads=1 M=32 W=64 L=8: net_us=107.1 layer_us=13.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=64 L=8: net_us=71.8 layer_us=9.0 (median of 20)
+net cpu threads=6 M=32 W=64 L=8: net_us=224.5 layer_us=28.1 (median of 20)
+net cpu-vnni threads=6 M=32 W=64 L=8: net_us=58.5 layer_us=7.3 (median of 20)
+net cpu threads=12 M=32 W=64 L=8: net_us=169.6 layer_us=21.2 (median of 20)
+net cpu-vnni threads=12 M=32 W=64 L=8: net_us=73.3 layer_us=9.2 (median of 20)
+net host-enqueue device fp32 M=32 W=64 L=8: enqueue_us=24.7
+net device fp32 M=32 W=64 L=8: net_us=53.6 layer_us=6.7 (median of 20)
+net host-enqueue device bf16 M=32 W=64 L=8: enqueue_us=33.9
+net device bf16 M=32 W=64 L=8: net_us=57.5 layer_us=7.2 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=64 L=8: enqueue_us=36.5
+net deviceq bf16 M=32 W=64 L=8: net_us=51.4 layer_us=6.4 (median of 20)
+net host-enqueue layers bf16 M=32 W=64 L=8: enqueue_us=183.1
+net layers bf16 M=32 W=64 L=8: net_us=194.5 layer_us=24.3 (median of 20)
+net cpu threads=1 M=32 W=64 L=16: net_us=213.7 layer_us=13.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=64 L=16: net_us=144.9 layer_us=9.1 (median of 20)
+net cpu threads=6 M=32 W=64 L=16: net_us=440.8 layer_us=27.6 (median of 20)
+net cpu-vnni threads=6 M=32 W=64 L=16: net_us=111.5 layer_us=7.0 (median of 20)
+net cpu threads=12 M=32 W=64 L=16: net_us=334.3 layer_us=20.9 (median of 20)
+net cpu-vnni threads=12 M=32 W=64 L=16: net_us=121.6 layer_us=7.6 (median of 20)
+net host-enqueue device fp32 M=32 W=64 L=16: enqueue_us=23.6
+net device fp32 M=32 W=64 L=16: net_us=75.7 layer_us=4.7 (median of 20)
+net host-enqueue device bf16 M=32 W=64 L=16: enqueue_us=34.2
+net device bf16 M=32 W=64 L=16: net_us=75.1 layer_us=4.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=64 L=16: enqueue_us=34.7
+net deviceq bf16 M=32 W=64 L=16: net_us=58.9 layer_us=3.7 (median of 20)
+net host-enqueue layers bf16 M=32 W=64 L=16: enqueue_us=363.6
+net layers bf16 M=32 W=64 L=16: net_us=374.8 layer_us=23.4 (median of 20)
+net cpu threads=1 M=32 W=64 L=32: net_us=427.8 layer_us=13.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=64 L=32: net_us=296.8 layer_us=9.3 (median of 20)
+net cpu threads=6 M=32 W=64 L=32: net_us=827.7 layer_us=25.9 (median of 20)
+net cpu-vnni threads=6 M=32 W=64 L=32: net_us=199.0 layer_us=6.2 (median of 20)
+net cpu threads=12 M=32 W=64 L=32: net_us=655.8 layer_us=20.5 (median of 20)
+net cpu-vnni threads=12 M=32 W=64 L=32: net_us=230.8 layer_us=7.2 (median of 20)
+net host-enqueue device fp32 M=32 W=64 L=32: enqueue_us=32.5
+net device fp32 M=32 W=64 L=32: net_us=129.5 layer_us=4.0 (median of 20)
+net host-enqueue device bf16 M=32 W=64 L=32: enqueue_us=28.2
+net device bf16 M=32 W=64 L=32: net_us=105.4 layer_us=3.3 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=64 L=32: enqueue_us=48.8
+net deviceq bf16 M=32 W=64 L=32: net_us=90.7 layer_us=2.8 (median of 20)
+net host-enqueue layers bf16 M=32 W=64 L=32: enqueue_us=713.4
+net layers bf16 M=32 W=64 L=32: net_us=724.8 layer_us=22.7 (median of 20)
+net cpu threads=1 M=32 W=128 L=2: net_us=88.4 layer_us=44.2 (median of 20)
+net cpu-vnni threads=1 M=32 W=128 L=2: net_us=60.0 layer_us=30.0 (median of 20)
+net cpu threads=6 M=32 W=128 L=2: net_us=101.8 layer_us=50.9 (median of 20)
+net cpu-vnni threads=6 M=32 W=128 L=2: net_us=33.1 layer_us=16.6 (median of 20)
+net cpu threads=12 M=32 W=128 L=2: net_us=101.0 layer_us=50.5 (median of 20)
+net cpu-vnni threads=12 M=32 W=128 L=2: net_us=28.5 layer_us=14.3 (median of 20)
+net host-enqueue device fp32 M=32 W=128 L=2: enqueue_us=17.8
+net device fp32 M=32 W=128 L=2: net_us=42.0 layer_us=21.0 (median of 20)
+net host-enqueue device bf16 M=32 W=128 L=2: enqueue_us=18.3
+net device bf16 M=32 W=128 L=2: net_us=37.0 layer_us=18.5 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=128 L=2: enqueue_us=21.5
+net deviceq bf16 M=32 W=128 L=2: net_us=33.5 layer_us=16.7 (median of 20)
+net host-enqueue layers bf16 M=32 W=128 L=2: enqueue_us=48.6
+net layers bf16 M=32 W=128 L=2: net_us=60.2 layer_us=30.1 (median of 20)
+net cpu threads=1 M=32 W=128 L=8: net_us=347.3 layer_us=43.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=128 L=8: net_us=231.4 layer_us=28.9 (median of 20)
+net cpu threads=6 M=32 W=128 L=8: net_us=371.4 layer_us=46.4 (median of 20)
+net cpu-vnni threads=6 M=32 W=128 L=8: net_us=92.3 layer_us=11.5 (median of 20)
+net cpu threads=12 M=32 W=128 L=8: net_us=357.4 layer_us=44.7 (median of 20)
+net cpu-vnni threads=12 M=32 W=128 L=8: net_us=97.7 layer_us=12.2 (median of 20)
+net host-enqueue device fp32 M=32 W=128 L=8: enqueue_us=21.6
+net device fp32 M=32 W=128 L=8: net_us=93.7 layer_us=11.7 (median of 20)
+net host-enqueue device bf16 M=32 W=128 L=8: enqueue_us=20.7
+net device bf16 M=32 W=128 L=8: net_us=73.2 layer_us=9.1 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=128 L=8: enqueue_us=23.4
+net deviceq bf16 M=32 W=128 L=8: net_us=48.6 layer_us=6.1 (median of 20)
+net host-enqueue layers bf16 M=32 W=128 L=8: enqueue_us=182.5
+net layers bf16 M=32 W=128 L=8: net_us=195.0 layer_us=24.4 (median of 20)
+net cpu threads=1 M=32 W=128 L=16: net_us=674.4 layer_us=42.1 (median of 20)
+net cpu-vnni threads=1 M=32 W=128 L=16: net_us=464.1 layer_us=29.0 (median of 20)
+net cpu threads=6 M=32 W=128 L=16: net_us=717.2 layer_us=44.8 (median of 20)
+net cpu-vnni threads=6 M=32 W=128 L=16: net_us=155.5 layer_us=9.7 (median of 20)
+net cpu threads=12 M=32 W=128 L=16: net_us=573.1 layer_us=35.8 (median of 20)
+net cpu-vnni threads=12 M=32 W=128 L=16: net_us=174.0 layer_us=10.9 (median of 20)
+net host-enqueue device fp32 M=32 W=128 L=16: enqueue_us=24.9
+net device fp32 M=32 W=128 L=16: net_us=161.5 layer_us=10.1 (median of 20)
+net host-enqueue device bf16 M=32 W=128 L=16: enqueue_us=24.2
+net device bf16 M=32 W=128 L=16: net_us=122.1 layer_us=7.6 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=128 L=16: enqueue_us=28.6
+net deviceq bf16 M=32 W=128 L=16: net_us=71.9 layer_us=4.5 (median of 20)
+net host-enqueue layers bf16 M=32 W=128 L=16: enqueue_us=351.4
+net layers bf16 M=32 W=128 L=16: net_us=363.5 layer_us=22.7 (median of 20)
+net cpu threads=1 M=32 W=128 L=32: net_us=1347.7 layer_us=42.1 (median of 20)
+net cpu-vnni threads=1 M=32 W=128 L=32: net_us=918.6 layer_us=28.7 (median of 20)
+net cpu threads=6 M=32 W=128 L=32: net_us=1428.0 layer_us=44.6 (median of 20)
+net cpu-vnni threads=6 M=32 W=128 L=32: net_us=296.3 layer_us=9.3 (median of 20)
+net cpu threads=12 M=32 W=128 L=32: net_us=1336.7 layer_us=41.8 (median of 20)
+net cpu-vnni threads=12 M=32 W=128 L=32: net_us=341.5 layer_us=10.7 (median of 20)
+net host-enqueue device fp32 M=32 W=128 L=32: enqueue_us=36.8
+net device fp32 M=32 W=128 L=32: net_us=299.4 layer_us=9.4 (median of 20)
+net host-enqueue device bf16 M=32 W=128 L=32: enqueue_us=34.7
+net device bf16 M=32 W=128 L=32: net_us=222.0 layer_us=6.9 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=128 L=32: enqueue_us=46.6
+net deviceq bf16 M=32 W=128 L=32: net_us=125.9 layer_us=3.9 (median of 20)
+net host-enqueue layers bf16 M=32 W=128 L=32: enqueue_us=701.9
+net layers bf16 M=32 W=128 L=32: net_us=723.8 layer_us=22.6 (median of 20)
+net cpu threads=1 M=32 W=256 L=2: net_us=335.5 layer_us=167.8 (median of 20)
+net cpu-vnni threads=1 M=32 W=256 L=2: net_us=211.7 layer_us=105.9 (median of 20)
+net cpu threads=6 M=32 W=256 L=2: net_us=103.3 layer_us=51.7 (median of 20)
+net cpu-vnni threads=6 M=32 W=256 L=2: net_us=58.3 layer_us=29.1 (median of 20)
+net cpu threads=12 M=32 W=256 L=2: net_us=144.4 layer_us=72.2 (median of 20)
+net cpu-vnni threads=12 M=32 W=256 L=2: net_us=53.3 layer_us=26.7 (median of 20)
+net host-enqueue device fp32 M=32 W=256 L=2: enqueue_us=18.4
+net device fp32 M=32 W=256 L=2: net_us=84.2 layer_us=42.1 (median of 20)
+net host-enqueue device bf16 M=32 W=256 L=2: enqueue_us=18.0
+net device bf16 M=32 W=256 L=2: net_us=63.4 layer_us=31.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=256 L=2: enqueue_us=18.9
+net deviceq bf16 M=32 W=256 L=2: net_us=41.5 layer_us=20.8 (median of 20)
+net host-enqueue layers bf16 M=32 W=256 L=2: enqueue_us=48.5
+net layers bf16 M=32 W=256 L=2: net_us=75.2 layer_us=37.6 (median of 20)
+net cpu threads=1 M=32 W=256 L=8: net_us=1300.2 layer_us=162.5 (median of 20)
+net cpu-vnni threads=1 M=32 W=256 L=8: net_us=836.2 layer_us=104.5 (median of 20)
+net cpu threads=6 M=32 W=256 L=8: net_us=356.7 layer_us=44.6 (median of 20)
+net cpu-vnni threads=6 M=32 W=256 L=8: net_us=178.8 layer_us=22.4 (median of 20)
+net cpu threads=12 M=32 W=256 L=8: net_us=532.9 layer_us=66.6 (median of 20)
+net cpu-vnni threads=12 M=32 W=256 L=8: net_us=175.3 layer_us=21.9 (median of 20)
+net host-enqueue device fp32 M=32 W=256 L=8: enqueue_us=22.7
+net device fp32 M=32 W=256 L=8: net_us=254.7 layer_us=31.8 (median of 20)
+net host-enqueue device bf16 M=32 W=256 L=8: enqueue_us=26.2
+net device bf16 M=32 W=256 L=8: net_us=181.7 layer_us=22.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=256 L=8: enqueue_us=23.4
+net deviceq bf16 M=32 W=256 L=8: net_us=86.8 layer_us=10.9 (median of 20)
+net host-enqueue layers bf16 M=32 W=256 L=8: enqueue_us=182.5
+net layers bf16 M=32 W=256 L=8: net_us=217.2 layer_us=27.2 (median of 20)
+net cpu threads=1 M=32 W=256 L=16: net_us=2661.3 layer_us=166.3 (median of 20)
+net cpu-vnni threads=1 M=32 W=256 L=16: net_us=1618.2 layer_us=101.1 (median of 20)
+net cpu threads=6 M=32 W=256 L=16: net_us=763.9 layer_us=47.7 (median of 20)
+net cpu-vnni threads=6 M=32 W=256 L=16: net_us=358.8 layer_us=22.4 (median of 20)
+net cpu threads=12 M=32 W=256 L=16: net_us=1096.0 layer_us=68.5 (median of 20)
+net cpu-vnni threads=12 M=32 W=256 L=16: net_us=343.0 layer_us=21.4 (median of 20)
+net host-enqueue device fp32 M=32 W=256 L=16: enqueue_us=32.3
+net device fp32 M=32 W=256 L=16: net_us=484.3 layer_us=30.3 (median of 20)
+net host-enqueue device bf16 M=32 W=256 L=16: enqueue_us=30.6
+net device bf16 M=32 W=256 L=16: net_us=333.2 layer_us=20.8 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=256 L=16: enqueue_us=34.6
+net deviceq bf16 M=32 W=256 L=16: net_us=152.2 layer_us=9.5 (median of 20)
+net host-enqueue layers bf16 M=32 W=256 L=16: enqueue_us=354.8
+net layers bf16 M=32 W=256 L=16: net_us=405.1 layer_us=25.3 (median of 20)
+net cpu threads=1 M=32 W=256 L=32: net_us=5318.6 layer_us=166.2 (median of 20)
+net cpu-vnni threads=1 M=32 W=256 L=32: net_us=3238.7 layer_us=101.2 (median of 20)
+net cpu threads=6 M=32 W=256 L=32: net_us=1585.1 layer_us=49.5 (median of 20)
+net cpu-vnni threads=6 M=32 W=256 L=32: net_us=714.3 layer_us=22.3 (median of 20)
+net cpu threads=12 M=32 W=256 L=32: net_us=2096.2 layer_us=65.5 (median of 20)
+net cpu-vnni threads=12 M=32 W=256 L=32: net_us=675.2 layer_us=21.1 (median of 20)
+net host-enqueue device fp32 M=32 W=256 L=32: enqueue_us=41.4
+net device fp32 M=32 W=256 L=32: net_us=936.9 layer_us=29.3 (median of 20)
+net host-enqueue device bf16 M=32 W=256 L=32: enqueue_us=37.7
+net device bf16 M=32 W=256 L=32: net_us=633.1 layer_us=19.8 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=256 L=32: enqueue_us=46.4
+net deviceq bf16 M=32 W=256 L=32: net_us=271.5 layer_us=8.5 (median of 20)
+net host-enqueue layers bf16 M=32 W=256 L=32: enqueue_us=696.4
+net layers bf16 M=32 W=256 L=32: net_us=787.8 layer_us=24.6 (median of 20)
+net cpu threads=1 M=32 W=512 L=2: net_us=1275.3 layer_us=637.7 (median of 20)
+net cpu-vnni threads=1 M=32 W=512 L=2: net_us=782.9 layer_us=391.4 (median of 20)
+net cpu threads=6 M=32 W=512 L=2: net_us=244.4 layer_us=122.2 (median of 20)
+net cpu-vnni threads=6 M=32 W=512 L=2: net_us=151.3 layer_us=75.7 (median of 20)
+net cpu threads=12 M=32 W=512 L=2: net_us=238.9 layer_us=119.4 (median of 20)
+net cpu-vnni threads=12 M=32 W=512 L=2: net_us=127.4 layer_us=63.7 (median of 20)
+net device fp32 M=32 W=512 L=2: does not fit in L1
+net host-enqueue device bf16 M=32 W=512 L=2: enqueue_us=20.4
+net device bf16 M=32 W=512 L=2: net_us=167.5 layer_us=83.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=512 L=2: enqueue_us=18.7
+net deviceq bf16 M=32 W=512 L=2: net_us=82.9 layer_us=41.4 (median of 20)
+net host-enqueue layers bf16 M=32 W=512 L=2: enqueue_us=57.3
+net layers bf16 M=32 W=512 L=2: net_us=183.7 layer_us=91.8 (median of 20)
+net cpu threads=1 M=32 W=512 L=8: net_us=4935.5 layer_us=616.9 (median of 20)
+net cpu-vnni threads=1 M=32 W=512 L=8: net_us=3144.9 layer_us=393.1 (median of 20)
+net cpu threads=6 M=32 W=512 L=8: net_us=938.1 layer_us=117.3 (median of 20)
+net cpu-vnni threads=6 M=32 W=512 L=8: net_us=578.0 layer_us=72.2 (median of 20)
+net cpu threads=12 M=32 W=512 L=8: net_us=980.9 layer_us=122.6 (median of 20)
+net cpu-vnni threads=12 M=32 W=512 L=8: net_us=490.3 layer_us=61.3 (median of 20)
+net device fp32 M=32 W=512 L=8: does not fit in L1
+net host-enqueue device bf16 M=32 W=512 L=8: enqueue_us=25.2
+net device bf16 M=32 W=512 L=8: net_us=573.3 layer_us=71.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=512 L=8: enqueue_us=29.1
+net deviceq bf16 M=32 W=512 L=8: net_us=254.2 layer_us=31.8 (median of 20)
+net host-enqueue layers bf16 M=32 W=512 L=8: enqueue_us=182.1
+net layers bf16 M=32 W=512 L=8: net_us=635.1 layer_us=79.4 (median of 20)
+net cpu threads=1 M=32 W=512 L=16: net_us=10088.5 layer_us=630.5 (median of 20)
+net cpu-vnni threads=1 M=32 W=512 L=16: net_us=6204.8 layer_us=387.8 (median of 20)
+net cpu threads=6 M=32 W=512 L=16: net_us=1922.6 layer_us=120.2 (median of 20)
+net cpu-vnni threads=6 M=32 W=512 L=16: net_us=1153.3 layer_us=72.1 (median of 20)
+net cpu threads=12 M=32 W=512 L=16: net_us=1883.0 layer_us=117.7 (median of 20)
+net cpu-vnni threads=12 M=32 W=512 L=16: net_us=968.5 layer_us=60.5 (median of 20)
+net device fp32 M=32 W=512 L=16: does not fit in L1
+net host-enqueue device bf16 M=32 W=512 L=16: enqueue_us=30.5
+net device bf16 M=32 W=512 L=16: net_us=1115.5 layer_us=69.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=512 L=16: enqueue_us=31.1
+net deviceq bf16 M=32 W=512 L=16: net_us=469.6 layer_us=29.3 (median of 20)
+net host-enqueue layers bf16 M=32 W=512 L=16: enqueue_us=368.2
+net layers bf16 M=32 W=512 L=16: net_us=1245.4 layer_us=77.8 (median of 20)
+net cpu threads=1 M=32 W=512 L=32: net_us=19981.4 layer_us=624.4 (median of 20)
+net cpu-vnni threads=1 M=32 W=512 L=32: net_us=12316.5 layer_us=384.9 (median of 20)
+net cpu threads=6 M=32 W=512 L=32: net_us=3878.8 layer_us=121.2 (median of 20)
+net cpu-vnni threads=6 M=32 W=512 L=32: net_us=2377.2 layer_us=74.3 (median of 20)
+net cpu threads=12 M=32 W=512 L=32: net_us=3806.4 layer_us=118.9 (median of 20)
+net cpu-vnni threads=12 M=32 W=512 L=32: net_us=1946.9 layer_us=60.8 (median of 20)
+net device fp32 M=32 W=512 L=32: does not fit in L1
+net host-enqueue device bf16 M=32 W=512 L=32: enqueue_us=42.4
+net device bf16 M=32 W=512 L=32: net_us=2199.8 layer_us=68.7 (median of 20)
+net host-enqueue deviceq bf16 M=32 W=512 L=32: enqueue_us=76.8
+net deviceq bf16 M=32 W=512 L=32: net_us=949.4 layer_us=29.7 (median of 20)
+net host-enqueue layers bf16 M=32 W=512 L=32: enqueue_us=873.2
+net layers bf16 M=32 W=512 L=32: net_us=2486.7 layer_us=77.7 (median of 20)
+net cpu threads=1 M=128 W=64 L=2: net_us=79.5 layer_us=39.8 (median of 20)
+net cpu-vnni threads=1 M=128 W=64 L=2: net_us=45.6 layer_us=22.8 (median of 20)
+net cpu threads=6 M=128 W=64 L=2: net_us=69.1 layer_us=34.6 (median of 20)
+net cpu-vnni threads=6 M=128 W=64 L=2: net_us=25.6 layer_us=12.8 (median of 20)
+net cpu threads=12 M=128 W=64 L=2: net_us=56.2 layer_us=28.1 (median of 20)
+net cpu-vnni threads=12 M=128 W=64 L=2: net_us=25.8 layer_us=12.9 (median of 20)
+net host-enqueue device fp32 M=128 W=64 L=2: enqueue_us=18.2
+net device fp32 M=128 W=64 L=2: net_us=38.2 layer_us=19.1 (median of 20)
+net host-enqueue device bf16 M=128 W=64 L=2: enqueue_us=18.7
+net device bf16 M=128 W=64 L=2: net_us=36.2 layer_us=18.1 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=64 L=2: enqueue_us=29.8
+net deviceq bf16 M=128 W=64 L=2: net_us=43.1 layer_us=21.6 (median of 20)
+net host-enqueue layers bf16 M=128 W=64 L=2: enqueue_us=47.8
+net layers bf16 M=128 W=64 L=2: net_us=60.9 layer_us=30.5 (median of 20)
+net cpu threads=1 M=128 W=64 L=8: net_us=305.2 layer_us=38.1 (median of 20)
+net cpu-vnni threads=1 M=128 W=64 L=8: net_us=158.0 layer_us=19.8 (median of 20)
+net cpu threads=6 M=128 W=64 L=8: net_us=256.2 layer_us=32.0 (median of 20)
+net cpu-vnni threads=6 M=128 W=64 L=8: net_us=76.3 layer_us=9.5 (median of 20)
+net cpu threads=12 M=128 W=64 L=8: net_us=201.7 layer_us=25.2 (median of 20)
+net cpu-vnni threads=12 M=128 W=64 L=8: net_us=84.9 layer_us=10.6 (median of 20)
+net host-enqueue device fp32 M=128 W=64 L=8: enqueue_us=23.6
+net device fp32 M=128 W=64 L=8: net_us=72.6 layer_us=9.1 (median of 20)
+net host-enqueue device bf16 M=128 W=64 L=8: enqueue_us=21.9
+net device bf16 M=128 W=64 L=8: net_us=65.3 layer_us=8.2 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=64 L=8: enqueue_us=38.9
+net deviceq bf16 M=128 W=64 L=8: net_us=72.7 layer_us=9.1 (median of 20)
+net host-enqueue layers bf16 M=128 W=64 L=8: enqueue_us=186.1
+net layers bf16 M=128 W=64 L=8: net_us=198.5 layer_us=24.8 (median of 20)
+net cpu threads=1 M=128 W=64 L=16: net_us=582.1 layer_us=36.4 (median of 20)
+net cpu-vnni threads=1 M=128 W=64 L=16: net_us=312.8 layer_us=19.6 (median of 20)
+net cpu threads=6 M=128 W=64 L=16: net_us=495.7 layer_us=31.0 (median of 20)
+net cpu-vnni threads=6 M=128 W=64 L=16: net_us=148.8 layer_us=9.3 (median of 20)
+net cpu threads=12 M=128 W=64 L=16: net_us=371.0 layer_us=23.2 (median of 20)
+net cpu-vnni threads=12 M=128 W=64 L=16: net_us=160.6 layer_us=10.0 (median of 20)
+net host-enqueue device fp32 M=128 W=64 L=16: enqueue_us=27.9
+net device fp32 M=128 W=64 L=16: net_us=117.1 layer_us=7.3 (median of 20)
+net host-enqueue device bf16 M=128 W=64 L=16: enqueue_us=24.5
+net device bf16 M=128 W=64 L=16: net_us=103.4 layer_us=6.5 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=64 L=16: enqueue_us=34.3
+net deviceq bf16 M=128 W=64 L=16: net_us=95.2 layer_us=6.0 (median of 20)
+net host-enqueue layers bf16 M=128 W=64 L=16: enqueue_us=363.4
+net layers bf16 M=128 W=64 L=16: net_us=375.4 layer_us=23.5 (median of 20)
+net cpu threads=1 M=128 W=64 L=32: net_us=1182.8 layer_us=37.0 (median of 20)
+net cpu-vnni threads=1 M=128 W=64 L=32: net_us=615.1 layer_us=19.2 (median of 20)
+net cpu threads=6 M=128 W=64 L=32: net_us=903.4 layer_us=28.2 (median of 20)
+net cpu-vnni threads=6 M=128 W=64 L=32: net_us=241.5 layer_us=7.5 (median of 20)
+net cpu threads=12 M=128 W=64 L=32: net_us=775.1 layer_us=24.2 (median of 20)
+net cpu-vnni threads=12 M=128 W=64 L=32: net_us=279.3 layer_us=8.7 (median of 20)
+net host-enqueue device fp32 M=128 W=64 L=32: enqueue_us=43.8
+net device fp32 M=128 W=64 L=32: net_us=210.5 layer_us=6.6 (median of 20)
+net host-enqueue device bf16 M=128 W=64 L=32: enqueue_us=35.5
+net device bf16 M=128 W=64 L=32: net_us=182.0 layer_us=5.7 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=64 L=32: enqueue_us=56.9
+net deviceq bf16 M=128 W=64 L=32: net_us=169.7 layer_us=5.3 (median of 20)
+net host-enqueue layers bf16 M=128 W=64 L=32: enqueue_us=714.5
+net layers bf16 M=128 W=64 L=32: net_us=728.7 layer_us=22.8 (median of 20)
+net cpu threads=1 M=128 W=128 L=2: net_us=225.0 layer_us=112.5 (median of 20)
+net cpu-vnni threads=1 M=128 W=128 L=2: net_us=116.2 layer_us=58.1 (median of 20)
+net cpu threads=6 M=128 W=128 L=2: net_us=128.6 layer_us=64.3 (median of 20)
+net cpu-vnni threads=6 M=128 W=128 L=2: net_us=38.0 layer_us=19.0 (median of 20)
+net cpu threads=12 M=128 W=128 L=2: net_us=120.1 layer_us=60.1 (median of 20)
+net cpu-vnni threads=12 M=128 W=128 L=2: net_us=38.8 layer_us=19.4 (median of 20)
+net host-enqueue device fp32 M=128 W=128 L=2: enqueue_us=17.8
+net device fp32 M=128 W=128 L=2: net_us=59.0 layer_us=29.5 (median of 20)
+net host-enqueue device bf16 M=128 W=128 L=2: enqueue_us=26.1
+net device bf16 M=128 W=128 L=2: net_us=58.4 layer_us=29.2 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=128 L=2: enqueue_us=20.8
+net deviceq bf16 M=128 W=128 L=2: net_us=47.2 layer_us=23.6 (median of 20)
+net host-enqueue layers bf16 M=128 W=128 L=2: enqueue_us=50.8
+net layers bf16 M=128 W=128 L=2: net_us=74.0 layer_us=37.0 (median of 20)
+net cpu threads=1 M=128 W=128 L=8: net_us=857.7 layer_us=107.2 (median of 20)
+net cpu-vnni threads=1 M=128 W=128 L=8: net_us=420.0 layer_us=52.5 (median of 20)
+net cpu threads=6 M=128 W=128 L=8: net_us=451.1 layer_us=56.4 (median of 20)
+net cpu-vnni threads=6 M=128 W=128 L=8: net_us=125.4 layer_us=15.7 (median of 20)
+net cpu threads=12 M=128 W=128 L=8: net_us=463.6 layer_us=57.9 (median of 20)
+net cpu-vnni threads=12 M=128 W=128 L=8: net_us=131.5 layer_us=16.4 (median of 20)
+net host-enqueue device fp32 M=128 W=128 L=8: enqueue_us=25.1
+net device fp32 M=128 W=128 L=8: net_us=146.4 layer_us=18.3 (median of 20)
+net host-enqueue device bf16 M=128 W=128 L=8: enqueue_us=30.8
+net device bf16 M=128 W=128 L=8: net_us=129.7 layer_us=16.2 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=128 L=8: enqueue_us=27.1
+net deviceq bf16 M=128 W=128 L=8: net_us=99.5 layer_us=12.4 (median of 20)
+net host-enqueue layers bf16 M=128 W=128 L=8: enqueue_us=181.2
+net layers bf16 M=128 W=128 L=8: net_us=204.4 layer_us=25.5 (median of 20)
+net cpu threads=1 M=128 W=128 L=16: net_us=1688.0 layer_us=105.5 (median of 20)
+net cpu-vnni threads=1 M=128 W=128 L=16: net_us=840.1 layer_us=52.5 (median of 20)
+net cpu threads=6 M=128 W=128 L=16: net_us=897.8 layer_us=56.1 (median of 20)
+net cpu-vnni threads=6 M=128 W=128 L=16: net_us=218.8 layer_us=13.7 (median of 20)
+net cpu threads=12 M=128 W=128 L=16: net_us=806.2 layer_us=50.4 (median of 20)
+net cpu-vnni threads=12 M=128 W=128 L=16: net_us=226.1 layer_us=14.1 (median of 20)
+net host-enqueue device fp32 M=128 W=128 L=16: enqueue_us=28.0
+net device fp32 M=128 W=128 L=16: net_us=257.3 layer_us=16.1 (median of 20)
+net host-enqueue device bf16 M=128 W=128 L=16: enqueue_us=28.9
+net device bf16 M=128 W=128 L=16: net_us=218.4 layer_us=13.6 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=128 L=16: enqueue_us=30.6
+net deviceq bf16 M=128 W=128 L=16: net_us=166.3 layer_us=10.4 (median of 20)
+net host-enqueue layers bf16 M=128 W=128 L=16: enqueue_us=353.7
+net layers bf16 M=128 W=128 L=16: net_us=377.5 layer_us=23.6 (median of 20)
+net cpu threads=1 M=128 W=128 L=32: net_us=3425.8 layer_us=107.1 (median of 20)
+net cpu-vnni threads=1 M=128 W=128 L=32: net_us=1613.9 layer_us=50.4 (median of 20)
+net cpu threads=6 M=128 W=128 L=32: net_us=1738.8 layer_us=54.3 (median of 20)
+net cpu-vnni threads=6 M=128 W=128 L=32: net_us=426.0 layer_us=13.3 (median of 20)
+net cpu threads=12 M=128 W=128 L=32: net_us=1812.4 layer_us=56.6 (median of 20)
+net cpu-vnni threads=12 M=128 W=128 L=32: net_us=444.8 layer_us=13.9 (median of 20)
+net host-enqueue device fp32 M=128 W=128 L=32: enqueue_us=30.8
+net device fp32 M=128 W=128 L=32: net_us=475.9 layer_us=14.9 (median of 20)
+net host-enqueue device bf16 M=128 W=128 L=32: enqueue_us=34.0
+net device bf16 M=128 W=128 L=32: net_us=400.5 layer_us=12.5 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=128 L=32: enqueue_us=46.3
+net deviceq bf16 M=128 W=128 L=32: net_us=304.7 layer_us=9.5 (median of 20)
+net host-enqueue layers bf16 M=128 W=128 L=32: enqueue_us=693.1
+net layers bf16 M=128 W=128 L=32: net_us=716.4 layer_us=22.4 (median of 20)
+net cpu threads=1 M=128 W=256 L=2: net_us=740.9 layer_us=370.4 (median of 20)
+net cpu-vnni threads=1 M=128 W=256 L=2: net_us=349.0 layer_us=174.5 (median of 20)
+net cpu threads=6 M=128 W=256 L=2: net_us=164.2 layer_us=82.1 (median of 20)
+net cpu-vnni threads=6 M=128 W=256 L=2: net_us=84.8 layer_us=42.4 (median of 20)
+net cpu threads=12 M=128 W=256 L=2: net_us=203.0 layer_us=101.5 (median of 20)
+net cpu-vnni threads=12 M=128 W=256 L=2: net_us=77.5 layer_us=38.8 (median of 20)
+net host-enqueue device fp32 M=128 W=256 L=2: enqueue_us=23.3
+net device fp32 M=128 W=256 L=2: net_us=131.3 layer_us=65.7 (median of 20)
+net host-enqueue device bf16 M=128 W=256 L=2: enqueue_us=18.3
+net device bf16 M=128 W=256 L=2: net_us=103.5 layer_us=51.7 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=256 L=2: enqueue_us=18.6
+net deviceq bf16 M=128 W=256 L=2: net_us=77.8 layer_us=38.9 (median of 20)
+net host-enqueue layers bf16 M=128 W=256 L=2: enqueue_us=49.1
+net layers bf16 M=128 W=256 L=2: net_us=129.7 layer_us=64.9 (median of 20)
+net cpu threads=1 M=128 W=256 L=8: net_us=2872.1 layer_us=359.0 (median of 20)
+net cpu-vnni threads=1 M=128 W=256 L=8: net_us=1278.3 layer_us=159.8 (median of 20)
+net cpu threads=6 M=128 W=256 L=8: net_us=604.6 layer_us=75.6 (median of 20)
+net cpu-vnni threads=6 M=128 W=256 L=8: net_us=258.1 layer_us=32.3 (median of 20)
+net cpu threads=12 M=128 W=256 L=8: net_us=761.2 layer_us=95.1 (median of 20)
+net cpu-vnni threads=12 M=128 W=256 L=8: net_us=251.5 layer_us=31.4 (median of 20)
+net host-enqueue device fp32 M=128 W=256 L=8: enqueue_us=24.7
+net device fp32 M=128 W=256 L=8: net_us=392.7 layer_us=49.1 (median of 20)
+net host-enqueue device bf16 M=128 W=256 L=8: enqueue_us=26.2
+net device bf16 M=128 W=256 L=8: net_us=314.8 layer_us=39.3 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=256 L=8: enqueue_us=29.5
+net deviceq bf16 M=128 W=256 L=8: net_us=217.3 layer_us=27.2 (median of 20)
+net host-enqueue layers bf16 M=128 W=256 L=8: enqueue_us=178.6
+net layers bf16 M=128 W=256 L=8: net_us=422.7 layer_us=52.8 (median of 20)
+net cpu threads=1 M=128 W=256 L=16: net_us=5751.2 layer_us=359.5 (median of 20)
+net cpu-vnni threads=1 M=128 W=256 L=16: net_us=2513.5 layer_us=157.1 (median of 20)
+net cpu threads=6 M=128 W=256 L=16: net_us=1233.2 layer_us=77.1 (median of 20)
+net cpu-vnni threads=6 M=128 W=256 L=16: net_us=504.1 layer_us=31.5 (median of 20)
+net cpu threads=12 M=128 W=256 L=16: net_us=1576.1 layer_us=98.5 (median of 20)
+net cpu-vnni threads=12 M=128 W=256 L=16: net_us=486.4 layer_us=30.4 (median of 20)
+net host-enqueue device fp32 M=128 W=256 L=16: enqueue_us=29.6
+net device fp32 M=128 W=256 L=16: net_us=744.9 layer_us=46.6 (median of 20)
+net host-enqueue device bf16 M=128 W=256 L=16: enqueue_us=30.6
+net device bf16 M=128 W=256 L=16: net_us=591.6 layer_us=37.0 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=256 L=16: enqueue_us=30.7
+net deviceq bf16 M=128 W=256 L=16: net_us=392.1 layer_us=24.5 (median of 20)
+net host-enqueue layers bf16 M=128 W=256 L=16: enqueue_us=348.8
+net layers bf16 M=128 W=256 L=16: net_us=815.3 layer_us=51.0 (median of 20)
+net cpu threads=1 M=128 W=256 L=32: net_us=11538.9 layer_us=360.6 (median of 20)
+net cpu-vnni threads=1 M=128 W=256 L=32: net_us=5079.4 layer_us=158.7 (median of 20)
+net cpu threads=6 M=128 W=256 L=32: net_us=2612.5 layer_us=81.6 (median of 20)
+net cpu-vnni threads=6 M=128 W=256 L=32: net_us=1021.5 layer_us=31.9 (median of 20)
+net cpu threads=12 M=128 W=256 L=32: net_us=3214.2 layer_us=100.4 (median of 20)
+net cpu-vnni threads=12 M=128 W=256 L=32: net_us=968.3 layer_us=30.3 (median of 20)
+net host-enqueue device fp32 M=128 W=256 L=32: enqueue_us=71.6
+net device fp32 M=128 W=256 L=32: net_us=1488.4 layer_us=46.5 (median of 20)
+net host-enqueue device bf16 M=128 W=256 L=32: enqueue_us=37.7
+net device bf16 M=128 W=256 L=32: net_us=1143.8 layer_us=35.7 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=256 L=32: enqueue_us=49.1
+net deviceq bf16 M=128 W=256 L=32: net_us=751.6 layer_us=23.5 (median of 20)
+net host-enqueue layers bf16 M=128 W=256 L=32: enqueue_us=709.9
+net layers bf16 M=128 W=256 L=32: net_us=1599.8 layer_us=50.0 (median of 20)
+net cpu threads=1 M=128 W=512 L=2: net_us=2604.0 layer_us=1302.0 (median of 20)
+net cpu-vnni threads=1 M=128 W=512 L=2: net_us=1120.9 layer_us=560.5 (median of 20)
+net cpu threads=6 M=128 W=512 L=2: net_us=469.8 layer_us=234.9 (median of 20)
+net cpu-vnni threads=6 M=128 W=512 L=2: net_us=204.9 layer_us=102.5 (median of 20)
+net cpu threads=12 M=128 W=512 L=2: net_us=463.3 layer_us=231.7 (median of 20)
+net cpu-vnni threads=12 M=128 W=512 L=2: net_us=182.1 layer_us=91.0 (median of 20)
+net device fp32 M=128 W=512 L=2: does not fit in L1
+net host-enqueue device bf16 M=128 W=512 L=2: enqueue_us=23.3
+net device bf16 M=128 W=512 L=2: net_us=284.8 layer_us=142.4 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=512 L=2: enqueue_us=21.1
+net deviceq bf16 M=128 W=512 L=2: net_us=185.3 layer_us=92.7 (median of 20)
+net host-enqueue layers bf16 M=128 W=512 L=2: enqueue_us=58.1
+net layers bf16 M=128 W=512 L=2: net_us=327.5 layer_us=163.7 (median of 20)
+net cpu threads=1 M=128 W=512 L=8: net_us=10338.8 layer_us=1292.3 (median of 20)
+net cpu-vnni threads=1 M=128 W=512 L=8: net_us=4386.1 layer_us=548.3 (median of 20)
+net cpu threads=6 M=128 W=512 L=8: net_us=1920.3 layer_us=240.0 (median of 20)
+net cpu-vnni threads=6 M=128 W=512 L=8: net_us=782.9 layer_us=97.9 (median of 20)
+net cpu threads=12 M=128 W=512 L=8: net_us=1853.3 layer_us=231.7 (median of 20)
+net cpu-vnni threads=12 M=128 W=512 L=8: net_us=685.1 layer_us=85.6 (median of 20)
+net device fp32 M=128 W=512 L=8: does not fit in L1
+net host-enqueue device bf16 M=128 W=512 L=8: enqueue_us=46.0
+net device bf16 M=128 W=512 L=8: net_us=1021.2 layer_us=127.6 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=512 L=8: enqueue_us=29.7
+net deviceq bf16 M=128 W=512 L=8: net_us=607.9 layer_us=76.0 (median of 20)
+net host-enqueue layers bf16 M=128 W=512 L=8: enqueue_us=191.8
+net layers bf16 M=128 W=512 L=8: net_us=1197.9 layer_us=149.7 (median of 20)
+net cpu threads=1 M=128 W=512 L=16: net_us=20693.2 layer_us=1293.3 (median of 20)
+net cpu-vnni threads=1 M=128 W=512 L=16: net_us=8661.8 layer_us=541.4 (median of 20)
+net cpu threads=6 M=128 W=512 L=16: net_us=3810.4 layer_us=238.1 (median of 20)
+net cpu-vnni threads=6 M=128 W=512 L=16: net_us=1563.1 layer_us=97.7 (median of 20)
+net cpu threads=12 M=128 W=512 L=16: net_us=3711.9 layer_us=232.0 (median of 20)
+net cpu-vnni threads=12 M=128 W=512 L=16: net_us=1377.8 layer_us=86.1 (median of 20)
+net device fp32 M=128 W=512 L=16: does not fit in L1
+net host-enqueue device bf16 M=128 W=512 L=16: enqueue_us=58.5
+net device bf16 M=128 W=512 L=16: net_us=1971.5 layer_us=123.2 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=512 L=16: enqueue_us=36.3
+net deviceq bf16 M=128 W=512 L=16: net_us=1164.2 layer_us=72.8 (median of 20)
+net host-enqueue layers bf16 M=128 W=512 L=16: enqueue_us=580.9
+net layers bf16 M=128 W=512 L=16: net_us=2401.3 layer_us=150.1 (median of 20)
+net cpu threads=1 M=128 W=512 L=32: net_us=42376.9 layer_us=1324.3 (median of 20)
+net cpu-vnni threads=1 M=128 W=512 L=32: net_us=17049.6 layer_us=532.8 (median of 20)
+net cpu threads=6 M=128 W=512 L=32: net_us=7658.6 layer_us=239.3 (median of 20)
+net cpu-vnni threads=6 M=128 W=512 L=32: net_us=3144.5 layer_us=98.3 (median of 20)
+net cpu threads=12 M=128 W=512 L=32: net_us=7670.4 layer_us=239.7 (median of 20)
+net cpu-vnni threads=12 M=128 W=512 L=32: net_us=2764.6 layer_us=86.4 (median of 20)
+net device fp32 M=128 W=512 L=32: does not fit in L1
+net host-enqueue device bf16 M=128 W=512 L=32: enqueue_us=79.2
+net device bf16 M=128 W=512 L=32: net_us=3877.7 layer_us=121.2 (median of 20)
+net host-enqueue deviceq bf16 M=128 W=512 L=32: enqueue_us=74.2
+net deviceq bf16 M=128 W=512 L=32: net_us=2311.4 layer_us=72.2 (median of 20)
+net host-enqueue layers bf16 M=128 W=512 L=32: enqueue_us=719.7
+net layers bf16 M=128 W=512 L=32: net_us=4682.9 layer_us=146.3 (median of 20)

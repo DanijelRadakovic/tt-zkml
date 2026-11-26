@@ -100,19 +100,24 @@ ALWI void pack_reconfig_int8_view(uint32_t cb_out) {
 // raw sign-magnitude int32 accumulator and the integer requantizer runs instead (k in LReg7, max(0, .) when `relu`);
 // its bytes go through the UInt8 packer. `int8_pack_view`: cb_out is a UInt8 buffer written with the Int8 packer (see
 // pack_reconfig_int8_view); false: cb_out is an Int8 buffer.
-template <bool acc_in = false, bool relu = false, bool int8_pack_view = false>
+template <bool acc_in = false, bool relu = false, bool int8_pack_view = false, bool acc_float = false>
 ALWI void quant_pass_rt(uint32_t cb_in, uint32_t cb_out, uint32_t tiles, uint32_t out_pages) {
     CircularBuffer in(cb_in), out(cb_out);
     reconfig_data_format_srca(cb_in);
-    if constexpr (acc_in) {
+    if constexpr (acc_in && acc_float) {
+        MATH((zkml::sfpu::requant_lm_init()));
+    } else if constexpr (acc_in) {
         MATH((zkml::sfpu::requant_init<relu>()));
     } else {
         MATH((zkml::sfpu::quant_sm8_lm_init()));
     }
     copy_init(cb_in);
     pack_reconfig_data_format(cb_out);
-    if constexpr (!acc_in && int8_pack_view) {
+    if constexpr ((!acc_in || acc_float) && int8_pack_view) {
         pack_reconfig_int8_view(cb_out);
+    }
+    if constexpr (acc_in && acc_float && relu) {
+        pack_relu_config(ReluConfig::zero());  // the packer zeroes negative (sign-magnitude sign bit) values: the ReLU is free
     }
     zkml::common::RingCursor in_ring(tiles), out_ring(out_pages);
     zkml::common::DstBlockMediator blocks(DST_TILES, tiles, in_ring, out_ring);
@@ -124,7 +129,9 @@ ALWI void quant_pass_rt(uint32_t cb_in, uint32_t cb_out, uint32_t tiles, uint32_
             copy_tile(cb_in, blocks.done() + i, i);
         }
         for (uint32_t i = 0; i < n; i++) {
-            if constexpr (acc_in) {
+            if constexpr (acc_in && acc_float) {
+                MATH((zkml::sfpu::requant_lm_tile(i)));
+            } else if constexpr (acc_in) {
                 MATH((zkml::sfpu::requant_tile<relu>(i)));
             } else {
                 MATH((zkml::sfpu::quant_sm8_lm_tile(i)));
@@ -138,6 +145,9 @@ ALWI void quant_pass_rt(uint32_t cb_in, uint32_t cb_out, uint32_t tiles, uint32_
         tile_regs_release();
         out.push_back(n);
         blocks.commit(n);
+    }
+    if constexpr (acc_in && acc_float && relu) {
+        pack_relu_config(ReluConfig::none());
     }
 }
 template <uint32_t cb_in, uint32_t cb_out, bool acc_in = false, bool relu = false, bool int8_pack_view = false>
@@ -178,12 +188,12 @@ ALWI void matmul_stage_rt(uint32_t cb_a, uint32_t cb_b, uint32_t cb_acc, uint32_
     }
     pack_reconfig_data_format(cb_acc);
     MATH(zkml::sfpu::absmax_init());  // LReg7 = 0
+    matmul_init(cb_a, cb_b);          // once per layer: the absmax sweep between the blocks does not touch the matmul configuration
     const uint32_t out_tiles = Mt * Nt;
     for (uint32_t o0 = 0; o0 < out_tiles; o0 += DST_TILES) {
         const uint32_t n = out_tiles - o0 < DST_TILES ? out_tiles - o0 : DST_TILES;
         acc.reserve_back(n);
         tile_regs_acquire();
-        matmul_init(cb_a, cb_b);
         // (mt, nt) of the first output tile of the block: one division per block, not per tile
         const uint32_t mt0 = o0 / Nt, nt0 = o0 - mt0 * Nt;
         for (uint32_t kt = 0; kt < Kt; kt++) {
@@ -224,12 +234,17 @@ ALWI void matmul_stage() {
 // The scaler 2^k' of the requantization from the integer absmax in LReg7 (left there as k' + 24 for the requantizer),
 // packed to `cb_scaler`; the caller pushes it. The accumulator buffer is the one the matmul packed into: both source
 // registers go back to its format first (the FPU is done).
+template <bool acc_float = false>
 ALWI void pack_requant_scaler_rt(uint32_t cb_acc, uint32_t cb_scaler) {
     reconfig_data_format(cb_acc, cb_acc);
     CircularBuffer scaler(cb_scaler);
     scaler.reserve_back(1);
     tile_regs_acquire();
-    MATH(zkml::sfpu::acc_absmax_to_scaler(dst_scale));
+    if constexpr (acc_float) {
+        MATH(zkml::sfpu::acc_absmax_to_scaler_float(dst_scale));  // LReg7 = 2^k for the float requantizer
+    } else {
+        MATH(zkml::sfpu::acc_absmax_to_scaler(dst_scale));  // LReg7 = k + 24 for the integer requantizer
+    }
     tile_regs_commit();
     tile_regs_wait();
     pack_reconfig_data_format(cb_scaler);

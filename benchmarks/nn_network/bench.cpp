@@ -13,6 +13,7 @@
 //   zkml_nn_network_bench cpuvnni <threads> <M> <width> <L> <reps>    the same network with the matmul in AVX-512 VNNI (vpdpbusd)
 //   zkml_nn_network_bench vnnicheck                                   the VNNI network against the scalar one (no device)
 //   zkml_nn_network_bench device  <fp32|bf16> <M> <width> <L> <reps>   one execute_network call (program cached)
+//   zkml_nn_network_bench deviceq <fp32|bf16> <M> <width> <L> <reps>  one execute_network_quantized call: the weights quantized beforehand
 //   zkml_nn_network_bench layers  <fp32|bf16> <M> <width> <L> <reps>   L execute_layer calls (not chained), for comparison
 //   zkml_nn_network_bench hostprof <fp32|bf16> <M> <width> <L> <reps>  where the HOST time of one call goes (no device time): the
 //                                                                    pieces of ttnn::device_operation::launch, for both ops
@@ -47,6 +48,7 @@
 #include "device/operations/layer_execution/device/execute_layer_device_operation.hpp"
 #include "device/operations/network_execution/device/execute_network_device_operation.hpp"
 #include "device/operations/network_execution/execute_network.hpp"
+#include "device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
 #include <ttnn/device_operation.hpp>
 #include <ttnn/mesh_device_operation_adapter.hpp>
 
@@ -567,15 +569,25 @@ DeviceCtx make_device(const std::string& dt, size_t M, size_t W, int L) {
     return c;
 }
 
-int run_device(bool chained, const std::string& dt, size_t M, size_t W, int L, int reps) {
+int run_device(bool chained, bool quantized, const std::string& dt, size_t M, size_t W, int L, int reps) {
     DeviceCtx c = make_device(dt, M, W, L);
     auto sync = [&] { tt::tt_metal::distributed::Finish(c.dev->mesh_command_queue()); };
     std::vector<zkml::prim::Activation> acts(L, zkml::prim::Activation::ReLU);
     acts.back() = zkml::prim::Activation::None;
+    std::vector<Tensor> qw, scalers;  // pre-quantized weights (`deviceq`)
+    if (quantized) {
+        for (const auto& w : c.tw) {
+            auto [q, s] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, DataType::UINT8);
+            qw.push_back(q);
+            scalers.push_back(s);
+        }
+    }
     double enqueue_us = 0;  // host time until the last call has returned (before the device is waited for)
     auto network = [&] {
         const auto t0 = Clock::now();
-        if (chained) {
+        if (quantized) {
+            (void)zkml::prim::execute_network_quantized(c.tx, qw, scalers, acts);
+        } else if (chained) {
             (void)zkml::prim::execute_network(c.tx, c.tw, acts);
         } else {
             for (int l = 0; l < L; l++) {
@@ -594,8 +606,8 @@ int run_device(bool chained, const std::string& dt, size_t M, size_t W, int L, i
         runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
         enqueues.push_back(enqueue_us);
     }
-    std::printf("net host-enqueue %s %s M=%zu W=%zu L=%d: enqueue_us=%.1f\n", chained ? "device" : "layers", dt.c_str(), M, W, L, median(enqueues));
-    report(chained ? "device" : "layers", dt + " ", M, W, L, median(runs), reps);
+    std::printf("net host-enqueue %s %s M=%zu W=%zu L=%d: enqueue_us=%.1f\n", quantized ? "deviceq" : (chained ? "device" : "layers"), dt.c_str(), M, W, L, median(enqueues));
+    report(quantized ? "deviceq" : (chained ? "device" : "layers"), dt + " ", M, W, L, median(runs), reps);
     tt::tt_metal::ReadMeshDeviceProfilerResults(*c.dev);  // with TT_METAL_DEVICE_PROFILER=1: writes profile_log_device.csv
     c.dev->close();
     return 0;
@@ -668,15 +680,16 @@ int run_hostprof(const std::string& dt, size_t M, size_t W, int L, int reps) {
     {
         using Op = zkml::operations::network_execution::ExecuteNetworkOperation;
         const Op::operation_attributes_t a{acts, c.tx.memory_config()};
-        const Op::tensor_args_t t{c.tx, c.tw};
+        const std::vector<Tensor> no_scalers;
+        const Op::tensor_args_t t{c.tx, c.tw, no_scalers};
         host_profile<Op>(
-            ("execute_network L=" + std::to_string(L) + " (" + std::to_string(2 + 3 * L) + " outputs)").c_str(),
+            ("execute_network L=" + std::to_string(L) + " (3 outputs)").c_str(),
             c.dev.get(), a, t, [&] { (void)zkml::prim::execute_network(c.tx, c.tw, acts); }, reps);
     }
     {
         using Op = zkml::operations::layer_execution::ExecuteLayerOperation;
         const Op::operation_attributes_t a{zkml::prim::Activation::ReLU, c.tx.memory_config()};
-        const Op::tensor_args_t t{c.tx, c.tw[0]};
+        const Op::tensor_args_t t{c.tx, c.tw[0]};  // (execute_layer)
         host_profile<Op>(
             "execute_layer (5 outputs)", c.dev.get(), a, t, [&] { (void)zkml::prim::execute_layer(c.tx, c.tw[0], zkml::prim::Activation::ReLU); }, reps);
     }
@@ -698,14 +711,13 @@ int run_check(size_t M, size_t W, int L) {
     for (size_t i = 0; i < out.size(); i++) {
         bad += out[i] != want.out[i];
     }
-    bad += got.scaler_x.to_vector<float>().at(0) != want.scaler_x;
+    bad += got.scaler_x() != want.scaler_x;
     for (int l = 0; l < L; l++) {
-        bad += got.scaler_w[l].to_vector<float>().at(0) != want.scaler_w[l];
-        bad += got.scaler_out[l].to_vector<float>().at(0) != want.scaler_out[l];
-        const auto acc = got.acc[l].to_vector<uint32_t>();
+        bad += got.scaler_w(l) != want.scaler_w[l];
+        bad += got.scaler_out(l) != want.scaler_out[l];
+        const auto acc = got.acc_values(l);
         for (size_t i = 0; i < acc.size(); i++) {
-            const int32_t v = (acc[i] >> 31) ? -static_cast<int32_t>(acc[i] & 0x7FFFFFFFu) : static_cast<int32_t>(acc[i]);
-            bad += v != want.acc[l][i];
+            bad += acc[i] != want.acc[l][i];
         }
     }
     std::printf("check M=%zu W=%zu L=%d: %zu differences (output bytes, scalers, accumulators)\n", M, W, L, bad);
@@ -728,8 +740,8 @@ int main(int argc, char** argv) {
         return run_vnni_check();
     }
 #endif
-    if ((cmd == "device" || cmd == "layers") && argc >= 7) {
-        return run_device(cmd == "device", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
+    if ((cmd == "device" || cmd == "deviceq" || cmd == "layers") && argc >= 7) {
+        return run_device(cmd != "layers", cmd == "deviceq", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
     }
     if (cmd == "hostprof" && argc >= 7) {
         return run_hostprof(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));

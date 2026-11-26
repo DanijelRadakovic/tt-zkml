@@ -27,6 +27,7 @@
 #include "device/operations/layer_execution/execute_layer.hpp"
 #include "device/operations/network_execution/device/network_layout.hpp"
 #include "device/operations/network_execution/execute_network.hpp"
+#include "device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
 
 using namespace ttnn;
 using tt::tt_metal::DataType;
@@ -198,19 +199,18 @@ protected:
         const NetModel m = host_model(x, ws, M, K0, Ns, acts);
 
         size_t bad = 0;
-        auto expect_scaler = [&](const Tensor& t, float want, const std::string& what) {
-            const float got = t.to_vector<float>().at(0);
+        auto expect_scaler = [&](float got, float want, const std::string& what) {
             if (got != want) {
                 std::printf("  [%s] %s: got %g want %g\n", label.c_str(), what.c_str(), got, want);
                 bad++;
             }
         };
-        expect_scaler(r.scaler_x, m.scaler_x, "scaler_x");
-        EXPECT_EQ(r.acc.size(), ws.size());
+        expect_scaler(r.scaler_x(), m.scaler_x, "scaler_x");
+        EXPECT_EQ(r.layers(), ws.size());
         for (size_t l = 0; l < ws.size(); l++) {
-            expect_scaler(r.scaler_w[l], m.layers[l].scaler_w, "scaler_w " + std::to_string(l));
-            expect_scaler(r.scaler_out[l], m.layers[l].scaler_out, "scaler_out " + std::to_string(l));
-            const auto got_acc = r.acc[l].to_vector<uint32_t>();
+            expect_scaler(r.scaler_w(l), m.layers[l].scaler_w, "scaler_w " + std::to_string(l));
+            expect_scaler(r.scaler_out(l), m.layers[l].scaler_out, "scaler_out " + std::to_string(l));
+            const auto got_acc = r.acc_raw(l);
             size_t acc_bad = 0;
             for (size_t i = 0; i < got_acc.size() && i < m.layers[l].acc_raw.size(); i++) {
                 const int32_t v = (got_acc[i] >> 31) ? -static_cast<int32_t>(got_acc[i] & 0x7FFFFFFF)
@@ -276,10 +276,10 @@ TEST_F(ExecuteNetwork, OneLayerEqualsExecuteLayer) {
     auto [out, acc, sx, sw, so] = zkml::prim::execute_layer(tx, tw, Activation::ReLU);
     const auto net = zkml::prim::execute_network(tx, {tw}, std::vector<Activation>{Activation::ReLU});
     EXPECT_EQ(net.out.to_vector<uint8_t>(), out.to_vector<uint8_t>());
-    EXPECT_EQ(net.acc[0].to_vector<uint32_t>(), acc.to_vector<uint32_t>());
-    EXPECT_EQ(net.scaler_x.to_vector<float>().at(0), sx.to_vector<float>().at(0));
-    EXPECT_EQ(net.scaler_w[0].to_vector<float>().at(0), sw.to_vector<float>().at(0));
-    EXPECT_EQ(net.scaler_out[0].to_vector<float>().at(0), so.to_vector<float>().at(0));
+    EXPECT_EQ(net.acc_raw(0), acc.to_vector<uint32_t>());
+    EXPECT_EQ(net.scaler_x(), sx.to_vector<float>().at(0));
+    EXPECT_EQ(net.scaler_w(0), sw.to_vector<float>().at(0));
+    EXPECT_EQ(net.scaler_out(0), so.to_vector<float>().at(0));
 }
 
 TEST_F(ExecuteNetwork, OneLayerNoRelu) {
@@ -408,4 +408,53 @@ TEST_F(ExecuteNetworkBf16, ThreeLayers) {
         K,
         Ns,
         {Activation::ReLU, Activation::ReLU, Activation::None});
+}
+
+// Pre-quantized weights: quantized once by pot_quantize_per_tensor (INT8), then execute_network_quantized must give, bit for bit, what
+// execute_network gives with the unquantized weights.
+TEST_F(ExecuteNetwork, PreQuantizedWeightsEqualQuantizingOnTheFly) {
+    struct Case { uint32_t M, K; std::vector<uint32_t> Ns; std::vector<Activation> acts; };
+    const std::vector<Case> cases = {
+        {32, 32, {32}, {Activation::None}},
+        {64, 64, {96, 32}, {Activation::ReLU, Activation::None}},
+        {32, 64, {128, 64, 32, 160, 64}, {Activation::ReLU, Activation::ReLU, Activation::None, Activation::ReLU, Activation::ReLU}},
+        {128, 128, {256, 64, 256}, {Activation::ReLU, Activation::ReLU, Activation::None}},
+    };
+    uint32_t seed = 1000;
+    for (const auto& c : cases) {
+        const auto x = uniform(static_cast<size_t>(c.M) * c.K, seed++, -2.f, 2.f);
+        const auto ws = make_weights(c.K, c.Ns, seed += 10);
+        Tensor tx = to_device(x, c.M, c.K);
+        std::vector<Tensor> tws, qws, scs;
+        uint32_t K = c.K;
+        for (size_t l = 0; l < ws.size(); l++) {
+            tws.push_back(to_device(ws[l], K, c.Ns[l]));
+            auto [q, s] = zkml::prim::pot_quantize_per_tensor(tws.back(), zkml::prim::BitWidth::Bits8, DataType::UINT8);
+            qws.push_back(q);
+            scs.push_back(s);
+            K = c.Ns[l];
+        }
+        const auto want = zkml::prim::execute_network(tx, tws, c.acts);
+        const auto got = zkml::prim::execute_network_quantized(tx, qws, scs, c.acts);
+        EXPECT_EQ(got.out.to_vector<uint8_t>(), want.out.to_vector<uint8_t>()) << "M=" << c.M << " layers=" << ws.size();
+        EXPECT_EQ(got.scaler_x(), want.scaler_x());
+        ASSERT_EQ(got.layers(), want.layers());
+        EXPECT_EQ(got.acc.to_vector<uint32_t>(), want.acc.to_vector<uint32_t>());
+        for (uint32_t l = 0; l < ws.size(); l++) {
+            EXPECT_EQ(got.acc_raw(l), want.acc_raw(l)) << "layer " << l;
+            EXPECT_EQ(got.scaler_w(l), want.scaler_w(l)) << "layer " << l;
+            EXPECT_EQ(got.scaler_out(l), want.scaler_out(l)) << "layer " << l;
+        }
+    }
+}
+
+TEST_F(ExecuteNetwork, PreQuantizedRejected) {
+    const uint32_t M = 32, K = 32;
+    Tensor tx = to_device(uniform(M * K, 9, -1.f, 1.f), M, K);
+    Tensor w = to_device(uniform(K * K, 10, -1.f, 1.f), K, K);
+    auto [q, s] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, DataType::UINT8);
+    EXPECT_ANY_THROW(zkml::prim::execute_network_quantized(tx, {w}, {s}, Activation::None));   // not INT8
+    EXPECT_ANY_THROW(zkml::prim::execute_network_quantized(tx, {q}, {}, Activation::None));    // no scaler
+    EXPECT_ANY_THROW(zkml::prim::execute_network_quantized(tx, {q}, {q}, Activation::None));   // the scaler is not FLOAT32
+    EXPECT_ANY_THROW(zkml::prim::execute_network(tx, {q}, Activation::None));                  // INT8 weights without the quantized entry
 }

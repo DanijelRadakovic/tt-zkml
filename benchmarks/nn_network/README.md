@@ -65,3 +65,12 @@ Cycles per tile: quantize weights 263 to 361, requantize 520 to 694, one matmul 
 - Weights are quantized on every call: `QUANT_W` scales with `W^2` and not with `M`, so it is the largest stage for small batches (49% at M = 32, W = 128).
 - The requantization costs about twice as much per tile as the quantization of the weights (it also produces the scaler), and scales with `M * W`.
 - The matmul is the largest stage only at large `W` (43% at W = 512).
+
+## After the optimizations (`results/optimized/`)
+
+`execute_network` got a pipelined float requantizer (`SFPLOADMACRO`, packer ReLU), packed outputs (3 tensors instead of `2 + 3L`) and a
+variant with pre-quantized weights, `execute_network_quantized` (no weight quantization in the kernel, int8 weight reads, no weight buffer).
+All of them are bit-exact with the host model. `dev bf16 q` in `results/optimized/net.md` is the quantized-weights call; `dev bf16 q vs best
+VNNI` is the time of the best CPU (plain or VNNI, 1 / 6 / 12 threads) divided by the device time (above 1: the device is faster).
+Kernel time (profiler): 128 x 256, 8 layers 342 -> 187 us; 32 x 128, 8 layers 56 -> 22 us. Wall time, 32 x 128, 8 layers: 98 -> 58 us before the
+packed outputs and 49 us with them (the host call costs about 20 us, of which 11 us are the three output tensors).
