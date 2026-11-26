@@ -5,7 +5,7 @@
 // Benchmark of pot_quantize_per_tensor on the device: cycles per pass, wall time and power.
 //
 // It runs the REAL kernels of the op (reader, compute, writer under
-// src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
+// src/device/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
 // builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU multiply with
 // an FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only `sfpu` is
 // accepted. The results in results/ and the README are the record of that comparison.
@@ -237,7 +237,7 @@ Setup build(const Params& p, uint32_t n_cores) {
     cb(tt::CBIndex::c_16, out_cb_pages, s.out_tile_bytes, out_format);
     cb(tt::CBIndex::c_17, 1, scale_tile_bytes, scale_format);
 
-    const std::string op_dir = "../../src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/";
+    const std::string op_dir = "../../src/device/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/";
     std::vector<uint32_t> reader_ct = {batch_tiles};
     TensorAccessorArgs(*s.in_buf[0]->get_backing_buffer()).append_to(reader_ct);
     const auto reader = CreateKernel(

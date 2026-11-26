@@ -17,9 +17,9 @@ namespace zkml::common {
  * `__FILE__` is absolute too. The result does not depend on the current working directory.
  *
  * Example: called from
- * `src/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_program_factory.cpp` as
+ * `src/device/operations/pot_quantization/per_tensor/pot_quantize/device/pot_quantize_per_tensor_program_factory.cpp` as
  * `kernel_path(__FILE__, "kernels/dataflow/reader.cpp")`, it returns
- * `<repo>/src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/dataflow/reader.cpp`.
+ * `<repo>/src/device/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/dataflow/reader.cpp`.
  *
  * @param source_file   Path of the calling source file (`__FILE__`).
  * @param relative_path Kernel path relative to the directory of `source_file`.

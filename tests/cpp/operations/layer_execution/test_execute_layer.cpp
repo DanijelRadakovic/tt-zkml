@@ -22,7 +22,7 @@
 #include <ttnn/types.hpp>
 
 #include "common/pot_reference.hpp"
-#include "operations/layer_execution/execute_layer.hpp"
+#include "device/operations/layer_execution/execute_layer.hpp"
 
 using namespace ttnn;
 using tt::tt_metal::DataType;
