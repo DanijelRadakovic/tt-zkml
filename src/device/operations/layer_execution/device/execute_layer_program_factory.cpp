@@ -34,8 +34,9 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
     Program program{};
     const CoreCoord core{0, 0};
 
-    // fp32 or bf16 inputs. bf16 is a B-exponent format, which the JIT refuses to combine with an Int8 CB, so the quantized
-    // bytes then go to UInt8 CBs (exempt from the check; the FPU reads a UInt8 CB as Int8) with the UInt8 packer.
+    // fp32 or bf16 inputs. bf16 is a B-exponent format, which the JIT refuses to combine with an Int8 CB, so the
+    // quantized bytes then go to UInt8 CBs (exempt from the check; the FPU reads a UInt8 CB as Int8) with the UInt8
+    // packer.
     const bool fp32_in = x.dtype() == DataType::FLOAT32;
     const DataFormat in_format = fp32_in ? DataFormat::Float32 : DataFormat::Float16_b;
     const DataFormat q_format = fp32_in ? DataFormat::Int8 : DataFormat::UInt8;

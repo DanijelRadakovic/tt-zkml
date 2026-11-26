@@ -48,8 +48,9 @@ enum class Activation : uint32_t {
  *         - `scaler_out`: FLOAT32 `[1, 1]`, `2^k_acc` of the requantization (`k_acc` is usually negative).
  *
  * Limits of this version: one core; FLOAT32 or BFLOAT16 inputs, both the same (bf16 is quantized through UInt8 circular
- * buffers, which the FPU reads as Int8, because an Int8 buffer cannot share a program with a bf16 one; fp16 is not supported); `K <= 66560` (K * 127 * 127 must stay below 2^30; in practice L1 limits K much earlier); x, w, the accumulator
- * and the outputs must fit in the L1 of the core (the operation throws otherwise).
+ * buffers, which the FPU reads as Int8, because an Int8 buffer cannot share a program with a bf16 one; fp16 is not
+ * supported); `K <= 66560` (K * 127 * 127 must stay below 2^30; in practice L1 limits K much earlier); x, w, the
+ * accumulator and the outputs must fit in the L1 of the core (the operation throws otherwise).
  */
 std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> execute_layer(
     const ttnn::Tensor& x,

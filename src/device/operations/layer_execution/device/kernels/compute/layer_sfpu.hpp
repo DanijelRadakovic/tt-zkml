@@ -45,9 +45,10 @@ using namespace ckernel;
 
 constexpr uint32_t MAG_MASK = 0x7FFFFFFF;
 
-// The running max is kept in LReg7 and updated by SFPSWAP (mod1 = 9: VD = max, VC = min; the lane config EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX must stay clear, see tt-isa-documentation SFPSWAP.md),
-// which compares sign-magnitude, so with ReLU a negative accumulator never wins against the running max (>= 0): no
-// masking at all, 2 instructions per 4 rows x 8 lanes. Without ReLU the sign bit is cleared first (3).
+// The running max is kept in LReg7 and updated by SFPSWAP (mod1 = 9: VD = max, VC = min; the lane config
+// EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX must stay clear, see tt-isa-documentation SFPSWAP.md), which compares
+// sign-magnitude, so with ReLU a negative accumulator never wins against the running max (>= 0): no masking at all, 2
+// instructions per 4 rows x 8 lanes. Without ReLU the sign bit is cleared first (3).
 template <bool RELU, int ITERATIONS = 8>
 inline void acc_absmax_face() {
     if constexpr (!RELU) {

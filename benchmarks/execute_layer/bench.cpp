@@ -57,8 +57,7 @@ int main(int argc, char** argv) {
     const DataType dtype = (dt && std::string(dt) == "bf16") ? DataType::BFLOAT16 : DataType::FLOAT32;
     auto spec = [&](uint32_t h, uint32_t wd) {
         return tt::tt_metal::TensorSpec(
-            Shape({h, wd}),
-            tt::tt_metal::TensorLayout(dtype, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+            Shape({h, wd}), tt::tt_metal::TensorLayout(dtype, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
     };
     Tensor tx = Tensor::from_vector(x, spec(M, K), dev.get());
     Tensor tw = Tensor::from_vector(w, spec(K, N), dev.get());

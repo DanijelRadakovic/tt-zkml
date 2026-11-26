@@ -52,10 +52,12 @@ inline void absmax_reset() {
 }
 
 // One 16x16 face: 8 SFPU rows of 32 lanes. Hand-written instructions, 2.5 per 4 rows x 8 lanes: SFPSWAP with mod1 = 9
-// puts the max in VD and the min in VC (mod1 = 1 the other way round), independent of the VDGetsMin state of other SFPU kernels (but not of the lane config EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX, which must stay clear: tt-isa-documentation SFPSWAP.md), and compares
-// sign-magnitude. Two rows a, b are ordered with one swap, the larger goes against the running max (SCALE_LREG), the
-// smaller against the running min (LREG6, <= 0): |x| <= max(running max, -running min) needs no SFPABS. The final max
-// of the two is taken in absmax_reduce_to_scaler. The tile must be fp32 in DST.
+// puts the max in VD and the min in VC (mod1 = 1 the other way round), independent of the VDGetsMin state of other SFPU
+// kernels (but not of the lane config EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX, which must stay clear:
+// tt-isa-documentation SFPSWAP.md), and compares sign-magnitude. Two rows a, b are ordered with one swap, the larger
+// goes against the running max (SCALE_LREG), the smaller against the running min (LREG6, <= 0): |x| <= max(running max,
+// -running min) needs no SFPABS. The final max of the two is taken in absmax_reduce_to_scaler. The tile must be fp32 in
+// DST.
 template <int ITERATIONS = 8>
 inline void absmax_accumulate_face() {
     static_assert(ITERATIONS % 2 == 0, "rows are handled in pairs");

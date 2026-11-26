@@ -129,7 +129,8 @@ protected:
     }
     static MeshDevice* dev() { return device_.get(); }
     static inline std::shared_ptr<MeshDevice> device_;
-    // The dtype of x and w in `run`; with BFLOAT16 the inputs are first rounded to bf16 (the host model sees the same values).
+    // The dtype of x and w in `run`; with BFLOAT16 the inputs are first rounded to bf16 (the host model sees the same
+    // values).
     static inline DataType dtype_ = DataType::FLOAT32;
 
     // Runs one case and compares with the host model. Returns the number of wrong output bytes.
@@ -349,7 +350,8 @@ TEST_F(ExecuteLayerBf16, Shapes) {
 }
 
 TEST_F(ExecuteLayerBf16, QuantizationTies) {
-    // The same exact half-integers and tiny negatives as the fp32 test; all of them are exact in bf16 (m / 64 with |m| <= 254).
+    // The same exact half-integers and tiny negatives as the fp32 test; all of them are exact in bf16 (m / 64 with |m|
+    // <= 254).
     const uint32_t M = 32, K = 64, N = 32;
     auto make = [](size_t n, int salt) {
         std::vector<float> v(n);

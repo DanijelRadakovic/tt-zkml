@@ -141,10 +141,11 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     }
 }
 
-// bf16 input: q_x and q_w live in UInt8 circular buffers (an Int8 one cannot share a program with the bf16 input buffer). The
-// unpacker treats a UInt8 buffer as unsigned (SrcAUnsigned) and the data as plain bytes, but the quantizer wrote sign-magnitude
-// bytes, which is what the FPU's Int8 format is. So srcA and srcB are configured for Int8 by hand, with the geometry of the
-// buffers: the same registers `reconfig_data_format` writes for an Int8 buffer, which also enables the INT8 math.
+// bf16 input: q_x and q_w live in UInt8 circular buffers (an Int8 one cannot share a program with the bf16 input
+// buffer). The unpacker treats a UInt8 buffer as unsigned (SrcAUnsigned) and the data as plain bytes, but the quantizer
+// wrote sign-magnitude bytes, which is what the FPU's Int8 format is. So srcA and srcB are configured for Int8 by hand,
+// with the geometry of the buffers: the same registers `reconfig_data_format` writes for an Int8 buffer, which also
+// enables the INT8 math.
 ALWI void reconfig_int8_view(uint32_t cb_srca, uint32_t cb_srcb) {
     constexpr uint32_t i8 = static_cast<uint32_t>(DataFormat::Int8);
     UNPACK(({
