@@ -17,7 +17,7 @@
 //   - the absmax in every one of the 1024 positions of a tile, and in every tile of a multi-tile
 //     tensor, which exercises the SFPU per-lane accumulation and the 32-lane reduction
 //   - odd and large tile counts (1..13 tiles, then 257/1001/2049 tiles, far beyond the c_0 reader
-//     block), so the compute kernel's DST chunks (3 and 4 tiles) are cut at the end of the tensor
+//     batch), so the compute kernel's DST blocks (3 and 4 tiles) are cut at the end of the tensor
 //     and at the ends of the c_0 and c_16 rings, with the rings wrapping many times
 //   - the reader knobs noc_read_tile_batch_size / cb_in_size_factor: prime tile counts (the last
 //     batch of the read stream is short), a batch of 1, a batch larger than the tensor, a batch that
@@ -245,8 +245,8 @@ void run_position_sweeps(MeshDevice* dev) {
     std::printf("position sweeps: %zu cases\n", cases);
 }
 
-// Tile-dependent data (every tile differs, so a chunk that is dropped, repeated or written to the
-// wrong page shows up) with the absmax in the very last element, which sits in the tail chunk.
+// Tile-dependent data (every tile differs, so a block that is dropped, repeated or written to the
+// wrong page shows up) with the absmax in the very last element, which sits in the tail block.
 std::vector<float> tiled(uint32_t n_tiles, DataType in_dt, float sign) {
     std::vector<float> x(static_cast<size_t>(n_tiles) * 1024);
     for (size_t i = 0; i < x.size(); i++) {
