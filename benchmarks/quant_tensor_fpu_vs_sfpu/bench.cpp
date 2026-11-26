@@ -2,12 +2,13 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Benchmark: pot_quantize_per_tensor with the SFPU multiply (current) against the FPU multiply (new).
+// Benchmark of pot_quantize_per_tensor on the device: cycles per pass, wall time and power.
 //
-// Both variants run the REAL kernels of the op (reader, compute, writer under
+// It runs the REAL kernels of the op (reader, compute, writer under
 // src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
-// builds. The only difference is the compile-time arg `use_fpu` of the compute kernel (and what it implies:
-// scaler unpack mode, c_16 size). Every run is checked against the host reference.
+// builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU multiply with an
+// FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only `sfpu` is accepted.
+// The results in results/ and the README are the record of that comparison.
 //
 // Usage:
 //   zkml_quant_fpu_vs_sfpu profile <bf16|f32> <sfpu|fpu> <bits 8|16|32> <int32|int8> <tiles> <iters>
@@ -224,14 +225,13 @@ Setup build(const Params& p, uint32_t n_cores) {
 
     const uint32_t batch_tiles = std::min(reader_batch, p.tiles);
     const uint32_t in_cb_pages = batch_tiles * in_cb_factor;
-    const uint32_t block_tiles = p.fpu ? dst_tiles : dst_tiles - 1;  // see the program factory
+    const uint32_t block_tiles = dst_tiles;  // see the program factory
     const uint32_t out_cb_pages = 2 * block_tiles;
     auto cb = [&](uint32_t index, uint32_t pages, uint32_t page_bytes, tt::DataFormat fmt) {
         CreateCircularBuffer(
             program, core_set, CircularBufferConfig(pages * page_bytes, {{index, fmt}}).set_page_size(index, page_bytes));
     };
     cb(tt::CBIndex::c_0, in_cb_pages, in_tile_bytes, in_format);
-    cb(tt::CBIndex::c_1, 1, scale_tile_bytes, scale_format);
     cb(tt::CBIndex::c_16, out_cb_pages, s.out_tile_bytes, out_format);
     cb(tt::CBIndex::c_17, 1, scale_tile_bytes, scale_format);
 
@@ -244,7 +244,7 @@ Setup build(const Params& p, uint32_t n_cores) {
         core_set,
         ReaderDataMovementConfig(reader_ct));
 
-    std::vector<uint32_t> writer_ct;
+    std::vector<uint32_t> writer_ct = {block_tiles, out_cb_pages};
     TensorAccessorArgs(*s.out_buf[0]->get_backing_buffer()).append_to(writer_ct);
     TensorAccessorArgs(*s.scale_buf[0]->get_backing_buffer()).append_to(writer_ct);
     const auto writer = CreateKernel(
@@ -257,7 +257,6 @@ Setup build(const Params& p, uint32_t n_cores) {
     if (!p.bf16) {
         unpack[tt::CBIndex::c_0] = UnpackToDestMode::UnpackToDestFp32;
     }
-    unpack[tt::CBIndex::c_1] = p.fpu ? UnpackToDestMode::Default : UnpackToDestMode::UnpackToDestFp32;
     const auto compute = CreateKernel(
         program,
         zkml::common::kernel_path(__FILE__, (op_dir + "compute/quantize.cpp").c_str()),
@@ -267,8 +266,8 @@ Setup build(const Params& p, uint32_t n_cores) {
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack),
             .math_approx_mode = false,
-            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, FPU multiply, full range
-            .compile_args = {p.out_int8 ? 1u : 0u, p.bits, in_cb_pages, dst_tiles, p.fpu ? 1u : 0u, 0u},
+            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, full range
+            .compile_args = {p.out_int8 ? 1u : 0u, p.bits, in_cb_pages, dst_tiles, 0u},
             .compiler_include_paths = {zkml::common::kernel_include_dir()}});
 
     for (uint32_t i = 0; i < n_cores; i++) {
@@ -326,7 +325,7 @@ std::string config_string(const Params& p) {
     return fmt::format(
         "in {} unit {} bits {} out {} tiles {}",
         p.bf16 ? "bf16" : "f32",
-        p.fpu ? "fpu" : "sfpu",
+        "sfpu",
         p.bits,
         p.out_int8 ? "int8" : "int32",
         p.tiles);
@@ -350,8 +349,8 @@ int main(int argc, char** argv) {
         .bits = static_cast<uint32_t>(std::stoul(argv[4])),
         .out_int8 = std::string(argv[5]) == "int8",
         .tiles = static_cast<uint32_t>(std::stoul(argv[6]))};
-    if (p.fpu && !p.bf16) {
-        fmt::print(stderr, "the FPU variant needs a bf16 input\n");
+    if (p.fpu) {
+        fmt::print(stderr, "the FPU multiply was removed from the op; only sfpu is supported\n");
         return 2;
     }
     SetRootDir(ZKML_TT_METAL_HOME);

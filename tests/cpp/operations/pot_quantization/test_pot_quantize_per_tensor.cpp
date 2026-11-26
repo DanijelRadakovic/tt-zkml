@@ -45,6 +45,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <random>
 #include <vector>
 #include "common/pot_reference.hpp"
 #include "operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
@@ -52,7 +53,6 @@
 using namespace ttnn;
 using tt::tt_metal::DataType;
 using zkml::prim::BitWidth;
-using zkml::prim::ComputeUnit;
 using zkml::prim::QuantRange;
 
 namespace {
@@ -65,15 +65,6 @@ const char* name_of(DataType dt) {
         case DataType::INT8: return "int8";
         default: return "?";
     }
-}
-
-const char* name_of(ComputeUnit unit) {
-    switch (unit) {
-        case ComputeUnit::Auto: return "auto";
-        case ComputeUnit::Sfpu: return "sfpu";
-        case ComputeUnit::Fpu: return "fpu";
-    }
-    return "?";
 }
 
 struct Result {
@@ -95,7 +86,6 @@ Result run(
     bool verbose = true,
     uint32_t batch = 16,
     uint32_t factor = 2,
-    ComputeUnit unit = ComputeUnit::Auto,
     QuantRange range = QuantRange::Full) {
     tt::tt_metal::TensorSpec spec(
         Shape({H, W}), tt::tt_metal::TensorLayout(in_dt, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
@@ -103,7 +93,7 @@ Result run(
     // The reference uses the values the device actually sees (BFLOAT16 rounds the input).
     const std::vector<float> x = in.to_vector<float>();
 
-    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, batch, factor, unit, range);
+    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, batch, factor, range);
 
     std::vector<int32_t> q;
     if (out_dt == DataType::INT8) {
@@ -141,16 +131,15 @@ Result run(
     }
     ok = ok && bad == 0;
     EXPECT_TRUE(ok) << label << " (" << name_of(in_dt) << " -> " << name_of(out_dt) << ", " << width.bits()
-                    << " bits, " << name_of(unit) << ")";
+                    << " bits)";
     if (verbose || !ok) {
         std::printf(
-            "%-4s %-32s in=%-4s out=%-5s bits=%-2u unit=%-4s k=%-4d %zu/%zu mismatches\n",
+            "%-4s %-32s in=%-4s out=%-5s bits=%-2u k=%-4d %zu/%zu mismatches\n",
             ok ? "ok" : "FAIL",
             label.c_str(),
             name_of(in_dt),
             name_of(out_dt),
             width.bits(),
-            name_of(unit),
             k,
             bad,
             x.size());
@@ -185,7 +174,6 @@ struct Config {
     DataType in_dt;
     DataType out_dt;
     BitWidth width;
-    ComputeUnit unit = ComputeUnit::Auto;
 };
 
 std::vector<Config> all_configs() {
@@ -194,15 +182,10 @@ std::vector<Config> all_configs() {
         {DataType::FLOAT32, DataType::INT8, BitWidth::Bits8},
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits16},
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits32},
-        // BFLOAT16 runs on both units: the SFPU multiply and the FPU multiply must give the same result.
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits8, ComputeUnit::Sfpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits8, ComputeUnit::Fpu},
-        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8, ComputeUnit::Sfpu},
-        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8, ComputeUnit::Fpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits16, ComputeUnit::Sfpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits16, ComputeUnit::Fpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32, ComputeUnit::Sfpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32, ComputeUnit::Fpu},
+        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits8},
+        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8},
+        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits16},
+        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32},
     };
 }
 
@@ -218,7 +201,7 @@ void run_matrix(MeshDevice* dev, std::vector<std::vector<int32_t>>& outputs) {
         for (float m : {1.0f, -1.0f, 16.0f, 1e-3f, 3e4f}) {
             char label[64];
             std::snprintf(label, sizeof label, "grid x %g", m);
-            record(run(dev, label, H, W, grid(H * W, c.in_dt, m), c.in_dt, c.out_dt, c.width, true, 16, 2, c.unit));
+            record(run(dev, label, H, W, grid(H * W, c.in_dt, m), c.in_dt, c.out_dt, c.width, true, 16, 2));
         }
 
         // absmax exactly Q gives k = 0; Q + 0.5 needs k = -1 (the device's k - 1 correction).
@@ -226,12 +209,12 @@ void run_matrix(MeshDevice* dev, std::vector<std::vector<int32_t>>& outputs) {
         // Q = 2^31 - 1 is not an fp32, so the 32-bit case uses the fp32 just below it; no fp32 lies
         // between 2^31 - 1 and 2^31, so the 32-bit correction never fires and has no Q + 0.5 case.
         const float q = c.width == BitWidth::Bits32 ? 2147483520.0f : static_cast<float>(zkml::reference::pot_qmax(c.width.bits()));
-        record(run(dev, "absmax = Q", H, W, spike(H * W, 1234, q), c.in_dt, c.out_dt, c.width, true, 16, 2, c.unit));
+        record(run(dev, "absmax = Q", H, W, spike(H * W, 1234, q), c.in_dt, c.out_dt, c.width, true, 16, 2));
         if (c.width != BitWidth::Bits32) {
-            record(run(dev, "absmax = Q + 0.5", H, W, spike(H * W, 1234, q + 0.5f), c.in_dt, c.out_dt, c.width, true, 16, 2, c.unit));
+            record(run(dev, "absmax = Q + 0.5", H, W, spike(H * W, 1234, q + 0.5f), c.in_dt, c.out_dt, c.width, true, 16, 2));
         }
 
-        record(run(dev, "all zeros", H, W, std::vector<float>(H * W, 0.0f), c.in_dt, c.out_dt, c.width, true, 16, 2, c.unit));
+        record(run(dev, "all zeros", H, W, std::vector<float>(H * W, 0.0f), c.in_dt, c.out_dt, c.width, true, 16, 2));
     }
 }
 
@@ -291,7 +274,7 @@ void run_tile_count_sweeps(MeshDevice* dev) {
             std::snprintf(label, sizeof label, "%u tiles", n);
             const bool large = n >= 257;
             run(dev, label, 32, 32 * n, tiled(n, c.in_dt, (n % 4 == 1) ? 1.0f : -1.0f), c.in_dt, c.out_dt, c.width,
-                large, 16, 2, c.unit);
+                large, 16, 2);
             cases++;
         }
     }
@@ -310,9 +293,8 @@ void run_batch_sweeps(MeshDevice* dev) {
     const std::vector<Config> configs = {
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits8},
         {DataType::FLOAT32, DataType::INT32, BitWidth::Bits32},
-        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8, ComputeUnit::Sfpu},
-        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8, ComputeUnit::Fpu},
-        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32, ComputeUnit::Fpu},
+        {DataType::BFLOAT16, DataType::INT8, BitWidth::Bits8},
+        {DataType::BFLOAT16, DataType::INT32, BitWidth::Bits32},
     };
     for (uint32_t n : {1u, 2u, 3u, 7u, 11u, 13u, 66u, 67u, 101u}) {
         for (const auto& k : knobs) {
@@ -320,7 +302,7 @@ void run_batch_sweeps(MeshDevice* dev) {
                 char label[64];
                 std::snprintf(label, sizeof label, "%u tiles batch %u x %u", n, k.batch, k.factor);
                 run(dev, label, 32, 32 * n, tiled(n, c.in_dt, (n % 2) ? 1.0f : -1.0f), c.in_dt, c.out_dt, c.width, false,
-                    k.batch, k.factor, c.unit);
+                    k.batch, k.factor);
                 cases++;
             }
         }
@@ -346,13 +328,10 @@ void run_rejections(MeshDevice* dev) {
                              DataType::INT32, BitWidth::Bits8, false, b.batch, b.factor))
             << b.what;
     }
-    // The FPU keeps at most 19 bits of an operand, so it must not run on a FLOAT32 input.
-    EXPECT_ANY_THROW(run(dev, "fpu on fp32", 32, 32 * 4, tiled(4, DataType::FLOAT32, 1.0f), DataType::FLOAT32,
-                         DataType::INT32, BitWidth::Bits8, false, 16, 2, ComputeUnit::Fpu));
 }
 
 // The small end of the scaler range: absmax = the largest bf16 (3.39e38) gives k = -122 (8 bits), -113 (16) and -97 (32).
-// 2^k is a power of two, so it is exact in the Float32 scaler CB, in SrcB and in bf16 alike. Both units must match.
+// 2^k is a power of two, so it is exact in the Float32 scaler tile and in bf16 alike.
 void run_extreme_values(MeshDevice* dev) {
     constexpr uint32_t T = 32;
     constexpr float bf16_max = 3.38953139e38f;  // 0x7F7F0000
@@ -362,17 +341,15 @@ void run_extreme_values(MeshDevice* dev) {
         big[i] = bf16_max * (static_cast<float>(j) / 4.0f);  // -max .. +max (divide first: max * 4 would overflow)
     }
     for (BitWidth width : {BitWidth::Bits8, BitWidth::Bits16, BitWidth::Bits32}) {
-        for (ComputeUnit unit : {ComputeUnit::Sfpu, ComputeUnit::Fpu}) {
-            run(dev, "bf16 max", T, T, big, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2, unit);
-        }
+        run(dev, "bf16 max", T, T, big, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2);
     }
 }
 
 // KNOWN LIMITATION, so the test is disabled (run it with --gtest_also_run_disabled_tests). A tensor whose absmax is
 // about 2.4e-38 or less (k is then capped at 127) is not quantized like the reference: elements that are subnormal in
-// bf16 (below 1.18e-38) or close to it come out too small or as 0. It happens on BOTH units (the SFPU is worse: 910 of 1024
-// values wrong against 228 for the FPU), so it comes from how tiny values pass through the unpack and the DST, not
-// from the FPU multiply. Not root-caused. Only degenerate tensors are affected: with a larger absmax such an
+// bf16 (below 1.18e-38) or close to it come out too small or as 0 (measured with the SFPU multiply of the time: 910 of 1024
+// values wrong, 228 with the FPU multiply), so it comes from how tiny values pass through the unpack and the DST, not
+// from the multiply. Not root-caused, not re-measured with the fused SFPU kernels. Only degenerate tensors are affected: with a larger absmax such an
 // element times 2^k is below 0.5 and quantizes to 0 anyway.
 void run_tiny_inputs(MeshDevice* dev) {
     constexpr uint32_t T = 32;
@@ -384,10 +361,8 @@ void run_tiny_inputs(MeshDevice* dev) {
     }
     tiny_all_subnormal[7] = std::ldexp(127.0f, -133);  // the largest step, so some q are not 0
     for (BitWidth width : {BitWidth::Bits8, BitWidth::Bits16, BitWidth::Bits32}) {
-        for (ComputeUnit unit : {ComputeUnit::Sfpu, ComputeUnit::Fpu}) {
-            run(dev, "subnormal and normal x 2^127", T, T, tiny, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2, unit);
-            run(dev, "all subnormal x 2^127", T, T, tiny_all_subnormal, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2, unit);
-        }
+        run(dev, "subnormal and normal x 2^127", T, T, tiny, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2);
+        run(dev, "all subnormal x 2^127", T, T, tiny_all_subnormal, DataType::BFLOAT16, DataType::INT32, width, true, 16, 2);
     }
 }
 
@@ -399,7 +374,7 @@ void run_m31_range(MeshDevice* dev) {
     for (const auto& c : all_configs()) {
         for (QuantRange range : {QuantRange::Full, QuantRange::M31}) {
             auto go = [&](const char* label, const std::vector<float>& d) {
-                run(dev, label, 64, 96, d, c.in_dt, c.out_dt, c.width, false, 16, 2, c.unit, range);
+                run(dev, label, 64, 96, d, c.in_dt, c.out_dt, c.width, false, 16, 2, range);
                 cases++;
             };
             for (float m : {1.0f, 16.0f, 3e4f, 1e-3f}) {
@@ -415,7 +390,7 @@ void run_m31_range(MeshDevice* dev) {
     // The largest 32-bit values really differ: Full reaches 2^31 - 128, M31 stays <= 2^30 - 1.
     for (QuantRange range : {QuantRange::Full, QuantRange::M31}) {
         auto r = run(dev, "32-bit extreme", 32, 32, spike(1024, 5, 2147483520.0f), DataType::FLOAT32, DataType::INT32,
-                     BitWidth::Bits32, false, 16, 2, ComputeUnit::Auto, range);
+                     BitWidth::Bits32, false, 16, 2, range);
         int32_t max_q = 0;
         for (int32_t q : r.q) {
             max_q = std::max(max_q, std::abs(q));
@@ -425,6 +400,70 @@ void run_m31_range(MeshDevice* dev) {
         cases++;
     }
     std::printf("range: %zu cases\n", cases);
+}
+
+// Rounding of exact ties and of the values around the limits of the SFPU kernels' rounding (quant_sfpu.hpp): the magic
+// number trick up to 2^22 (8 and 16 bits) or 2^23 (32 bits), the significand shift from 2^23 on. The tensor has x[0] = 1,
+// so k = 14 (16 bits), 30 (32 bits) or 29 (32 bits, M31), and every other x = v / 2^30 or v / 2^14 is exact in fp32, so
+// the target v is hit exactly. The reference is the host answer for the values the device sees.
+void run_rounding_boundaries(MeshDevice* dev) {
+    constexpr uint32_t tiles = 40;
+    size_t cases = 0;
+    for (BitWidth width : {BitWidth(BitWidth::Bits16), BitWidth(BitWidth::Bits32)}) {
+        const bool w32 = width.bits() == 32;
+        const double scale = w32 ? 1073741824.0 : 16384.0;  // 2^30, 2^14: x = v / scale
+        std::mt19937 rng(20260101 + width.bits());
+        std::vector<double> v;  // targets, in units of the quantized integer, k as above
+        // Exact ties n + 0.5 (RNE rounds them to the even neighbour), both signs.
+        const uint32_t tie_max = w32 ? (1u << 22) : 32766;
+        for (int i = 0; i < 6000; i++) {
+            const double t = static_cast<double>(rng() % tie_max) + 0.5;
+            v.push_back((i % 2) ? t : -t);
+        }
+        if (w32) {
+            // Around 2^22 (spacing 0.5), 2^23 (the carry of RNE(2^23 - 0.5)) and above (spacing 1, 2, 4, ...).
+            for (int j = -16; j <= 16; j++) {
+                v.push_back(4194304.0 + 0.5 * j);
+                v.push_back(-(4194304.0 + 0.5 * j));
+                v.push_back(8388608.0 + 0.5 * j);  // 0.5 steps exist only below 2^23
+                v.push_back(-(8388608.0 + 0.5 * j));
+                v.push_back(16777216.0 + 2.0 * j);
+                v.push_back(-(16777216.0 + 2.0 * j));
+            }
+            // Random significands over every exponent: value (2^23 + r) * 2^(e - 23).
+            for (int e = 0; e < 30; e++) {
+                for (int t = 0; t < 120; t++) {
+                    const double m = 8388608.0 + static_cast<double>(rng() % 8388608u);
+                    const double val = std::ldexp(m, e - 23);
+                    v.push_back((t % 2) ? val : -val);
+                }
+            }
+        } else {
+            for (int j = -8; j <= 8; j++) {  // around the largest magnitudes of 16 bits
+                v.push_back(32767.0 - 0.5 * (j + 8));
+                v.push_back(-(32767.0 - 0.5 * (j + 8)));
+            }
+            for (int t = 0; t < 4000; t++) {  // fractions with 1 to 8 bits
+                const double val = static_cast<double>(rng() % 32767u) + static_cast<double>(rng() % 256u) / 256.0;
+                v.push_back((t % 2) ? val : -val);
+            }
+        }
+        std::vector<float> x(static_cast<size_t>(tiles) * 1024, 0.0f);
+        for (size_t i = 0; i < v.size() && i + 1 < x.size(); i++) {
+            x[i + 1] = static_cast<float>(v[i] / scale);
+        }
+        x[0] = 1.0f;
+        for (QuantRange range : {QuantRange::Full, QuantRange::M31}) {
+            if (!w32 && range == QuantRange::M31) {
+                continue;  // the range only changes 32 bits
+            }
+            for (DataType in_dt : {DataType::FLOAT32, DataType::BFLOAT16}) {
+                run(dev, "rounding boundaries", 32, 32 * tiles, x, in_dt, DataType::INT32, width, false, 16, 2, range);
+                cases++;
+            }
+        }
+    }
+    std::printf("rounding boundaries: %zu cases\n", cases);
 }
 
 class PotQuantizePerTensor : public ::testing::Test {
@@ -465,8 +504,8 @@ TEST_F(PotQuantizePerTensor, ProgramCacheKeyCoversEveryAttribute) {
     constexpr uint32_t n = 6;
     const auto data = tiled(n, DataType::BFLOAT16, 1.0f);
     auto call = [&](DataType out_dt, BitWidth width, uint32_t batch, uint32_t factor,
-                    ComputeUnit unit = ComputeUnit::Auto, QuantRange range = QuantRange::Full) {
-        run(dev(), "cache key", 32, 32 * n, data, DataType::BFLOAT16, out_dt, width, false, batch, factor, unit, range);
+                    QuantRange range = QuantRange::Full) {
+        run(dev(), "cache key", 32, 32 * n, data, DataType::BFLOAT16, out_dt, width, false, batch, factor, range);
         return dev()->num_program_cache_entries();
     };
     const size_t base = call(DataType::INT32, BitWidth::Bits8, 2, 2);
@@ -476,13 +515,13 @@ TEST_F(PotQuantizePerTensor, ProgramCacheKeyCoversEveryAttribute) {
     EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 3), base + 2) << "cb_in_size_factor";
     EXPECT_EQ(call(DataType::INT32, BitWidth::Bits16, 2, 2), base + 3) << "bit_width";
     EXPECT_EQ(call(DataType::INT8, BitWidth::Bits8, 2, 2), base + 4) << "output_dtype";
-    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 2, ComputeUnit::Sfpu), base + 5) << "compute_unit";
-    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 2, ComputeUnit::Auto, QuantRange::M31), base + 6) << "range";
-    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 3, 2), base + 6) << "an earlier variant must still hit";
+    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 2, 2, QuantRange::M31), base + 5) << "range";
+    EXPECT_EQ(call(DataType::INT32, BitWidth::Bits8, 3, 2), base + 5) << "an earlier variant must still hit";
 }
 
 TEST_F(PotQuantizePerTensor, M31Range) { run_m31_range(dev()); }
 TEST_F(PotQuantizePerTensor, ExtremeValues) { run_extreme_values(dev()); }
+TEST_F(PotQuantizePerTensor, RoundingBoundaries) { run_rounding_boundaries(dev()); }
 TEST_F(PotQuantizePerTensor, DISABLED_TinyInputs) { run_tiny_inputs(dev()); }  // known limitation, see above
 TEST_F(PotQuantizePerTensor, PositionSweeps) { run_position_sweeps(dev()); }
 TEST_F(PotQuantizePerTensor, TileCountSweeps) { run_tile_count_sweeps(dev()); }

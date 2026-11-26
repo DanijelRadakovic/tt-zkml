@@ -141,6 +141,13 @@ target_include_directories(zkml_fpu_int8_vs_bf16_bench PRIVATE ${CMAKE_CURRENT_S
 target_link_libraries(zkml_fpu_int8_vs_bf16_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_fpu_int8_vs_bf16_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# Two's complement against sign-magnitude int8 output of the SFPU quantizer: cycles and time; see
+# benchmarks/sign_mag_fpu_compatibillity/README.md
+add_executable(zkml_sign_mag_fpu_compat_bench benchmarks/sign_mag_fpu_compatibillity/bench.cpp)
+target_include_directories(zkml_sign_mag_fpu_compat_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_sign_mag_fpu_compat_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_sign_mag_fpu_compat_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.

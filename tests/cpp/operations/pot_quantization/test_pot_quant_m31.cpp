@@ -153,7 +153,7 @@ TEST_F(PotQuantM31, AfterQuantizer) {
                 tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
             Tensor in = Tensor::from_vector(x, spec, dev());
             auto [quantized, scaler] = zkml::prim::pot_quantize_per_tensor(
-                in, c.width, c.out_dt, std::nullopt, 16, 2, zkml::prim::ComputeUnit::Auto, zkml::prim::QuantRange::M31);
+                in, c.width, c.out_dt, std::nullopt, 16, 2, zkml::prim::QuantRange::M31);
             std::vector<int32_t> q;
             if (c.out_dt == DataType::INT8) {
                 auto v = quantized.to_vector<int8_t>();
@@ -180,7 +180,7 @@ TEST_F(PotQuantM31, FullRangeDoesNotFitM31) {
     Tensor in = Tensor::from_vector(x, spec, dev());
     for (auto range : {zkml::prim::QuantRange::Full, zkml::prim::QuantRange::M31}) {
         auto result = zkml::prim::pot_quantize_per_tensor(
-            in, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2, zkml::prim::ComputeUnit::Auto, range);
+            in, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2, range);
         const auto q = std::get<0>(result).to_vector<int32_t>();
         const auto m = zkml::prim::pot_quant_m31(std::get<0>(result)).to_vector<uint32_t>();
         const bool all_read_back = [&] {
@@ -235,13 +235,10 @@ TEST_F(PotQuantM31, CrossCheckWithRust) {
         struct Case {
             DataType in_dt;
             DataType out_dt;
-            zkml::prim::ComputeUnit unit;
         };
-        std::vector<Case> cases = {{DataType::FLOAT32, DataType::INT32, zkml::prim::ComputeUnit::Sfpu},
-                                   {DataType::BFLOAT16, DataType::INT32, zkml::prim::ComputeUnit::Sfpu},
-                                   {DataType::BFLOAT16, DataType::INT32, zkml::prim::ComputeUnit::Fpu}};
+        std::vector<Case> cases = {{DataType::FLOAT32, DataType::INT32}, {DataType::BFLOAT16, DataType::INT32}};
         if (bits == 8) {
-            cases.push_back({DataType::BFLOAT16, DataType::INT8, zkml::prim::ComputeUnit::Auto});
+            cases.push_back({DataType::BFLOAT16, DataType::INT8});
         }
         for (const auto& c : cases) {
             tt::tt_metal::TensorSpec spec(
@@ -249,7 +246,7 @@ TEST_F(PotQuantM31, CrossCheckWithRust) {
                 tt::tt_metal::TensorLayout(c.in_dt, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
             Tensor in = Tensor::from_vector(x, spec, dev());  // the values are bf16-exact: both dtypes see the same x
             auto [quantized, scaler_tensor] = zkml::prim::pot_quantize_per_tensor(
-                in, BitWidth(static_cast<BitWidth::Value>(bits)), c.out_dt, std::nullopt, 16, 2, c.unit, range);
+                in, BitWidth(static_cast<BitWidth::Value>(bits)), c.out_dt, std::nullopt, 16, 2, range);
             std::vector<int32_t> q;
             if (c.out_dt == DataType::INT8) {
                 auto v = quantized.to_vector<int8_t>();

@@ -7,19 +7,13 @@
 #include "api/compute/common.h"
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/reconfig_data_format.h"
-#include "api/compute/quantization.h"
-#include "api/compute/eltwise_binary.h"
-#include "api/compute/eltwise_binary_sfpu.h"
-#include "api/compute/eltwise_unary/bitwise.h"
-#include "api/compute/eltwise_unary/clamp.h"
-#include "api/compute/eltwise_unary/rounding.h"
-#include "api/compute/eltwise_unary/typecast.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/debug/kernel_profiler.hpp"
 #include "common/block_processing.hpp"
 #include "common/kernel_debug.hpp"
 #include "operations/pot_quantization/pot_range.hpp"
 #include "pot_scale_sfpu.hpp"
+#include "quant_sfpu.hpp"
 
 // clang-format off
 /**
@@ -29,7 +23,7 @@
  * - `Q = 2^m - 1` with `m` = 7, 15, 31 for 8, 16, 32 bits, or 30 for 32 bits with `m31_range` (see
  *   operations/pot_quantization/pot_range.hpp),
  * - `k = max{k : absmax(x) * 2^k <= Q}`,
- * - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
+ * - `q = clamp(round_half_even(x * 2^k), -Q, Q)` (the clamp never fires).
  *
  * It reads the input twice, in blocks sized to the DST tiles. A block is the next run of tiles in
  * `c_0`: at most the block size, and never across the end of the tensor or of the `c_0` ring,
@@ -41,31 +35,19 @@
  * running per-lane absmax that stays in an SFPU register (see pot_scale_sfpu.hpp). After the last
  * tile the 32 lanes are reduced and turned into the scaler `2^k`, still in the SFPU register.
  *
- * The scaler is then broadcast into a DST tile and packed to `c_1` (reused by pass 2) and to
- * `c_17` (returned to the host).
+ * The scaler is then broadcast into a DST tile and packed to `c_17` (returned to the host). It also stays in LReg7, and
+ * pass 2 uses it from there (quant_sfpu.hpp): no scaler CB, no DST slot for it and no copy of it for every block.
  *
- * Pass 2, quantize, with the SFPU multiply (`use_fpu` = 0, any input): blocks of up to `DST_TILES - 1`
- * input tiles go into DST slots 0.., and the scaler into the last slot, copied once per block instead
- * of once per tile. Each SFPU op (and its init) then runs over the whole block, and the block is packed
- * with one MATH -> PACK handshake.
+ * Pass 2, quantize: blocks of up to `DST_TILES` input tiles are copied into DST slots 0..; one fused SFPU sweep per tile
+ * then multiplies by the scaler in LReg7, rounds half to even and converts to int32 (`quant_small_tile` for 8 and 16
+ * bits, `quant32_tile` for 32 bits). The block is packed with one MATH -> PACK handshake.
  *
- * Pass 2 with the FPU multiply (`use_fpu` = 1, Float16_b input only): blocks of up to `DST_TILES` tiles.
- * `mul_tiles` unpacks an input tile into SrcA and the scaler tile `c_1` into SrcB and multiplies them
- * into the DST. The input has 16 bits and the scaler is a power of two, so the product is exact in the
- * fp32 DST (a Float32 input would lose bits in SrcA, which is why the host rejects it). It replaces
- * `copy_tile`, the scaler copy and the SFPU multiply. The rest runs on the SFPU as below, but always
- * with the composed ops (round, clamp, convert), since `quant_tile` multiplies by the scale itself.
- * Pass 1 is the same for both: the FPU has no abs and no min, so the absmax stays on the SFPU.
- * - 8 bits, SFPU multiply: `quant_tile` / `quant_int8_tile`. Their clamp is [-128, 127], not [-127, 127], but
- *   `|x * 2^k| <= 127` by the choice of k, so -128 is never produced.
- * - 16 and 32 bits: `quant_tile` clamps to the int8 range and its RNE trick only holds for
- *   `|v| < 2^22`, so these widths compose SFPU ops instead: multiply by `2^k` (exact), round half
- *   to even, clamp to [-Q, Q] and convert fp32 -> int32 (exact, the value is already an integer).
+ * The sweeps have no clamp: `|x * 2^k| <= Q` by the choice of k, so the clamp to [-Q, Q] never fires.
+ * Rounding is half to even; Int8 output is the two's complement byte (negative q as 256 + q).
  *
  * | Circular buffer | Direction          | Format                          | Contents                       |
  * |-----------------|--------------------|---------------------------------|--------------------------------|
  * | `c_0`           | consumes           | Float32 or Float16_b            | Input tiles, twice             |
- * | `c_1`           | produces, consumes | Float32                         | Scaler tile (`2^k`), held      |
  * | `c_16`          | produces           | Int32, or UInt8 for Int8 output | Quantized tiles, 2 blocks      |
  * | `c_17`          | produces           | Float32                         | Scaler tile for the host       |
  *
@@ -78,9 +60,7 @@
  * | 1     | `bit_width`     | 8, 16, 32  | Quantized width; Int8 output requires 8                             |
  * | 2     | `IN_RING_PAGES` | >= 2       | Pages of `c_0`: reader batch * `cb_in_size_factor`                  |
  * | 3     | `DST_TILES`     | 2 .. 4     | DST tiles used per section; the host passes `dst_tiles` (4)         |
- * | 4     | `use_fpu`       | 0          | Pass 2 multiplies on the SFPU: any input dtype                      |
- * |       |                 | 1          | Pass 2 multiplies on the FPU (`mul_tiles`): Float16_b input only    |
- * | 5     | `m31_range`     | 0          | `Q = 2^(bit_width - 1) - 1`                                         |
+ * | 4     | `m31_range`     | 0          | `Q = 2^(bit_width - 1) - 1`                                         |
  * |       |                 | 1          | 32 bits capped at `Q = 2^30 - 1` (values map injectively into M31)  |
  *
  * **Runtime args**
@@ -89,15 +69,14 @@
  * |-------|-------------|----------|-----------------------------------|
  * | 0     | `num_tiles` | uint32_t | Number of tiles in the input      |
  *
- * @pre  The program enables `fp32_dest_acc_en`. Float32 CBs use `UnpackToDestFp32`, except the scaler CB `c_1`
- *       with `use_fpu`: the FPU reads it through SrcB.
- * @pre  `c_16` has `2 * (DST_TILES - 1)` pages, or `2 * DST_TILES` pages with `use_fpu` (no DST slot is kept
- *       for the scaler then).
+ * @pre  The program enables `fp32_dest_acc_en`. Float32 CBs use `UnpackToDestFp32`.
+ * @pre  `c_16` has `2 * DST_TILES` pages.
+ * @note Nothing between `absmax_to_scaler` and the last quantize sweep may use LReg7 (see
+ *       quant_sfpu.hpp): the copies are done by the unpacker and the packer, which do not touch the SFPU registers.
  * @note Working in blocks does not overlap copy_tile with the SFPU. With `UnpackToDestFp32` every copy_tile
  *       waits until the SFPU is idle before the unpacker may write DST
  *       (`math_unpack_to_dest_math_ready`), whichever slot it targets; with Float16_b input the copy
  *       already hides behind the SFPU. Pass 1 is bound by the SFPU absmax (~210 cycles per tile).
- *       Pass 2 gains from the shared scaler copy and from fewer inits and handshakes.
  * @pre  The input is finite. An Inf or NaN absmax gives a meaningless scaler.
  * @note Rounding is round-half-to-even. A ZK circuit that checks this result must use the same rule.
  * @see ../dataflow/reader.cpp, ../dataflow/writer.cpp, pot_scale_sfpu.hpp, common/block_processing.hpp
@@ -111,7 +90,6 @@ void kernel_main() {
     constexpr uint32_t bit_width = get_compile_time_arg_val(1);
     constexpr uint32_t in_ring_pages = get_compile_time_arg_val(2);  // c_0 pages, checked on the host
     constexpr uint32_t DST_TILES = get_compile_time_arg_val(3);
-    constexpr bool use_fpu = get_compile_time_arg_val(4) == 1;
 
     static_assert(bit_width == 8 || bit_width == 16 || bit_width == 32, "bit_width must be 8, 16 or 32");
     static_assert(!is_output_int8 || bit_width == 8, "Int8 output requires bit_width 8");
@@ -119,36 +97,26 @@ void kernel_main() {
         DST_TILES <= ckernel::get_dest_max_tiles<DST_SYNC_MODE, DST_ACCUM_MODE, ckernel::DstTileShape::Tile32x32>(),
         "DST_TILES exceeds one DST section");
     
-    // Pass 1 (absmax) uses every DST slot for input.
+    // Both passes use every DST slot for input: the scaler of pass 2 is in LReg7.
     constexpr uint32_t absmax_dst_slots = DST_TILES;
-    // Pass 2 (quantize) keeps the last DST slot for the scaler, unless the FPU multiplies: mul_tiles reads the
-    // scaler from c_1 through SrcB, so no DST slot is needed for it.
     constexpr zkml::prim::QuantRange range =
-        get_compile_time_arg_val(5) == 1 ? zkml::prim::QuantRange::M31 : zkml::prim::QuantRange::Full;
+        get_compile_time_arg_val(4) == 1 ? zkml::prim::QuantRange::M31 : zkml::prim::QuantRange::Full;
     constexpr uint32_t magnitude_bits = zkml::prim::pot_magnitude_bits(bit_width, range);
-    constexpr uint32_t quant_dst_slots = use_fpu ? DST_TILES : DST_TILES - 1;
+    constexpr uint32_t quant_dst_slots = DST_TILES;
     constexpr uint32_t out_ring_pages = 2 * quant_dst_slots;  // c_16 holds two blocks (see the host)
 
     constexpr uint32_t cb_in_id = tt::CBIndex::c_0;
-    constexpr uint32_t cb_scale_id = tt::CBIndex::c_1;
     constexpr uint32_t cb_out_id = tt::CBIndex::c_16;
     constexpr uint32_t cb_scale_out_id = tt::CBIndex::c_17;
-    constexpr uint32_t zero_point_bits = 0;  // fp32 bits of 0.0f: symmetric quantization    
 
     // DST slots: input tiles in 0 .. block - 1, the scaler in the last slot
     constexpr uint32_t dst_scale = DST_TILES - 1;
 
     CircularBuffer cb_in(cb_in_id);
-    CircularBuffer cb_scale(cb_scale_id);
     CircularBuffer cb_out(cb_out_id);
     CircularBuffer cb_scale_out(cb_scale_out_id);
 
-    if constexpr (use_fpu) {
-        // SrcA unpacks c_0 (Float16_b), SrcB unpacks the scaler c_1 (Float32): two formats.
-        compute_kernel_hw_startup(cb_in_id, cb_scale_id, cb_out_id);
-    } else {
-        compute_kernel_hw_startup(cb_in_id, cb_out_id);
-    }
+    compute_kernel_hw_startup(cb_in_id, cb_out_id);
 
     // ---- Pass 1: absmax over the whole tensor, kept in an SFPU register ----
     // The whole pass and the scaler below share one DST section: nothing is packed until the
@@ -156,7 +124,6 @@ void kernel_main() {
     // slots 0 .. n - 1; the SFPU stall in absmax_tile orders it after the copies.
     MATH(zkml::sfpu::absmax_init());
     copy_init(cb_in_id);
-    cb_scale.reserve_back(1);
     cb_scale_out.reserve_back(1);
     zkml::common::RingCursor in_ring(in_ring_pages);  // c_0 read position, shared by both passes
     zkml::common::DstBlockMediator absmax_blocks(absmax_dst_slots, num_tiles, in_ring);
@@ -176,11 +143,8 @@ void kernel_main() {
         }
     }
 
-    // ---- Scaler: SFPU register -> DST -> c_1 (for pass 2) and c_17 (for the host) ----
-    // TODO(perf): quant_tile() and mul_binary_tile() read the scale from DST, so the scaler that is
-    // already in an SFPU register is broadcast into a DST tile, packed to c_1 and copied back into
-    // DST for every input tile. A quant variant that takes the scale from an LREG would remove the
-    // broadcast, the pack and the per-tile copy.
+    // ---- Scaler: SFPU register -> DST -> c_17 (for the host) ----
+    // The scaler also stays in LReg7, which is all pass 2 needs (quant_sfpu.hpp).
     {
         DeviceZoneScopedN("SCALER");
         MATH(zkml::sfpu::absmax_to_scaler<magnitude_bits>(dst_scale));
@@ -188,32 +152,21 @@ void kernel_main() {
         zkml::debug::print_dest_tile_rows(dst_scale, DataFormat::Float32, 0, 1);
         tile_regs_commit();
         tile_regs_wait();
-        pack_reconfig_data_format(cb_scale_id);
-        pack_tile(dst_scale, cb_scale_id);
+        pack_reconfig_data_format(cb_scale_out_id);
         pack_tile(dst_scale, cb_scale_out_id);
         tile_regs_release();
-        cb_scale.push_back(1);
         cb_scale_out.push_back(1);
         pack_reconfig_data_format(cb_out_id);
     }
 
     // ---- Pass 2: quantize ----
-    if constexpr ((bit_width == 8 && !use_fpu)) {
-        // Records the replay body and loads LREG constants, so it must come after pass 1.
-        if constexpr (is_output_int8) {
-            quant_int8_tile_init(zero_point_bits);
-        } else {
-            quant_tile_init(zero_point_bits);
-        }
+    // Loads the LREG constants of the sweeps (not LReg7: it holds the scaler), so it must come after pass 1.
+    if constexpr (bit_width == 32) {
+        MATH(zkml::sfpu::quant32_init());
+    } else {
+        MATH(zkml::sfpu::quant_small_init<is_output_int8>());
     }
-    
-    // fp32 bit patterns of -Q and Q for the clamp for 16/32-bit scaler. 2^31 - 1 rounds to 2^31 in fp32 (2^30 - 1 to
-    // 2^30); the fp32 -> int32 typecast saturates 2^31 to INT32_MAX, and |x * 2^k| <= Q keeps the rounded bound unreachable.
-    constexpr float q_max = static_cast<float>(zkml::prim::pot_qmax(bit_width, range));
-    constexpr uint32_t q_max_bits = __builtin_bit_cast(uint32_t, q_max);
-    constexpr uint32_t q_min_bits = __builtin_bit_cast(uint32_t, -q_max);
-    
-    cb_scale.wait_front(1);
+
     zkml::common::RingCursor out_ring(out_ring_pages);  // c_16 write position
     // A reserve/push must be contiguous in the CB: the mediator cuts the block at the end of both rings.
     zkml::common::DstBlockMediator quant_blocks(quant_dst_slots, num_tiles, in_ring, out_ring);
@@ -223,73 +176,24 @@ void kernel_main() {
         cb_out.reserve_back(n);
 
         tile_regs_acquire();
-        if constexpr (use_fpu) {
-            // FPU: DST[i] = x * 2^k. SrcA holds x (16 bits) and SrcB the scaler, a power of two, so the
-            // product is exact in the fp32 DST. No copy_tile and no scaler copy into DST are needed.
-            mul_init(cb_in_id, cb_scale_id);
-            for (uint32_t i = 0; i < n; i++) {
-                DPRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
-                UNPACK(zkml::debug::print_tile_rows(cb_in_id, i));
-                mul_tiles(cb_in_id, cb_scale_id, i, 0, i);
-            }
-        } else {
-            copy_init(cb_in_id);
-            for (uint32_t i = 0; i < n; i++) {
-                DPRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
-                UNPACK(zkml::debug::print_tile_rows(cb_in_id, i));
-                copy_tile(cb_in_id, i, i);
-            }
-            // The input may be Float16_b while the scaler is always Float32.
-            reconfig_data_format_srca(cb_in_id, cb_scale_id);
-            copy_init(cb_scale_id);
-            copy_tile(cb_scale_id, 0, dst_scale);  // once per block
+        copy_init(cb_in_id);
+        for (uint32_t i = 0; i < n; i++) {
+            DPRINT_UNPACK("Tile={}\n", quant_blocks.done() + i);
+            UNPACK(zkml::debug::print_tile_rows(cb_in_id, i));
+            copy_tile(cb_in_id, i, i);
         }
-        if constexpr ((bit_width == 8 && !use_fpu)) {
-            for (uint32_t i = 0; i < n; i++) {
-                if constexpr (is_output_int8) {
-                    // DST holds each result as its two's-complement byte: negative q prints as 256 + q.
-                    quant_int8_tile(i, dst_scale, i);
-                } else {
-                    quant_tile(i, dst_scale, i);
-                }
-            }
-        } else {
-            // TODO(perf): four SFPU passes (three with the FPU multiply). A fused 16/32-bit quant SFPU
-            // function (multiply, RNE, clamp, convert in one sweep over DST) would replace them. Each init
-            // runs once per block.
-            if constexpr (!use_fpu) {
-                mul_binary_tile_init();
-                for (uint32_t i = 0; i < n; i++) {
-                    mul_binary_tile(i, dst_scale, i);  // x * 2^k, exact for a normal 2^k
-                }
-            }
-            rounding_op_tile_init();
-            for (uint32_t i = 0; i < n; i++) {
-                round_tile(i, 0);  // round half to even
-            }
-            clamp_tile_init();
-            for (uint32_t i = 0; i < n; i++) {
-                clamp_tile(i, q_min_bits, q_max_bits);
-            }
-            typecast_tile_init<static_cast<uint32_t>(DataFormat::Float32), static_cast<uint32_t>(DataFormat::Int32)>();
-            for (uint32_t i = 0; i < n; i++) {
-                typecast_tile<static_cast<uint32_t>(DataFormat::Float32), static_cast<uint32_t>(DataFormat::Int32)>(i);
-            }
-            if constexpr (is_output_int8) {
-                // The UInt8 packer saturates: a negative int32 would become 255. Keep the two's-complement byte
-                // (negative q as 256 + q), the same value quant_int8_tile leaves in DST.
-                bitwise_and_tile_init();
-                for (uint32_t i = 0; i < n; i++) {
-                    bitwise_and_tile<DataFormat::Int32>(i, 0xFF);
-                }
+        // One SFPU sweep per tile: x * 2^k from LReg7, round half to even, convert to int32 (Int8 output: the two's
+        // complement byte, negative q as 256 + q).
+        for (uint32_t i = 0; i < n; i++) {
+            if constexpr (bit_width == 32) {
+                MATH(zkml::sfpu::quant32_tile(i));
+            } else {
+                MATH(zkml::sfpu::quant_small_tile<is_output_int8>(i));
             }
         }
         for (uint32_t i = 0; i < n; i++) {
             DPRINT_MATH("Contents of DST {} after quantization:\n", i);
             zkml::debug::print_dest_tile_rows(i, DataFormat::Int32);
-        }
-        if constexpr (!use_fpu) {
-            reconfig_data_format_srca(cb_scale_id, cb_in_id);
         }
         tile_regs_commit();
 
@@ -306,6 +210,4 @@ void kernel_main() {
         cb_in.pop_front(n);
         quant_blocks.commit(n);
     }
-
-    cb_scale.pop_front(1);
 }
