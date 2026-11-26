@@ -175,6 +175,12 @@ target_link_libraries(zkml_nn_bench PRIVATE zkml_ops Threads::Threads)
 target_compile_options(zkml_nn_bench PRIVATE -O3 -march=native -fno-math-errno)
 target_compile_definitions(zkml_nn_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# A chained network (execute_network) on the CPU and on the device; see benchmarks/nn_network/README.md
+add_executable(zkml_nn_network_bench benchmarks/nn_network/bench.cpp)
+target_link_libraries(zkml_nn_network_bench PRIVATE zkml_ops Threads::Threads)
+target_compile_options(zkml_nn_network_bench PRIVATE -O3 -march=native -fno-math-errno)
+target_compile_definitions(zkml_nn_network_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.

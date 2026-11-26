@@ -88,27 +88,37 @@ ALWI void run_layer() {
 
     // 1. layer 0: quantize x into act_0
     if constexpr (l == 0) {
+        DeviceZoneScopedN("QUANT_X");
         scale_pass<net::c_x, net::c_scale_x>(Mt * Kt);
         quant_pass<net::c_x, cb_in, false, false, true>(Mt * Kt, Mt * Kt);
     }
 
     // 2. quantize the weights of this layer into q_w, then free the weight buffer for the reader
-    scale_pass<net::c_w, net::c_scale_w>(Kt * Nt);
-    quant_pass<net::c_w, net::c_qw, false, false, true>(Kt * Nt, Kt * Nt);
-    push_padding<net::c_qw>(CAP_QW - Kt * Nt);
-    CircularBuffer(net::c_w).pop_front(CAP_W);
+    {
+        DeviceZoneScopedN("QUANT_W");
+        scale_pass<net::c_w, net::c_scale_w>(Kt * Nt);
+        quant_pass<net::c_w, net::c_qw, false, false, true>(Kt * Nt, Kt * Nt);
+        push_padding<net::c_qw>(CAP_QW - Kt * Nt);
+        CircularBuffer(net::c_w).pop_front(CAP_W);
+    }
 
     // 3. matmul into the accumulator; the activation sweep folds the integer absmax into LReg7
-    matmul_stage<cb_in, net::c_qw, net::c_acc, relu, true, Mt, Kt, Nt>();
-    push_padding<net::c_acc>(CAP_ACC - Mt * Nt);
-    CircularBuffer(net::c_qw).pop_front(CAP_QW);
+    {
+        DeviceZoneScopedN("MATMUL");
+        matmul_stage<cb_in, net::c_qw, net::c_acc, relu, true, Mt, Kt, Nt>();
+        push_padding<net::c_acc>(CAP_ACC - Mt * Nt);
+        CircularBuffer(net::c_qw).pop_front(CAP_QW);
+    }
 
     // 4. requantize: the scaler, then the sweep into the next layer's activation buffer (or the output ring)
-    pack_requant_scaler<net::c_acc, net::c_scale_out>();
-    if constexpr (last) {
-        quant_pass<net::c_acc, net::c_out, true, relu>(Mt * Nt, out_pages);
-    } else {
-        quant_pass<net::c_acc, net::act_cb(l + 1), true, relu>(Mt * Nt, Mt * Nt);
+    {
+        DeviceZoneScopedN("REQUANT");
+        pack_requant_scaler<net::c_acc, net::c_scale_out>();
+        if constexpr (last) {
+            quant_pass<net::c_acc, net::c_out, true, relu>(Mt * Nt, out_pages);
+        } else {
+            quant_pass<net::c_acc, net::act_cb(l + 1), true, relu>(Mt * Nt, Mt * Nt);
+        }
     }
     CircularBuffer(net::c_scale_out).push_back(1);  // the accumulator has been read: the writer may write and pop it
 }
