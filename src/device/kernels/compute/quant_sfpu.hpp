@@ -155,23 +155,26 @@ inline void quant_sm8_face(const uint dst_index_in0, const uint dst_index_in1, c
 #undef ZKML_QSM8_FINISH
 }
 
-// quant_sm8 with SFPLOADMACRO: one macro per 4 rows x 8 lanes schedules the SFPMAD (m = x * 2^k + magic, MAD sub-unit), the SFPIADD (n =
-// bits(m) - bits(magic), Simple sub-unit) and the SFPSTORE (Store sub-unit) after its load, and the one remaining instruction, the
-// SFPCAST to sign-magnitude, is issued normally in the slot between two macros: 2 issue slots per 4 rows x 8 lanes instead of 5.
-// Timeline of row r (slot = the instruction issued at that cycle; the macro is issued in slot 2r, row r uses LREG(r & 3)):
+// quant_sm8 with SFPLOADMACRO: one macro per 4 rows x 8 lanes schedules the SFPMAD (m = x * 2^k + magic, MAD sub-unit),
+// the SFPIADD (n = bits(m) - bits(magic), Simple sub-unit) and the SFPSTORE (Store sub-unit) after its load, and the
+// one remaining instruction, the SFPCAST to sign-magnitude, is issued normally in the slot between two macros: 2 issue
+// slots per 4 rows x 8 lanes instead of 5. Timeline of row r (slot = the instruction issued at that cycle; the macro is
+// issued in slot 2r, row r uses LREG(r & 3)):
 //   2r     SFPLOADMACRO  load x
 //   2r+1   [MAD]         a = x * 2^k + magic          (result at 2r+3)
 //   2r+4   [Simple]      a = a + (-magic)             (the 2r+3 slot is taken by the SFPCAST of the previous row)
 //   2r+5   SFPCAST       a = sign-magnitude(a)        (issued normally)
 //   2r+6   [Store]       Dst = a
-// The macro config (SFPCONFIG: the sequence, two instruction templates, the delay kind) is written by quant_sm8_lm_init(). The macros
-// hold the sub-unit slots, so no other SFPU code may be issued between the first and last row of a tile. Needs LREG4 = magic,
-// LREG5 = -magic, LREG7 = 2^k; LREG0 to LREG3 carry the rows. See tt-isa-documentation, SFPLOADMACRO.md.
+// The macro config (SFPCONFIG: the sequence, two instruction templates, the delay kind) is written by
+// quant_sm8_lm_init(). The macros hold the sub-unit slots, so no other SFPU code may be issued between the first and
+// last row of a tile. Needs LREG4 = magic, LREG5 = -magic, LREG7 = 2^k; LREG0 to LREG3 carry the rows. See
+// tt-isa-documentation, SFPLOADMACRO.md.
 inline void quant_sm8_lm_init() {
     ckernel::llk_math_eltwise_unary_sfpu_init<SfpuType::unused, DST_ACCUM_MODE>();
     ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG4, RNE_MAGIC_BITS);
     ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, 0u - RNE_MAGIC_BITS);
-    // InstructionTemplate[0]: LReg[VD] = LReg[VC] + LReg[VB] with VC = -magic; the macro fills in VB and VD with the row register.
+    // InstructionTemplate[0]: LReg[VD] = LReg[VC] + LReg[VB] with VC = -magic; the macro fills in VB and VD with the
+    // row register.
     TTI_SFPIADD(0, p_sfpu::LREG5, 12, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
     // InstructionTemplate[1]: VD = VA * VB + VC with VA = 2^k, VC = magic; the macro fills in VB and VD.
     TTI_SFPMAD(SCALE_LREG_ID, p_sfpu::LREG0, p_sfpu::LREG4, 13, 0);
@@ -191,12 +194,14 @@ inline void quant_sm8_lm_init() {
 
 inline void quant_sm8_lm_body() {
     // SFPLOADMACRO does not stall for an FPU write to Dst: at least 3 unrelated instructions in between; the
-    // wrapper's STALLWAIT holds back SFPU instructions only (not Tensix NOPs), so these are SFPNOPs, issued after the stall is released
+    // wrapper's STALLWAIT holds back SFPU instructions only (not Tensix NOPs), so these are SFPNOPs, issued after the
+    // stall is released
     TTI_SFPNOP;
     TTI_SFPNOP;
     TTI_SFPNOP;
 #define ZKML_LM_ROW(d) TT_SFPLOADMACRO((0 << 2) | ((d) & 3), InstrModLoadStore::FP32, ADDR_MOD_7, 2 * (d))
-#define ZKML_LM_CAST(d) TT_SFPCAST(p_sfpu::LREG0 + ((d) & 3), p_sfpu::LREG0 + ((d) & 3), sfpi::SFPCAST_MOD1_INT32_TO_SM32)
+#define ZKML_LM_CAST(d) \
+    TT_SFPCAST(p_sfpu::LREG0 + ((d) & 3), p_sfpu::LREG0 + ((d) & 3), sfpi::SFPCAST_MOD1_INT32_TO_SM32)
     ZKML_LM_ROW(0);
     TTI_SFPNOP;
     ZKML_LM_ROW(1);

@@ -63,7 +63,8 @@
 constexpr uint32_t VARIANT = get_compile_time_arg_val(5);
 constexpr uint32_t QMODE =
     get_compile_time_arg_val(6);  // experiments on the quantization: 1 no SFPU in pass 1, 2 no SFPU in pass 2
-constexpr uint32_t QUANT_LM = get_compile_time_arg_val(7);  // 1: x / W pass 2 with SFPLOADMACRO (quant_sm8_lm), 0: pipelined TTI (quant_sm8)
+constexpr uint32_t QUANT_LM =
+    get_compile_time_arg_val(7);  // 1: x / W pass 2 with SFPLOADMACRO (quant_sm8_lm), 0: pipelined TTI (quant_sm8)
 
 constexpr uint32_t DST_TILES = 4;  // fp32 DST, half sync
 constexpr uint32_t dst_scale = DST_TILES - 1;

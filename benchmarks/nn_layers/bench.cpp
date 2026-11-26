@@ -4,15 +4,16 @@
 
 // A network of identical quantized layers on the CPU (1 thread, N threads) and on the device (see README.md).
 //
-// One layer is what zkml::prim::execute_layer computes: x [M, K] and w [K, N] (fp32) are quantized per tensor to 8 bits with a
-// power-of-two scaler (Q = 127, round half to even), multiplied exactly in int32, ReLU is applied on the accumulator and the
-// accumulator is requantized per tensor to 8 bits. The CPU implementation here is bit-exact with the device op (`check`).
-// A network is L such layers, each with its own weights; all layers use the same input x (the device op takes fp32 / bf16
-// tensors, so layer outputs cannot be chained on the device without a host round trip; the work per layer is identical).
+// One layer is what zkml::prim::execute_layer computes: x [M, K] and w [K, N] (fp32) are quantized per tensor to 8 bits
+// with a power-of-two scaler (Q = 127, round half to even), multiplied exactly in int32, ReLU is applied on the
+// accumulator and the accumulator is requantized per tensor to 8 bits. The CPU implementation here is bit-exact with
+// the device op (`check`). A network is L such layers, each with its own weights; all layers use the same input x (the
+// device op takes fp32 / bf16 tensors, so layer outputs cannot be chained on the device without a host round trip; the
+// work per layer is identical).
 //
 //   zkml_nn_bench cpu    <threads> <M> <K> <N> <L> <reps>      time of L layers on the CPU
-//   zkml_nn_bench device <fp32|bf16> <M> <K> <N> <L> <reps>    time of L execute_layer calls on the device (program cached)
-//   zkml_nn_bench check  <M> <K> <N>                           CPU against device, every output byte and scaler
+//   zkml_nn_bench device <fp32|bf16> <M> <K> <N> <L> <reps>    time of L execute_layer calls on the device (program
+//   cached) zkml_nn_bench check  <M> <K> <N>                           CPU against device, every output byte and scaler
 
 #include <algorithm>
 #include <atomic>
@@ -43,8 +44,8 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 // ----------------------------------------------------------------------------------------------------------------------------
-// A small persistent thread pool: `run(fn)` executes fn(thread_index) on every thread (the calling thread is index 0) and
-// returns when all are done. Workers spin (yielding) between jobs, so a dispatch costs about a microsecond.
+// A small persistent thread pool: `run(fn)` executes fn(thread_index) on every thread (the calling thread is index 0)
+// and returns when all are done. Workers spin (yielding) between jobs, so a dispatch costs about a microsecond.
 class Pool {
 public:
     explicit Pool(unsigned n) : n_(n) {
@@ -119,7 +120,7 @@ int32_t pot_k(float absmax) {
 }
 
 struct Scratch {
-    std::vector<float> partial;  // per-thread absmax
+    std::vector<float> partial;   // per-thread absmax
     std::vector<int8_t> qx, qwT;  // q_x [M, K], q_w transposed [N, K]
     std::vector<int32_t> acc;     // [M, N]
     std::vector<int32_t> part_i;  // per-thread integer absmax
@@ -148,7 +149,8 @@ inline int8_t quant1(float v, float scale) {
 }
 
 // One dot product of 4 rows of wT against one row of x, int8 x int8 -> int32.
-inline void dot4(const int8_t* x, const int8_t* w0, const int8_t* w1, const int8_t* w2, const int8_t* w3, size_t K, int32_t* out) {
+inline void dot4(
+    const int8_t* x, const int8_t* w0, const int8_t* w1, const int8_t* w2, const int8_t* w3, size_t K, int32_t* out) {
     int32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
     for (size_t k = 0; k < K; k++) {
         const int32_t xv = x[k];
@@ -164,7 +166,17 @@ inline void dot4(const int8_t* x, const int8_t* w0, const int8_t* w1, const int8
 }
 
 // out must have M * N entries. Allocation-free after the first call with the same sizes.
-void run_layer(Pool& pool, Scratch& s, const float* x, const float* w, size_t M, size_t K, size_t N, bool relu, uint8_t* out, float* scalers) {
+void run_layer(
+    Pool& pool,
+    Scratch& s,
+    const float* x,
+    const float* w,
+    size_t M,
+    size_t K,
+    size_t N,
+    bool relu,
+    uint8_t* out,
+    float* scalers) {
     s.qx.resize(M * K);
     s.qwT.resize(N * K);
     s.acc.resize(M * N);
@@ -199,7 +211,14 @@ void run_layer(Pool& pool, Scratch& s, const float* x, const float* w, size_t M,
             int32_t* row = &s.acc[i * N];
             size_t j = 0;
             for (; j + 4 <= N; j += 4) {
-                dot4(&s.qx[i * K], &s.qwT[j * K], &s.qwT[(j + 1) * K], &s.qwT[(j + 2) * K], &s.qwT[(j + 3) * K], K, row + j);
+                dot4(
+                    &s.qx[i * K],
+                    &s.qwT[j * K],
+                    &s.qwT[(j + 1) * K],
+                    &s.qwT[(j + 2) * K],
+                    &s.qwT[(j + 3) * K],
+                    K,
+                    row + j);
             }
             for (; j < N; j++) {
                 int32_t a = 0;
@@ -295,12 +314,21 @@ int run_cpu(unsigned threads, size_t M, size_t K, size_t N, int L, int reps) {
         runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     const double nn = median(runs);
-    std::printf("nn cpu threads=%u M=%zu K=%zu N=%zu L=%d: layer_us=%.1f nn_us=%.1f (median of %d)\n", threads, M, K, N, L, nn / L, nn, reps);
+    std::printf(
+        "nn cpu threads=%u M=%zu K=%zu N=%zu L=%d: layer_us=%.1f nn_us=%.1f (median of %d)\n",
+        threads,
+        M,
+        K,
+        N,
+        L,
+        nn / L,
+        nn,
+        reps);
     return 0;
 }
 
-using ttnn::Tensor;
 using tt::tt_metal::DataType;
+using ttnn::Tensor;
 
 struct DeviceCtx {
     std::shared_ptr<ttnn::MeshDevice> dev;
@@ -343,7 +371,16 @@ int run_device(const std::string& dt, size_t M, size_t K, size_t N, int L, int r
         runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
     }
     const double nn = median(runs);
-    std::printf("nn device %s M=%zu K=%zu N=%zu L=%d: layer_us=%.1f nn_us=%.1f (median of %d)\n", dt.c_str(), M, K, N, L, nn / L, nn, reps);
+    std::printf(
+        "nn device %s M=%zu K=%zu N=%zu L=%d: layer_us=%.1f nn_us=%.1f (median of %d)\n",
+        dt.c_str(),
+        M,
+        K,
+        N,
+        L,
+        nn / L,
+        nn,
+        reps);
     c.dev->close();
     return 0;
 }
@@ -366,7 +403,18 @@ int run_check(size_t M, size_t K, size_t N) {
         bad += got[i] != want[i];
     }
     std::printf(
-        "check M=%zu K=%zu N=%zu: scalers cpu %g %g %g device %g %g %g, %zu / %zu out bytes differ\n", M, K, N, sc[0], sc[1], sc[2], gsx, gsw, gso, bad, want.size());
+        "check M=%zu K=%zu N=%zu: scalers cpu %g %g %g device %g %g %g, %zu / %zu out bytes differ\n",
+        M,
+        K,
+        N,
+        sc[0],
+        sc[1],
+        sc[2],
+        gsx,
+        gsw,
+        gso,
+        bad,
+        want.size());
     c.dev->close();
     return (bad || sc[0] != gsx || sc[1] != gsw || sc[2] != gso) ? 1 : 0;
 }
@@ -380,10 +428,22 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     if (cmd == "cpu" && argc >= 8) {
-        return run_cpu(std::stoul(argv[2]), std::stoul(argv[3]), std::stoul(argv[4]), std::stoul(argv[5]), std::atoi(argv[6]), std::atoi(argv[7]));
+        return run_cpu(
+            std::stoul(argv[2]),
+            std::stoul(argv[3]),
+            std::stoul(argv[4]),
+            std::stoul(argv[5]),
+            std::atoi(argv[6]),
+            std::atoi(argv[7]));
     }
     if (cmd == "device" && argc >= 8) {
-        return run_device(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::stoul(argv[5]), std::atoi(argv[6]), std::atoi(argv[7]));
+        return run_device(
+            argv[2],
+            std::stoul(argv[3]),
+            std::stoul(argv[4]),
+            std::stoul(argv[5]),
+            std::atoi(argv[6]),
+            std::atoi(argv[7]));
     }
     if (cmd == "check" && argc >= 5) {
         return run_check(std::stoul(argv[2]), std::stoul(argv[3]), std::stoul(argv[4]));

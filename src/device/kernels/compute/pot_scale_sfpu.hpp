@@ -51,17 +51,18 @@ inline void absmax_reset() {
     sfpi::l_reg[sfpi::LRegs::LReg6] = sfpi::vFloat(0.0f);  // the running min of absmax_tile_body
 }
 
-// The absmax of one tile, hand-written and software pipelined (SFPLOADMACRO does not help here: SFPSWAP keeps the Simple sub-unit
-// busy for 2 cycles, and a scheduled instruction landing on the cycle after it is lost). Rows (4 rows x 8 lanes each, 32 per tile) are
-// handled in pairs: SFPSWAP with mod1 = 9 puts the max in VD and the min in VC (mod1 = 1 the other way round; the lane config
-// EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX must stay clear, see tt-isa-documentation SFPSWAP.md), and compares sign-magnitude. A swap
-// orders the pair, the larger goes against the running max (SCALE_LREG), the smaller against the running min (LREG6, <= 0): |x| <=
-// max(running max, -running min) needs no SFPABS. The final max of the two is taken in absmax_reduce_to_scaler. Per pair 3 swaps = 6
-// Simple-unit cycles, and the loads of the next pair (into the other register pair) are issued in the gaps: 6 issue slots per 2 rows.
-// The tile must be fp32 in DST; no other SFPU code may be issued while it runs.
+// The absmax of one tile, hand-written and software pipelined (SFPLOADMACRO does not help here: SFPSWAP keeps the
+// Simple sub-unit busy for 2 cycles, and a scheduled instruction landing on the cycle after it is lost). Rows (4 rows x
+// 8 lanes each, 32 per tile) are handled in pairs: SFPSWAP with mod1 = 9 puts the max in VD and the min in VC (mod1 = 1
+// the other way round; the lane config EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX must stay clear, see
+// tt-isa-documentation SFPSWAP.md), and compares sign-magnitude. A swap orders the pair, the larger goes against the
+// running max (SCALE_LREG), the smaller against the running min (LREG6, <= 0): |x| <= max(running max, -running min)
+// needs no SFPABS. The final max of the two is taken in absmax_reduce_to_scaler. Per pair 3 swaps = 6 Simple-unit
+// cycles, and the loads of the next pair (into the other register pair) are issued in the gaps: 6 issue slots per 2
+// rows. The tile must be fp32 in DST; no other SFPU code may be issued while it runs.
 inline void absmax_tile_body() {
-    // an FPU write to Dst (the bf16 copy_tile) needs 3 unrelated instructions before a load reads it; the wrapper's STALLWAIT holds
-    // back SFPU instructions only, so these are SFPNOPs issued after the stall is released
+    // an FPU write to Dst (the bf16 copy_tile) needs 3 unrelated instructions before a load reads it; the wrapper's
+    // STALLWAIT holds back SFPU instructions only, so these are SFPNOPs issued after the stall is released
     TTI_SFPNOP;
     TTI_SFPNOP;
     TTI_SFPNOP;

@@ -97,16 +97,22 @@ ALWI void scale_pass(uint32_t tiles) {
     scaler.push_back(1);
 }
 
-// bf16 input: the quantized bytes are written to UInt8 circular buffers (an Int8 one cannot share a program with the bf16 input
-// buffer). The packer writes a UInt8 buffer as plain bytes and saturates outside [0, 255], but the quantizer produces sign-magnitude
-// int32, which the Int8 packer turns into sign + 7 magnitude bits (the FPU's Int8 format). So the packer is configured for Int8 by
-// hand, with the geometry of the buffer: the registers `pack_reconfig_data_format` writes for an Int8 buffer.
+// bf16 input: the quantized bytes are written to UInt8 circular buffers (an Int8 one cannot share a program with the
+// bf16 input buffer). The packer writes a UInt8 buffer as plain bytes and saturates outside [0, 255], but the quantizer
+// produces sign-magnitude int32, which the Int8 packer turns into sign + 7 magnitude bits (the FPU's Int8 format). So
+// the packer is configured for Int8 by hand, with the geometry of the buffer: the registers `pack_reconfig_data_format`
+// writes for an Int8 buffer.
 ALWI void pack_reconfig_int8_view(uint32_t cb_out) {
     constexpr uint32_t i8 = static_cast<uint32_t>(DataFormat::Int8);
     PACK(({
         const uint32_t id = get_output_id(cb_out);
         _llk_pack_reconfig_data_format_<DST_ACCUM_MODE>(
-            i8, i8, get_local_cb_interface(id).fifo_page_size, get_output_tile_c_dim(id), get_output_num_faces(id), false);
+            i8,
+            i8,
+            get_local_cb_interface(id).fifo_page_size,
+            get_output_tile_c_dim(id),
+            get_output_num_faces(id),
+            false);
     }));
 }
 
@@ -121,7 +127,8 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     if constexpr (acc_in) {
         MATH((zkml::sfpu::requant_init<relu>()));
     } else {
-        MATH((zkml::sfpu::quant_sm8_lm_init()));  // fp32 and bf16: the Int8 packer writes both (bf16 through pack_reconfig_int8_view)
+        MATH((zkml::sfpu::quant_sm8_lm_init()));  // fp32 and bf16: the Int8 packer writes both (bf16 through
+                                                  // pack_reconfig_int8_view)
     }
     copy_init(cb_in);
     pack_reconfig_data_format(cb_out);
