@@ -45,7 +45,7 @@ void ExecuteLayerOperation::validate_on_program_cache_miss(
         n);
     TT_FATAL(
         k / TILE_WIDTH <= max_k_tiles,
-        "execute_layer: K must be at most {} (the accumulator is converted to fp32 exactly only below 2^24), got {}",
+        "execute_layer: K must be at most {} (K * 127 * 127 must stay below 2^30), got {}",
         max_k_tiles * TILE_WIDTH,
         k);
     TT_FATAL(
@@ -68,6 +68,9 @@ ExecuteLayerOperation::spec_return_value_t ExecuteLayerOperation::compute_output
         tt::tt_metal::TensorSpec(
             ttnn::Shape({m, n}),
             tt::tt_metal::TensorLayout(DataType::UINT8, tile_page, attributes.output_memory_config)),
+        tt::tt_metal::TensorSpec(
+            ttnn::Shape({m, n}),
+            tt::tt_metal::TensorLayout(DataType::UINT32, tile_page, attributes.output_memory_config)),
         scaler(),
         scaler(),
         scaler()};
@@ -75,10 +78,11 @@ ExecuteLayerOperation::spec_return_value_t ExecuteLayerOperation::compute_output
 
 ExecuteLayerOperation::tensor_return_value_t ExecuteLayerOperation::create_output_tensors(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
-    const auto [out, sx, sw, so] = compute_output_specs(attributes, tensor_args);
+    const auto [out, acc, sx, sw, so] = compute_output_specs(attributes, tensor_args);
     auto* device = tensor_args.x.device();
     return {
         ttnn::create_device_tensor(out, device),
+        ttnn::create_device_tensor(acc, device),
         ttnn::create_device_tensor(sx, device),
         ttnn::create_device_tensor(sw, device),
         ttnn::create_device_tensor(so, device)};

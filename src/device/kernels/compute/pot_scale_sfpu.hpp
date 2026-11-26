@@ -25,6 +25,9 @@
 #ifdef TRISC_MATH
 #include "llk_math_eltwise_unary_sfpu_init.h"
 #include "llk_math_eltwise_unary_sfpu_params.h"
+#include "ckernel.h"
+#include "ckernel_addrmod.h"
+#include "ckernel_ops.h"
 #include "sfpi.h"
 #endif
 
@@ -43,18 +46,30 @@ sfpi_inline sfpi::vFloat max_nonneg(sfpi::vFloat a, sfpi::vFloat b) {
     return a;
 }
 
-inline void absmax_reset() { sfpi::l_reg[SCALE_LREG] = sfpi::vFloat(0.0f); }
+inline void absmax_reset() {
+    sfpi::l_reg[SCALE_LREG] = sfpi::vFloat(0.0f);
+    sfpi::l_reg[sfpi::LRegs::LReg6] = sfpi::vFloat(0.0f);  // the running min of absmax_accumulate_face
+}
 
-// One 16x16 face: 8 SFPU rows of 32 lanes.
+// One 16x16 face: 8 SFPU rows of 32 lanes. Hand-written instructions, 2.5 per 4 rows x 8 lanes: SFPSWAP with mod1 = 9
+// puts the max in VD and the min in VC (mod1 = 1 the other way round), whatever SFPCONFIG says, and compares
+// sign-magnitude. Two rows a, b are ordered with one swap, the larger goes against the running max (SCALE_LREG), the
+// smaller against the running min (LREG6, <= 0): |x| <= max(running max, -running min) needs no SFPABS. The final max
+// of the two is taken in absmax_reduce_to_scaler. The tile must be fp32 in DST.
 template <int ITERATIONS = 8>
 inline void absmax_accumulate_face() {
-    sfpi::vFloat acc = sfpi::l_reg[SCALE_LREG];
-#pragma GCC unroll 8
-    for (int d = 0; d < ITERATIONS; d++) {
-        acc = max_nonneg(acc, sfpi::abs(sfpi::vFloat(sfpi::dst_reg[0])));
-        sfpi::dst_reg++;
+    static_assert(ITERATIONS % 2 == 0, "rows are handled in pairs");
+#pragma GCC unroll 4
+    for (int d = 0; d < ITERATIONS; d += 2) {
+        TTI_SFPLOAD(ckernel::p_sfpu::LREG0, ckernel::InstrModLoadStore::FP32, ckernel::ADDR_MOD_7, 2 * d);
+        TTI_SFPLOAD(ckernel::p_sfpu::LREG1, ckernel::InstrModLoadStore::FP32, ckernel::ADDR_MOD_7, 2 * d + 2);
+        TTI_SFPSWAP(
+            0, ckernel::p_sfpu::LREG0, ckernel::p_sfpu::LREG1, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // L1 = max, L0 = min
+        TTI_SFPSWAP(
+            0, ckernel::p_sfpu::LREG1, ckernel::p_sfpu::LREG7, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // L7 = max(L7, L1)
+        TTI_SFPSWAP(
+            0, ckernel::p_sfpu::LREG0, ckernel::p_sfpu::LREG6, sfpi::SFPSWAP_MOD1_VEC_MIN_MAX);  // L6 = min(L6, L0)
     }
-    sfpi::l_reg[SCALE_LREG] = acc;
 }
 
 // Reduce the 32 lanes of SCALE_LREG to the tensor absmax, then replace it with the scaler 2^k:
@@ -70,7 +85,8 @@ inline void absmax_reduce_to_scaler() {
 
     // Lanes are 4 rows x 8 columns. Transposing 8 copies leaves row i of the accumulator in
     // register i (broadcast over its 4 rows), so the max of the first four is the column max.
-    sfpi::vFloat a = sfpi::l_reg[SCALE_LREG];
+    // absmax = max(running max, -running min)
+    sfpi::vFloat a = max_nonneg(sfpi::l_reg[SCALE_LREG], -sfpi::vFloat(sfpi::l_reg[sfpi::LRegs::LReg6]));
     sfpi::vFloat b = a, c = a, d = a, e = a, f = a, g = a, h = a;
     sfpi::subvec_transp(a, b, c, d, e, f, g, h);
     a = max_nonneg(max_nonneg(a, b), max_nonneg(c, d));

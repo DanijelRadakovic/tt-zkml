@@ -9,7 +9,7 @@
 
 namespace zkml::prim {
 
-std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> execute_layer(
+std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> execute_layer(
     const ttnn::Tensor& x,
     const ttnn::Tensor& w,
     Activation activation,

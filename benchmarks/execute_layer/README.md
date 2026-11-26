@@ -2,7 +2,7 @@
 
 `zkml::prim::execute_layer(x, w, activation)` on one Tensix core: quantize `x` and `w` to 8-bit sign-magnitude bytes (the quantizer's
 two passes with the scaler in LReg7), multiply them on the FPU at HiFi4 into an exact int32 accumulator, apply the activation
-on it, and requantize to 8 bits. This benchmark times the four stages with the device profiler (zones `QUANT_X`, `QUANT_W`,
+on it, and requantize to 8 bits. It also returns the raw int32 accumulator (`acc`, before the activation), which the execution trace needs and which the host cannot recompute cheaply (M*K*N multiply-adds). This benchmark times the four stages with the device profiler (zones `QUANT_X`, `QUANT_W`,
 `MATMUL`, `REQUANT` of the compute kernel) and the whole call with the host clock.
 
 ## Run
@@ -25,13 +25,13 @@ kernel waits for the reader (`QUANT_X` for the tiles of x, `QUANT_W` for those o
 
 | x (M x K) | w (K x N) | quantize x | quantize w | matmul + relu | requantize | sum (us) | wall per call (us) | cycles per tile matmul |
 |---|---|---|---|---|---|---|---|---|
-| 32 x 32 | 32 x 32 | 1747 | 1125 | 524 | 948 | 3.2 | 12.4 | 523.5 |
-| 64 x 128 | 128 x 64 | 7538 | 6510 | 2864 | 2643 | 14.5 | 18.6 | 179.0 |
-| 128 x 256 | 256 x 128 | 26496 | 24937 | 14950 | 8089 | 55.2 | 56.3 | 116.8 |
-| 128 x 512 | 512 x 128 | 51130 | 49454 | 23525 | 8081 | 97.9 | 99.6 | 91.9 |
-| 64 x 1024 | 1024 x 64 | 51092 | 49426 | 10362 | 2802 | 84.2 | 86.0 | 81.0 |
-| 32 x 256 | 256 x 256 | 7536 | 49432 | 7602 | 4570 | 51.2 | 52.2 | 118.8 |
-| 256 x 256 | 256 x 32 | 50998 | 6544 | 7600 | 4563 | 51.6 | 53.3 | 118.8 |
+| 32 x 32 | 32 x 32 | 1780 | 1122 | 898 | 1272 | 3.8 | 20.3 | 898.5 |
+| 64 x 128 | 128 x 64 | 7563 | 6514 | 3926 | 3844 | 16.2 | 21.0 | 245.4 |
+| 128 x 256 | 256 x 128 | 26553 | 24936 | 19326 | 12576 | 61.8 | 63.1 | 151.0 |
+| 128 x 512 | 512 x 128 | 51160 | 49450 | 27926 | 12578 | 104.5 | 106.2 | 109.1 |
+| 64 x 1024 | 1024 x 64 | 51143 | 49429 | 11419 | 4007 | 85.9 | 87.7 | 89.2 |
+| 32 x 256 | 256 x 256 | 7603 | 49428 | 9776 | 6880 | 54.6 | 55.7 | 152.8 |
+| 256 x 256 | 256 x 32 | 51085 | 6542 | 9793 | 6858 | 55.0 | 56.2 | 153.0 |
 
 - **The quantization dominates**: quantize x and w together are about 70 to 75% of a call at the larger sizes (about 800 cycles per fp32 tile: pass 1,
   pass 2 with the sign-magnitude sweep, and the DRAM read). Weights that are quantized once and reused would remove half of it;
@@ -41,27 +41,31 @@ kernel waits for the reader (`QUANT_X` for the tiles of x, `QUANT_W` for those o
 
 ## Does the activation overlap the matmul? Not in this version
 
-The matmul works on blocks of 4 output tiles. After the K loop of a block, an SFPU sweep applies the activation on the int32
-accumulator (ReLU: zero the negative values), converts it to fp32 and folds it into the running absmax in LReg7; then the block is packed
-while the FPU starts the next one. What overlaps is the packer, the unpacker and the next block's FPU work. The SFPU sweep itself does not
-overlap the FPU: removing it (a temporary edit of the kernel, outputs then wrong, same shapes) changed the `MATMUL` zone like this:
+The matmul works on blocks of 4 output tiles. After the K loop of a block, an SFPU sweep turns the accumulator from the FPU's
+sign-magnitude into two's complement (so the packer writes the `acc` output) and folds the absmax of the activated accumulator
+(ReLU: the negatives zeroed) into LReg7; then the block is packed while the FPU starts the next one. What overlaps is the packer,
+the unpacker and the next block's FPU work. The SFPU sweep itself does not overlap the FPU: removing it (a temporary edit of the
+kernel, outputs then wrong, same shapes) changed the `MATMUL` zone like this:
 
 | Mt Kt Nt | blocks | `MATMUL` with the sweep | without | difference per block | per accumulator tile |
 |---|---|---|---|---|---|
-| 4 16 4 | 4 | 23525 | 17606 | 1480 | 370 |
-| 2 32 2 | 1 | 10356 | 8879 | 1477 | 369 |
-| 1 8 8 | 2 | 7596 | 4642 | 1477 | 369 |
+| 4 16 4 | 4 | 27926 | 17606 | 2580 | 645 |
+| 2 32 2 | 1 | 11419 | 8879 | 2540 | 635 |
+| 1 8 8 | 2 | 9776 | 4642 | 2567 | 642 |
 
-So the sweep costs 370 cycles per accumulator tile every time and is fully visible. It is 35% of the matmul at K = 512 and 17% at K = 1024.
-The reason is how the math thread works: the SFPU code is issued instruction by instruction by the same RISC-V core that issues the FPU
-work (about 11 instructions per 4 rows x 8 lanes, 32 of those per tile, one per cycle), so while it issues the sweep it does not issue the
-next block's matmul. The hardware allows the FPU and the SFPU to work at the same time on different halves of DST (ISA documentation,
-`Dst.md`), but not with this structure. Ways to get the overlap, not done:
+So the sweep costs about 640 cycles per accumulator tile every time and is fully visible: 60% of the matmul at K = 512 and 30% at
+K = 1024. (Before the raw accumulator became an output the sweep was 370 cycles per tile; the two's complement conversion and its
+store added the rest.) The requantize zone also grew, from 8081 to 12578 cycles for 16 tiles: it now converts the int32 accumulator
+to fp32, with the activation, in a separate SFPU sweep before the quantize sweep. Both sweeps are SFPI code issued by the same RISC-V
+core that issues the FPU work (about 11 to 20 instructions per 4 rows x 8 lanes, 32 of those per tile, one per cycle), so while it
+issues the sweep it does not issue the next block's matmul. The hardware allows the FPU and the SFPU to work at the same time on
+different halves of DST (ISA documentation, `Dst.md`), but not with this structure. Ways to get the overlap and to make the sweeps
+cheaper, not done:
 
 1. Issue the sweep of block i in small pieces between the matmul calls of block i + 1 (the FPU instructions run 66 cycles each), which
    needs two DST sections held at once (full-sync DST, 8 tiles) and loses the packer overlap.
-2. Record the sweep in the replay buffer so one instruction issues many (as tt-metal's quant kernels do); this shortens the issue time
-   but the SFPU executes about one instruction per cycle too, so it helps only together with 1.
+2. Write the sweeps as hand-written SFPU instructions in the replay buffer (as tt-metal's quant kernels do) and fuse the int32 -> fp32
+   conversion into the quantize sweep: fewer instructions per row (the two's complement conversion is one `SFPCAST`).
 3. Apply the activation after the requantize, on the int8 bytes (less work per tile; ReLU is then not exact on the accumulator's absmax).
 
 ## Limits
@@ -69,3 +73,6 @@ next block's matmul. The hardware allows the FPU and the SFPU to work at the sam
 One core; FLOAT32 inputs (an `Int8` circular buffer cannot share a program with a bf16 one); `K <= 1024` (the accumulator is converted to
 fp32 exactly only below 2^24); `x`, `w`, the accumulator and the outputs must fit in L1 (the op throws otherwise); the activation is ReLU or
 none. Power was not measured.
+
+
+> Note: after this README was written the accumulator handling changed (raw sign-magnitude `acc`, integer requantizer, K <= 66560); see `benchmarks/execute_layer_2s_vs_sm_acc/README.md` for the comparison. The numbers above are of the two's complement version (`twos`).

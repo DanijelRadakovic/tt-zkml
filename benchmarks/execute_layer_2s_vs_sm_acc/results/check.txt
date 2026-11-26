@@ -1,0 +1,71 @@
+# outputs of the variants against each other (out bytes, decoded acc, scaler_out)
+## 1,1,1 relu
+sm_float against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int   against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+## 2,4,2 relu
+sm_float against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int   against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+## 4,8,4 relu
+sm_float against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int   against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+## 4,16,4 relu
+sm_float against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int   against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+## 2,32,2 relu
+sm_float against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int   against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+## 1,8,8 relu
+sm_float against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int   against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+## 8,8,1 relu
+sm_float against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int   against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+## 1,1,1 none
+sm_float against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int   against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/1024 out bytes differ, 0/1024 acc differ, scaler_out same
+## 2,4,2 none
+sm_float against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int   against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+## 4,8,4 none
+sm_float against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int   against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+## 4,16,4 none
+sm_float against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int   against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/16384 out bytes differ, 0/16384 acc differ, scaler_out same
+## 2,32,2 none
+sm_float against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int   against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/4096 out bytes differ, 0/4096 acc differ, scaler_out same
+## 1,8,8 none
+sm_float against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int   against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+## 8,8,1 none
+sm_float against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int   against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same
+sm_int_sfpi_absmax against twos: 0/8192 out bytes differ, 0/8192 acc differ, scaler_out same

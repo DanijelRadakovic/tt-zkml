@@ -157,6 +157,12 @@ add_executable(zkml_execute_layer_bench benchmarks/execute_layer/bench.cpp)
 target_link_libraries(zkml_execute_layer_bench PRIVATE zkml_ops)
 target_compile_definitions(zkml_execute_layer_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# Two's-complement against sign-magnitude accumulator of execute_layer; see benchmarks/execute_layer_2s_vs_sm_acc/README.md
+add_executable(zkml_execute_layer_2s_vs_sm_acc_bench benchmarks/execute_layer_2s_vs_sm_acc/bench.cpp)
+target_include_directories(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.
