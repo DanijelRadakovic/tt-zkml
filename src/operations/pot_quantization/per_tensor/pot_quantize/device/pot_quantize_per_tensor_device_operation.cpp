@@ -31,8 +31,7 @@ void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
         "pot_quantize: input dtype must be FLOAT32 or BFLOAT16, got {}",
         input.dtype());
     TT_FATAL(!input.memory_config().is_sharded(), "pot_quantize: sharded input is not supported");
-    TT_FATAL(
-        !attributes.output_memory_config.is_sharded(), "pot_quantize: sharded output is not supported");
+    TT_FATAL(!attributes.output_memory_config.is_sharded(), "pot_quantize: sharded output is not supported");
     // An enum class can still hold any number through a cast.
     const uint32_t width = attributes.bit_width.bits();
     TT_FATAL(

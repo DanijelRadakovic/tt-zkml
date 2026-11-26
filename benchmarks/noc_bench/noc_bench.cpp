@@ -40,10 +40,10 @@ using namespace tt::tt_metal;
 
 namespace {
 
-constexpr uint32_t PAGE_BYTES = 4096;   // input page = one fp32 tile
-constexpr uint32_t IN_PAGES = 65536;    // 256 MB interleaved input buffer
-constexpr uint32_t RES_WORDS = 64;      // result words per job (one 256 B page)
-constexpr uint32_t RES_PAGES = 256;     // max jobs per program
+constexpr uint32_t PAGE_BYTES = 4096;  // input page = one fp32 tile
+constexpr uint32_t IN_PAGES = 65536;   // 256 MB interleaved input buffer
+constexpr uint32_t RES_WORDS = 64;     // result words per job (one 256 B page)
+constexpr uint32_t RES_PAGES = 256;    // max jobs per program
 
 // Kernel modes (runtime arg 0), see kernels/bench.cpp
 enum Mode : uint32_t { BANK_LATENCY = 0, CORE_TO_CORE = 1, BANDWIDTH = 2, ONEWAY_SEND = 3, ONEWAY_RECV = 4 };
@@ -70,9 +70,13 @@ std::vector<std::vector<uint32_t>> run(Bench& b, const std::vector<Job>& jobs, i
     const CoreRangeSet cores(ranges);
     // c_0: 64 KB landing area for reads (up to 16 tiles in flight); c_1: the 256 B result page
     CreateCircularBuffer(
-        program, cores, CircularBufferConfig(16 * PAGE_BYTES, {{0, tt::DataFormat::Float32}}).set_page_size(0, PAGE_BYTES));
+        program,
+        cores,
+        CircularBufferConfig(16 * PAGE_BYTES, {{0, tt::DataFormat::Float32}}).set_page_size(0, PAGE_BYTES));
     CreateCircularBuffer(
-        program, cores, CircularBufferConfig(RES_WORDS * 4, {{1, tt::DataFormat::Float32}}).set_page_size(1, RES_WORDS * 4));
+        program,
+        cores,
+        CircularBufferConfig(RES_WORDS * 4, {{1, tt::DataFormat::Float32}}).set_page_size(1, RES_WORDS * 4));
 
     std::vector<uint32_t> ct_args;
     TensorAccessorArgs(*b.in_buf->get_backing_buffer()).append_to(ct_args);
@@ -153,13 +157,30 @@ void core_to_core(Bench& b, const CoreCoord& grid) {
                         continue;
                     }
                     const auto v = b.dev->worker_core_from_logical_core(dst);
-                    const auto o = run(
-                        b,
-                        {{src, {CORE_TO_CORE, static_cast<uint32_t>(v.x), static_cast<uint32_t>(v.y), target_l1, 64u, bytes}}},
-                        risc)[0];
+                    const auto o =
+                        run(b,
+                            {{src,
+                              {CORE_TO_CORE,
+                               static_cast<uint32_t>(v.x),
+                               static_cast<uint32_t>(v.y),
+                               target_l1,
+                               64u,
+                               bytes}}},
+                            risc)[0];
                     fmt::print(
                         "c2c noc{} bytes {} src {} {} dst {} {} dstxy {} {} srcxy {} {} read {:.1f} write {:.1f}\n",
-                        risc, bytes, src.x, src.y, dst.x, dst.y, v.x, v.y, o[0], o[1], o[2] / 16.0, o[3] / 16.0);
+                        risc,
+                        bytes,
+                        src.x,
+                        src.y,
+                        dst.x,
+                        dst.y,
+                        v.x,
+                        v.y,
+                        o[0],
+                        o[1],
+                        o[2] / 16.0,
+                        o[3] / 16.0);
                 }
             }
         }
@@ -178,15 +199,22 @@ void oneway(Bench& b, const CoreCoord& grid) {
                 const auto v = b.dev->worker_core_from_logical_core(dst);
                 uint32_t best = ~0u;
                 for (int rep = 0; rep < 3; rep++) {
-                    const auto r = run(
-                        b,
-                        {{src, {ONEWAY_SEND, static_cast<uint32_t>(v.x), static_cast<uint32_t>(v.y)}},
-                         {dst, {ONEWAY_RECV}}},
-                        risc);
+                    const auto r =
+                        run(b,
+                            {{src, {ONEWAY_SEND, static_cast<uint32_t>(v.x), static_cast<uint32_t>(v.y)}},
+                             {dst, {ONEWAY_RECV}}},
+                            risc);
                     best = std::min(best, r[1][2]);
                 }
                 fmt::print(
-                    "oneway noc{} src {} {} dst {} {} dstxy {} {} cyc {}\n", risc, src.x, src.y, dst.x, dst.y, v.x, v.y,
+                    "oneway noc{} src {} {} dst {} {} dstxy {} {} cyc {}\n",
+                    risc,
+                    src.x,
+                    src.y,
+                    dst.x,
+                    dst.y,
+                    v.x,
+                    v.y,
                     best);
             }
         }
@@ -226,9 +254,16 @@ void bandwidth(Bench& b, const CoreCoord& grid) {
                 const double avg_dur = static_cast<double>(sum_dur) / ncores;
                 const double bytes_per_core = static_cast<double>(n) * PAGE_BYTES;
                 fmt::print(
-                    "bw mode {} batch {} cores {} span_cyc {} max_cyc {} avg_cyc {:.0f} agg_GBps {:.1f} percore_GBps {:.2f}\n",
-                    one_bank ? "one-bank" : "interleaved", batch, ncores, span, max_dur, avg_dur,
-                    ncores * bytes_per_core / (span / mhz * 1e-6) / 1e9, bytes_per_core / (avg_dur / mhz * 1e-6) / 1e9);
+                    "bw mode {} batch {} cores {} span_cyc {} max_cyc {} avg_cyc {:.0f} agg_GBps {:.1f} percore_GBps "
+                    "{:.2f}\n",
+                    one_bank ? "one-bank" : "interleaved",
+                    batch,
+                    ncores,
+                    span,
+                    max_dur,
+                    avg_dur,
+                    ncores * bytes_per_core / (span / mhz * 1e-6) / 1e9,
+                    bytes_per_core / (avg_dur / mhz * 1e-6) / 1e9);
             }
         }
     }
@@ -257,7 +292,10 @@ int main(int argc, char** argv) {
 
     const auto grid = b.dev->compute_with_storage_grid_size();
     fmt::print(
-        "grid {} x {} clock_mhz {} dram_banks {}\n", grid.x, grid.y, b.dev->get_clock_rate_mhz(),
+        "grid {} x {} clock_mhz {} dram_banks {}\n",
+        grid.x,
+        grid.y,
+        b.dev->get_clock_rate_mhz(),
         b.dev->num_dram_channels());
     for (const auto& c : all_cores(grid)) {
         const auto v = b.dev->worker_core_from_logical_core(c);

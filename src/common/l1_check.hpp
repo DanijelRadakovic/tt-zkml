@@ -65,8 +65,13 @@ inline void check_if_cbs_can_fit_in_l1(
         const uint64_t start = (end + alignment - 1) / alignment * alignment;
         end = start + cb.bytes();
         breakdown += fmt::format(
-            "{}c_{}: {} x {} B = {} B at +{}", breakdown.empty() ? "" : ", ", cb.index, cb.num_pages, cb.page_bytes,
-            cb.bytes(), start - l1_base);
+            "{}c_{}: {} x {} B = {} B at +{}",
+            breakdown.empty() ? "" : ", ",
+            cb.index,
+            cb.num_pages,
+            cb.page_bytes,
+            cb.bytes(),
+            start - l1_base);
     }
     const uint64_t needed = end - l1_base;  // includes the alignment padding
     TT_FATAL(

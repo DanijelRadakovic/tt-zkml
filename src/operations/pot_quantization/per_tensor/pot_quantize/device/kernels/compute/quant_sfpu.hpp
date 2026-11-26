@@ -7,10 +7,11 @@
 // no scaler tile in DST, no pack of the scaler to L1 and no copy of it back into DST for every block. Each kernel makes
 // one sweep over a DST tile, in place: load x, multiply by 2^k, round half to even, convert to int32.
 //
-//   quant_small_init<INT8_OUT, SIGN_MAG>(), quant_small_tile<INT8_OUT, SIGN_MAG>(idst)    8 and 16 bits (|x * 2^k| < 2^22)
-//       n = RNE(x * 2^k). Int32 output: n as a two's complement int32. Int8 output: a byte in [0, 255], which the UInt8 packer
-//       writes unchanged (it saturates anything outside [0, 255]): (n + 128) ^ 0x80, the two's complement byte of n, or with
-//       SIGN_MAG the sign-magnitude byte |n| | (sign << 7), the encoding of the FPU's Int8 format (see
+//   quant_small_init<INT8_OUT, SIGN_MAG>(), quant_small_tile<INT8_OUT, SIGN_MAG>(idst)    8 and 16 bits (|x * 2^k| <
+//   2^22)
+//       n = RNE(x * 2^k). Int32 output: n as a two's complement int32. Int8 output: a byte in [0, 255], which the UInt8
+//       packer writes unchanged (it saturates anything outside [0, 255]): (n + 128) ^ 0x80, the two's complement byte
+//       of n, or with SIGN_MAG the sign-magnitude byte |n| | (sign << 7), the encoding of the FPU's Int8 format (see
 //       benchmarks/sign_mag_fpu_compatibillity). SIGN_MAG costs 3 more instructions per 4 rows x 8 lanes.
 //       Hand-written SFPU instructions: SFPLOAD, SFPMAD, SFPNOP, SFPIADD [, SFPXOR], SFPSTORE per 4 rows x 8 lanes.
 //       tt-metal's quant_tile / quant_int8_tile need 9 or 10 (a second SFPLOAD for the scale from DST, two SFPSWAPs for
@@ -18,17 +19,17 @@
 //   quant32_init(), quant32_tile(idst)                              32 bits (|x * 2^k| < 2^31)
 //       Same result, for values beyond the reach of the magic-number rounding. SFPI code, see below.
 //
-// Rounding for |v| < 2^22 (quant_small): m = v + 1.5 * 2^23 rounds to nearest even in the fp32 adder (the spacing of fp32
-// around 1.5 * 2^23 is 1); bits(m) - bits(1.5 * 2^23) is the integer RNE(v). With the multiplication it is one SFPMAD,
-// m = x * 2^k + 1.5 * 2^23.
+// Rounding for |v| < 2^22 (quant_small): m = v + 1.5 * 2^23 rounds to nearest even in the fp32 adder (the spacing of
+// fp32 around 1.5 * 2^23 is 1); bits(m) - bits(1.5 * 2^23) is the integer RNE(v). With the multiplication it is one
+// SFPMAD, m = x * 2^k + 1.5 * 2^23.
 //
-// Rounding for 32 bits, with a = |v|: below 2^23 the same trick with 2^23 (bits(a + 2^23) - bits(2^23) = RNE(a), also when
-// the sum carries into 2^24); from 2^23 on every fp32 is an integer, and the integer is the 24-bit significand shifted
-// left by exponent - 23 (SFPEXMAN, SFPEXEXP, SFPSHFT). The sign is applied last.
+// Rounding for 32 bits, with a = |v|: below 2^23 the same trick with 2^23 (bits(a + 2^23) - bits(2^23) = RNE(a), also
+// when the sum carries into 2^24); from 2^23 on every fp32 is an integer, and the integer is the 24-bit significand
+// shifted left by exponent - 23 (SFPEXMAN, SFPEXEXP, SFPSHFT). The sign is applied last.
 //
-// There is no clamp. k is the largest exponent with absmax * 2^k <= Q (see absmax_to_scaler), so |x * 2^k| <= Q for every
-// finite x of the tensor and the clamp to [-Q, Q] of the composed ops never fires. An Inf or NaN input has no meaningful
-// scaler anyway.
+// There is no clamp. k is the largest exponent with absmax * 2^k <= Q (see absmax_to_scaler), so |x * 2^k| <= Q for
+// every finite x of the tensor and the clamp to [-Q, Q] of the composed ops never fires. An Inf or NaN input has no
+// meaningful scaler anyway.
 //
 // LReg7 is read, never changed (the SFPI kernel writes it back unchanged at the end, in case the compiler used it). The
 // code in between must not use it: tt-metal's quant kernels do not, but typecast, exp, recip, max/min and reduce do.
@@ -82,8 +83,8 @@ inline void quant_small_constants() {
     }
 }
 
-// One tile, 8 iterations of 4 rows x 8 lanes, in place. Called by the binary SFPU wrapper, which sets the DST base address
-// of the tile; the offsets are relative to it.
+// One tile, 8 iterations of 4 rows x 8 lanes, in place. Called by the binary SFPU wrapper, which sets the DST base
+// address of the tile; the offsets are relative to it.
 template <bool INT8_OUT, bool SIGN_MAG, int ITERATIONS = 8>
 inline void quant_small_face(const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
     constexpr std::uint32_t dst_tile_size = 64;
@@ -109,7 +110,6 @@ inline void quant_small_face(const uint dst_index_in0, const uint dst_index_in1,
     }
 }
 
-
 // One face of a tile: 8 iterations of 4 rows x 8 lanes, SFPI code (the conditionals need the condition codes).
 template <int ITERATIONS = 8>
 inline void quant32_face() {
@@ -124,7 +124,8 @@ inline void quant32_face() {
             q = sfpi::vInt(m.get()) - 0x4B000000;  // the bits of m
         }
         v_else {
-            // An integer already: significand (24 bits, unit bit included) << (exponent - 23), with exponent in [23, 30].
+            // An integer already: significand (24 bits, unit bit included) << (exponent - 23), with exponent in [23,
+            // 30].
             const sfpi::vUInt significand(sfpi::exman(a, sfpi::MantissaMode::WithUnitBit).get());
             q = sfpi::vInt(sfpi::shft(significand, sfpi::exexp(a) - 23));
         }
@@ -158,9 +159,7 @@ inline void quant_small_tile(uint32_t idst) {
 // Once, after absmax_to_scaler() and before the first quant32_tile().
 inline void quant32_init() { ckernel::llk_math_eltwise_unary_sfpu_init<SfpuType::unused, DST_ACCUM_MODE>(); }
 
-inline void quant32_tile(uint32_t idst) {
-    _llk_math_eltwise_unary_sfpu_params_(quant32_face<8>, idst, VectorMode::RC);
-}
+inline void quant32_tile(uint32_t idst) { _llk_math_eltwise_unary_sfpu_params_(quant32_face<8>, idst, VectorMode::RC); }
 
 #endif  // TRISC_MATH
 

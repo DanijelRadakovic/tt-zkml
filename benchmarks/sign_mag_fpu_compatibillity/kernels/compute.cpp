@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: MIT
 
 // Pass 2 of the 8-bit SFPU quantizer, repeated: for blocks of 3 tiles, copy the input tiles and the fp32 scaler tile
-// into DST, quantize each tile to int8 (the variant under test), pack the block. The same sequence as the SFPU branch of
-// pot_quantize_per_tensor's quantize.cpp (DST_TILES = 4: 3 data tiles + the scaler in slot 3, fp32 DST).
+// into DST, quantize each tile to int8 (the variant under test), pack the block. The same sequence as the SFPU branch
+// of pot_quantize_per_tensor's quantize.cpp (DST_TILES = 4: 3 data tiles + the scaler in slot 3, fp32 DST).
 //
-// Compile args: VARIANT (variants.hpp), MODE (0 = copy + quantize + pack, 1 = only the quantize calls on whatever DST holds:
-// the SFPU cost on its own). Runtime args: reps, tiles (a multiple of 3).
-// CBs: c_0 = input tiles (Float32, or Float16_b), c_1 = scaler tile (Float32), c_16 = output tiles (Int8 or UInt8), `tiles` pages.
+// Compile args: VARIANT (variants.hpp), MODE (0 = copy + quantize + pack, 1 = only the quantize calls on whatever DST
+// holds: the SFPU cost on its own). Runtime args: reps, tiles (a multiple of 3). CBs: c_0 = input tiles (Float32, or
+// Float16_b), c_1 = scaler tile (Float32), c_16 = output tiles (Int8 or UInt8), `tiles` pages.
 
 #include <cstdint>
 #include "api/compute/common.h"
@@ -48,7 +48,8 @@ void kernel_main() {
     if constexpr (variant == zkml_bench::TWOS_LIB) {
         quant_int8_tile_init(0);
     } else {
-        MATH((::ckernel::llk_math_eltwise_binary_sfpu_init<::SfpuType::quant_int32>(zkml_bench::quant_init<variant>, 0u)));
+        MATH((::ckernel::llk_math_eltwise_binary_sfpu_init<::SfpuType::quant_int32>(
+            zkml_bench::quant_init<variant>, 0u)));
     }
 
     {

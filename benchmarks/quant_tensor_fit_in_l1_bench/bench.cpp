@@ -34,7 +34,8 @@ using namespace tt::tt_metal;
 
 int main(int argc, char** argv) {
     if (argc != 7) {
-        fmt::print(stderr, "usage: {} <stream|resident> <f32|bf16> <bits 8|16|32> <num_tiles> <block> <iters>\n", argv[0]);
+        fmt::print(
+            stderr, "usage: {} <stream|resident> <f32|bf16> <bits 8|16|32> <num_tiles> <block> <iters>\n", argv[0]);
         return 2;
     }
     const bool resident = std::string(argv[1]) == "resident";
@@ -129,7 +130,9 @@ int main(int argc, char** argv) {
 
     SetRuntimeArgs(program, reader, core, {static_cast<uint32_t>(in_buf->address()), num_tiles});
     SetRuntimeArgs(
-        program, writer, core,
+        program,
+        writer,
+        core,
         {static_cast<uint32_t>(out_buf->address()), static_cast<uint32_t>(scale_buf->address()), num_tiles});
     SetRuntimeArgs(program, compute, core, {num_tiles});
 
@@ -161,7 +164,13 @@ int main(int argc, char** argv) {
     std::memcpy(&scaler, &scale[0], 4);
     fmt::print(
         "config mode {} in {} bits {} tiles {} block {} | scaler {} checksum {:016x} | host_ms_per_run {:.3f}\n",
-        resident ? "resident" : "stream", bf16 ? "bf16" : "f32", bits, num_tiles, block, scaler, checksum,
+        resident ? "resident" : "stream",
+        bf16 ? "bf16" : "f32",
+        bits,
+        num_tiles,
+        block,
+        scaler,
+        checksum,
         host_ms / std::max(1u, iters - 1));
 
     in_buf.reset();

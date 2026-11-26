@@ -31,8 +31,8 @@ struct ExecuteLayerOperation {
     };
 
     // (out, scaler_x, scaler_w, scaler_out)
-    using spec_return_value_t =
-        std::tuple<tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec>;
+    using spec_return_value_t = std::
+        tuple<tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec, tt::tt_metal::TensorSpec>;
     using tensor_return_value_t = std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor, ttnn::Tensor>;
 
     struct SingleCore {

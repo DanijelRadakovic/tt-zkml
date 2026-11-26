@@ -184,3 +184,25 @@ if(DOXYGEN_FOUND)
         COMMENT "Generating API documentation with Doxygen"
     )
 endif()
+
+# Formatting with the repo's .clang-format: `cmake --build .build/default --target format` rewrites every tracked
+# C++ file in place, `--target format-check` only reports (non-zero exit if a file would change).
+# Optional: the targets exist only if clang-format is installed.
+find_program(CLANG_FORMAT_EXE NAMES clang-format-20 clang-format)
+if(CLANG_FORMAT_EXE)
+    set(ZKML_FORMAT_FILES "git ls-files -z '*.cpp' '*.hpp' '*.h' '*.cc'")
+    add_custom_target(
+        format
+        COMMAND sh -c "${ZKML_FORMAT_FILES} | xargs -0 ${CLANG_FORMAT_EXE} -i"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Formatting C++ sources with clang-format"
+        VERBATIM
+    )
+    add_custom_target(
+        format-check
+        COMMAND sh -c "${ZKML_FORMAT_FILES} | xargs -0 ${CLANG_FORMAT_EXE} --dry-run -Werror"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Checking C++ formatting with clang-format"
+        VERBATIM
+    )
+endif()

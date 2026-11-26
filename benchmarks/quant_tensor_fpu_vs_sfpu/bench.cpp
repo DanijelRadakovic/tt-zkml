@@ -6,9 +6,9 @@
 //
 // It runs the REAL kernels of the op (reader, compute, writer under
 // src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
-// builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU multiply with an
-// FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only `sfpu` is accepted.
-// The results in results/ and the README are the record of that comparison.
+// builds. Every run is checked against the host reference. The benchmark was written to compare the SFPU multiply with
+// an FPU multiply (`mul_tiles`) in pass 2; the FPU multiply has since been removed from the op, so only `sfpu` is
+// accepted. The results in results/ and the README are the record of that comparison.
 //
 // Usage:
 //   zkml_quant_fpu_vs_sfpu profile <bf16|f32> <sfpu|fpu> <bits 8|16|32> <int32|int8> <tiles> <iters>
@@ -229,7 +229,9 @@ Setup build(const Params& p, uint32_t n_cores) {
     const uint32_t out_cb_pages = 2 * block_tiles;
     auto cb = [&](uint32_t index, uint32_t pages, uint32_t page_bytes, tt::DataFormat fmt) {
         CreateCircularBuffer(
-            program, core_set, CircularBufferConfig(pages * page_bytes, {{index, fmt}}).set_page_size(index, page_bytes));
+            program,
+            core_set,
+            CircularBufferConfig(pages * page_bytes, {{index, fmt}}).set_page_size(index, page_bytes));
     };
     cb(tt::CBIndex::c_0, in_cb_pages, in_tile_bytes, in_format);
     cb(tt::CBIndex::c_16, out_cb_pages, s.out_tile_bytes, out_format);
@@ -277,7 +279,9 @@ Setup build(const Params& p, uint32_t n_cores) {
             program,
             writer,
             c,
-            {static_cast<uint32_t>(s.out_buf[i]->address()), static_cast<uint32_t>(s.scale_buf[i]->address()), p.tiles});
+            {static_cast<uint32_t>(s.out_buf[i]->address()),
+             static_cast<uint32_t>(s.scale_buf[i]->address()),
+             p.tiles});
         SetRuntimeArgs(program, compute, c, {p.tiles});
     }
     s.workload.add_program(distributed::MeshCoordinateRange(dev->shape()), std::move(program));

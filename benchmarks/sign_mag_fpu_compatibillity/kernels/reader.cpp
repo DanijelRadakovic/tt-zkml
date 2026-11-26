@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Copies the input tiles (fp32 or bf16) into c_0 and the scaler tile into c_1 once; the compute kernel reuses them from L1.
+// Copies the input tiles (fp32 or bf16) into c_0 and the scaler tile into c_1 once; the compute kernel reuses them from
+// L1.
 
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"

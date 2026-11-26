@@ -45,8 +45,8 @@ constexpr uint32_t MT = 2, NT = 2;
 
 enum class Path { Int8, Bf16 };
 
-// --twos: write the Int8 operands as two's complement bytes, which is what pot_quantize_per_tensor emits for INT8 output,
-// instead of the sign-magnitude bytes the unpacker expects.
+// --twos: write the Int8 operands as two's complement bytes, which is what pot_quantize_per_tensor emits for INT8
+// output, instead of the sign-magnitude bytes the unpacker expects.
 bool g_twos_complement_int8 = false;
 
 struct Fidelity {
@@ -77,7 +77,8 @@ std::vector<uint32_t> tilize(const std::vector<int32_t>& m, uint32_t rows, uint3
                 if (g_twos_complement_int8) {
                     bytes[index] = static_cast<uint8_t>(static_cast<int8_t>(v));
                 } else {
-                    bytes[index] = v < 0 ? static_cast<uint8_t>(0x80 | (-v)) : static_cast<uint8_t>(v);  // sign-magnitude
+                    bytes[index] =
+                        v < 0 ? static_cast<uint8_t>(0x80 | (-v)) : static_cast<uint8_t>(v);  // sign-magnitude
                 }
             } else {
                 const float f = static_cast<float>(v);
@@ -131,7 +132,13 @@ Check compare(const std::vector<uint32_t>& words, const std::vector<int64_t>& ex
         return c;
     };
     if (path == Path::Bf16) {
-        return run([](uint32_t w) { float f; std::memcpy(&f, &w, 4); return static_cast<double>(f); }, "float32");
+        return run(
+            [](uint32_t w) {
+                float f;
+                std::memcpy(&f, &w, 4);
+                return static_cast<double>(f);
+            },
+            "float32");
     }
     Check twos = run([](uint32_t w) { return static_cast<double>(static_cast<int32_t>(w)); }, "two's complement");
     Check sm = run(
@@ -167,7 +174,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--kt") && i + 1 < argc) {
             kts.clear();
-            for (auto& s : split(argv[++i])) kts.push_back(std::stoul(s));
+            for (auto& s : split(argv[++i])) {
+                kts.push_back(std::stoul(s));
+            }
         } else if (!std::strcmp(argv[i], "--fidelity") && i + 1 < argc) {
             fidelities = split(argv[++i]);
         } else if (!std::strcmp(argv[i], "--mode") && i + 1 < argc) {
@@ -181,9 +190,15 @@ int main(int argc, char** argv) {
         }
     }
     auto fidelity_of = [](const std::string& s) {
-        if (s == "lofi") return MathFidelity::LoFi;
-        if (s == "hifi2") return MathFidelity::HiFi2;
-        if (s == "hifi3") return MathFidelity::HiFi3;
+        if (s == "lofi") {
+            return MathFidelity::LoFi;
+        }
+        if (s == "hifi2") {
+            return MathFidelity::HiFi2;
+        }
+        if (s == "hifi3") {
+            return MathFidelity::HiFi3;
+        }
         return MathFidelity::HiFi4;
     };
 
@@ -192,9 +207,11 @@ int main(int argc, char** argv) {
     auto& cq = dev->mesh_command_queue();
     const CoreCoord core{0, 0};
 
-    std::string csv = "path,fidelity,mode,K,pattern,block_ns,ns_per_tile_matmul,gmac_per_s,mismatches,max_abs_error,out_encoding\n";
+    std::string csv =
+        "path,fidelity,mode,K,pattern,block_ns,ns_per_tile_matmul,gmac_per_s,mismatches,max_abs_error,out_encoding\n";
     std::printf(
-        "| path | fidelity | mode | K | pattern | ns / 2x2 block | ns / tile matmul | GMAC/s | wrong outputs (of 4096) | max error |\n"
+        "| path | fidelity | mode | K | pattern | ns / 2x2 block | ns / tile matmul | GMAC/s | wrong outputs (of 4096) "
+        "| max error |\n"
         "|---|---|---|---|---|---|---|---|---|---|\n");
 
     for (const std::string& mode_name : modes) {
@@ -207,29 +224,44 @@ int main(int argc, char** argv) {
                     const uint32_t in_bytes = tt::tile_size(in_fmt), out_bytes = tt::tile_size(out_fmt);
                     const uint32_t tiles_a = MT * kt, tiles_b = kt * NT, tiles_out = MT * NT;
 
-                    // The patterns: random q in [-127, 127] (what real data looks like); small: A and B in [-31, 31] (products
-                    // below 2^10); medium: A and B in [-45, 45] (products below 2^11); narrow: A in [-31, 31], B in [-15, 15] (the range for which the int8 mode needs one
-                    // fidelity phase); constant: all +127 (every product is 127 * 127).
+                    // The patterns: random q in [-127, 127] (what real data looks like); small: A and B in [-31, 31]
+                    // (products below 2^10); medium: A and B in [-45, 45] (products below 2^11); narrow: A in [-31,
+                    // 31], B in [-15, 15] (the range for which the int8 mode needs one fidelity phase); constant: all
+                    // +127 (every product is 127 * 127).
                     for (const char* pattern : {"random", "medium", "small", "narrow", "constant"}) {
                         std::vector<int32_t> A(static_cast<size_t>(M) * K), B(static_cast<size_t>(K) * N);
                         std::mt19937 rng(1234 + kt);
                         const bool constant = !std::strcmp(pattern, "constant");
-                        const int32_t lim_a = !std::strcmp(pattern, "small") || !std::strcmp(pattern, "narrow") ? 31 : !std::strcmp(pattern, "medium") ? 45 : 127;
-                        const int32_t lim_b = !std::strcmp(pattern, "small") ? 31 : !std::strcmp(pattern, "narrow") ? 15 : !std::strcmp(pattern, "medium") ? 45 : 127;
+                        const int32_t lim_a = !std::strcmp(pattern, "small") || !std::strcmp(pattern, "narrow") ? 31
+                                              : !std::strcmp(pattern, "medium")                                 ? 45
+                                                                                                                : 127;
+                        const int32_t lim_b = !std::strcmp(pattern, "small")    ? 31
+                                              : !std::strcmp(pattern, "narrow") ? 15
+                                              : !std::strcmp(pattern, "medium") ? 45
+                                                                                : 127;
                         std::uniform_int_distribution<int32_t> da(-lim_a, lim_a), db(-lim_b, lim_b);
-                        for (auto& v : A) v = constant ? 127 : da(rng);
-                        for (auto& v : B) v = constant ? 127 : db(rng);
+                        for (auto& v : A) {
+                            v = constant ? 127 : da(rng);
+                        }
+                        for (auto& v : B) {
+                            v = constant ? 127 : db(rng);
+                        }
                         std::vector<int64_t> exact(static_cast<size_t>(M) * N, 0);
-                        for (uint32_t i = 0; i < M; i++)
-                            for (uint32_t k = 0; k < K; k++)
-                                for (uint32_t j = 0; j < N; j++)
+                        for (uint32_t i = 0; i < M; i++) {
+                            for (uint32_t k = 0; k < K; k++) {
+                                for (uint32_t j = 0; j < N; j++) {
                                     exact[static_cast<size_t>(i) * N + j] +=
-                                        static_cast<int64_t>(A[static_cast<size_t>(i) * K + k]) * B[static_cast<size_t>(k) * N + j];
+                                        static_cast<int64_t>(A[static_cast<size_t>(i) * K + k]) *
+                                        B[static_cast<size_t>(k) * N + j];
+                                }
+                            }
+                        }
 
                         auto make_buffer = [&](uint32_t tiles, uint32_t page) {
                             return distributed::MeshBuffer::create(
                                 distributed::ReplicatedBufferConfig{.size = uint64_t(tiles) * page},
-                                distributed::DeviceLocalBufferConfig{.page_size = page, .buffer_type = BufferType::DRAM},
+                                distributed::DeviceLocalBufferConfig{
+                                    .page_size = page, .buffer_type = BufferType::DRAM},
                                 dev.get());
                         };
                         auto buf_a = make_buffer(tiles_a, in_bytes);
@@ -242,7 +274,10 @@ int main(int argc, char** argv) {
                         auto run = [&](uint32_t reps) {
                             Program program = CreateProgram();
                             auto cb = [&](uint32_t index, uint32_t tiles, uint32_t bytes, tt::DataFormat f) {
-                                CreateCircularBuffer(program, core, CircularBufferConfig(tiles * bytes, {{index, f}}).set_page_size(index, bytes));
+                                CreateCircularBuffer(
+                                    program,
+                                    core,
+                                    CircularBufferConfig(tiles * bytes, {{index, f}}).set_page_size(index, bytes));
                             };
                             cb(0, tiles_a, in_bytes, in_fmt);
                             cb(1, tiles_b, in_bytes, in_fmt);
@@ -250,15 +285,31 @@ int main(int argc, char** argv) {
                             std::vector<uint32_t> rct;
                             TensorAccessorArgs(*buf_a->get_backing_buffer()).append_to(rct);
                             TensorAccessorArgs(*buf_b->get_backing_buffer()).append_to(rct);
-                            auto reader = CreateKernel(program, zkml::common::kernel_path(__FILE__, "kernels/reader.cpp"), core, ReaderDataMovementConfig(rct));
+                            auto reader = CreateKernel(
+                                program,
+                                zkml::common::kernel_path(__FILE__, "kernels/reader.cpp"),
+                                core,
+                                ReaderDataMovementConfig(rct));
                             std::vector<uint32_t> wct;
                             TensorAccessorArgs(*buf_out->get_backing_buffer()).append_to(wct);
-                            auto writer = CreateKernel(program, zkml::common::kernel_path(__FILE__, "kernels/writer.cpp"), core, WriterDataMovementConfig(wct));
+                            auto writer = CreateKernel(
+                                program,
+                                zkml::common::kernel_path(__FILE__, "kernels/writer.cpp"),
+                                core,
+                                WriterDataMovementConfig(wct));
                             auto compute = CreateKernel(
-                                program, zkml::common::kernel_path(__FILE__, "kernels/compute.cpp"), core,
-                                ComputeConfig{.math_fidelity = fidelity_of(fid_name), .fp32_dest_acc_en = true,
-                                              .compile_args = {MT, NT, mode_name == "tiles" ? 0u : 1u}});
-                            SetRuntimeArgs(program, reader, core, {uint32_t(buf_a->address()), uint32_t(buf_b->address()), tiles_a, tiles_b});
+                                program,
+                                zkml::common::kernel_path(__FILE__, "kernels/compute.cpp"),
+                                core,
+                                ComputeConfig{
+                                    .math_fidelity = fidelity_of(fid_name),
+                                    .fp32_dest_acc_en = true,
+                                    .compile_args = {MT, NT, mode_name == "tiles" ? 0u : 1u}});
+                            SetRuntimeArgs(
+                                program,
+                                reader,
+                                core,
+                                {uint32_t(buf_a->address()), uint32_t(buf_b->address()), tiles_a, tiles_b});
                             SetRuntimeArgs(program, writer, core, {uint32_t(buf_out->address()), tiles_out});
                             SetRuntimeArgs(program, compute, core, {reps, kt});
                             distributed::MeshWorkload wl;
@@ -278,8 +329,13 @@ int main(int argc, char** argv) {
                         if (verbose && check.mismatches) {
                             std::printf("  first outputs (device raw word, exact):");
                             for (int i = 0; i < 6; i++) {
-                                if (path == Path::Bf16) { float f; std::memcpy(&f, &out_words[i], 4); std::printf(" (%.1f, %lld)", f, (long long)exact[i]); }
-                                else std::printf(" (0x%08x, %lld)", out_words[i], (long long)exact[i]);
+                                if (path == Path::Bf16) {
+                                    float f;
+                                    std::memcpy(&f, &out_words[i], 4);
+                                    std::printf(" (%.1f, %lld)", f, (long long)exact[i]);
+                                } else {
+                                    std::printf(" (0x%08x, %lld)", out_words[i], (long long)exact[i]);
+                                }
                             }
                             std::printf("\n");
                         }
@@ -291,7 +347,8 @@ int main(int argc, char** argv) {
                             uint32_t reps = 64;
                             for (int i = 0; i < 3; i++) {
                                 const double ms = run(reps);
-                                reps = static_cast<uint32_t>(std::clamp(reps * (20.0 / std::max(ms, 0.05)), 16.0, 4.0e6));
+                                reps =
+                                    static_cast<uint32_t>(std::clamp(reps * (20.0 / std::max(ms, 0.05)), 16.0, 4.0e6));
                             }
                             const uint32_t r1 = reps, r2 = 4 * reps;
                             std::vector<double> diffs;
@@ -303,13 +360,24 @@ int main(int argc, char** argv) {
                             tile_ns = block_ns / (MT * NT * kt);
                             gmacs = (double(M) * N * K) / block_ns;  // MAC per ns = GMAC/s
                         }
-                        std::printf("| %s | %s | %s | %u | %s | %.0f | %.1f | %.0f | %llu | %lld |\n",
-                                    path == Path::Int8 ? "int8" : "bf16", fid_name.c_str(), mode_name.c_str(), K, pattern, block_ns, tile_ns, gmacs,
-                                    static_cast<unsigned long long>(check.mismatches), static_cast<long long>(check.max_abs_error));
+                        std::printf(
+                            "| %s | %s | %s | %u | %s | %.0f | %.1f | %.0f | %llu | %lld |\n",
+                            path == Path::Int8 ? "int8" : "bf16",
+                            fid_name.c_str(),
+                            mode_name.c_str(),
+                            K,
+                            pattern,
+                            block_ns,
+                            tile_ns,
+                            gmacs,
+                            static_cast<unsigned long long>(check.mismatches),
+                            static_cast<long long>(check.max_abs_error));
                         std::fflush(stdout);
-                        csv += std::string(path == Path::Int8 ? "int8" : "bf16") + "," + fid_name + "," + mode_name + "," + std::to_string(K) + "," + pattern +
-                               "," + std::to_string(block_ns) + "," + std::to_string(tile_ns) + "," + std::to_string(gmacs) + "," +
-                               std::to_string(check.mismatches) + "," + std::to_string(check.max_abs_error) + "," + check.encoding + "\n";
+                        csv += std::string(path == Path::Int8 ? "int8" : "bf16") + "," + fid_name + "," + mode_name +
+                               "," + std::to_string(K) + "," + pattern + "," + std::to_string(block_ns) + "," +
+                               std::to_string(tile_ns) + "," + std::to_string(gmacs) + "," +
+                               std::to_string(check.mismatches) + "," + std::to_string(check.max_abs_error) + "," +
+                               check.encoding + "\n";
                     }
                 }
             }

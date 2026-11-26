@@ -27,7 +27,8 @@ void ExecuteLayerOperation::validate_on_program_cache_miss(
         TT_FATAL(t->layout() == Layout::TILE, "execute_layer: inputs must be in TILE layout");
         TT_FATAL(
             t->dtype() == DataType::FLOAT32,
-            "execute_layer: inputs must be FLOAT32 (an Int8 circular buffer cannot share a program with a bf16 one), got {}",
+            "execute_layer: inputs must be FLOAT32 (an Int8 circular buffer cannot share a program with a bf16 one), "
+            "got {}",
             t->dtype());
         TT_FATAL(!t->memory_config().is_sharded(), "execute_layer: sharded inputs are not supported");
         TT_FATAL(t->logical_shape().rank() == 2, "execute_layer: inputs must be 2-D");

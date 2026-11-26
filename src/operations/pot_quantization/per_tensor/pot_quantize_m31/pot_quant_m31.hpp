@@ -21,14 +21,15 @@ namespace zkml::prim {
  * `m` back as the signed number `m <= (p - 1) / 2 ? m : m - p`. With `QuantRange::Full` at 32 bits, `q = 2^31 - 1`
  * would map to `p` itself, which is not a canonical residue, and `-p`, `0`, `p` would all be the field element 0.
  *
- * @param quantized Output of `pot_quantize_per_tensor(..., QuantRange::M31)`: INT32 or INT8, on device, TILE layout, interleaved, every
- *        element in `[-Q, Q]` (not checked: the device cannot report an error, and the quantizer cannot produce
- *        anything else). INT8 is read as the two's-complement bytes the quantizer wrote.
+ * @param quantized Output of `pot_quantize_per_tensor(..., QuantRange::M31)`: INT32 or INT8, on device, TILE layout,
+ * interleaved, every element in `[-Q, Q]` (not checked: the device cannot report an error, and the quantizer cannot
+ * produce anything else). INT8 is read as the two's-complement bytes the quantizer wrote.
  * @param output_memory_config Memory config of the output. Defaults to the memory config of the input.
  * @return UINT32 tensor of the shape of `quantized`, TILE layout, every element a canonical M31 value in `[0, p)`.
  *         These are the cells of a stwo trace column.
  */
 ttnn::Tensor pot_quant_m31(
-    const ttnn::Tensor& quantized, const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt);
+    const ttnn::Tensor& quantized,
+    const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt);
 
 }  // namespace zkml::prim

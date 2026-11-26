@@ -23,7 +23,9 @@ namespace zkml::reference {
 
 using zkml::prim::QuantRange;
 
-inline int64_t pot_qmax(uint32_t bits, QuantRange range = QuantRange::Full) { return zkml::prim::pot_qmax(bits, range); }
+inline int64_t pot_qmax(uint32_t bits, QuantRange range = QuantRange::Full) {
+    return zkml::prim::pot_qmax(bits, range);
+}
 
 inline float absmax(const std::vector<float>& x) {
     float m = 0.0f;
@@ -62,8 +64,9 @@ inline uint32_t pot_to_m31(int32_t q) {
 
 // The signed value of a residue: m <= (p - 1) / 2 ? m : m - p.
 inline int32_t pot_from_m31(uint32_t m) {
-    return m <= (zkml::prim::m31_modulus - 1) / 2 ? static_cast<int32_t>(m)
-                                                  : static_cast<int32_t>(static_cast<int64_t>(m) - zkml::prim::m31_modulus);
+    return m <= (zkml::prim::m31_modulus - 1) / 2
+               ? static_cast<int32_t>(m)
+               : static_cast<int32_t>(static_cast<int64_t>(m) - zkml::prim::m31_modulus);
 }
 
 }  // namespace zkml::reference
