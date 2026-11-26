@@ -2,13 +2,18 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Debug helpers for device kernels (compiled by tt-metal at runtime).
+// Debug helpers for compute kernels (compiled by tt-metal at runtime), built on DEVICE_PRINT, tt-metal's fmt-style device
+// print (tech_reports/Debugging/DEVICE_PRINT_replaces_DPRINT.md in tt-metal). The legacy stream-style DPRINT is gone: DPRINT is
+// only an alias of DEVICE_PRINT now.
+//
+// Printing is on when the kernel is built with DEBUG_PRINT_ENABLED, which tt-metal sets for the cores listed in
+// TT_METAL_DPRINT_CORES (for example TT_METAL_DPRINT_CORES="(0,0)"); everything below is an empty function otherwise.
 
 #pragma once
 
 #include <cstdint>
 
-#include "api/debug/dprint.h"
+#include "api/debug/device_print.h"
 #if defined(COMPILE_FOR_TRISC) && defined(DEBUG_PRINT_ENABLED) && !defined(FORCE_DPRINT_OFF)
 #include "api/debug/dprint_tensix.h"
 #endif
@@ -51,14 +56,14 @@ namespace zkml::debug {
  *
  * @pre  UNPACK: the tile has arrived (`wait_front` returned). 
  *       PACK: `pack_tile` has been called and the tile not yet pushed (`push_back`).
- * @note Compiles to an empty function unless DPRINT is enabled (`TT_METAL_DPRINT_CORES` set), so calls
+ * @note Compiles to an empty function unless device print is enabled (`TT_METAL_DPRINT_CORES` set), so calls
  *       do not need `#if defined(DEBUG_PRINT_ENABLED)` guards.
  * @note On PACK the helper first calls `ckernel::tensix_sync()`. `pack_tile` only issues packer
  *       instructions, so without the wait the print can show the CB slot's previous (stale) contents.
- * @note Two `DPRINT` calls per row are deliberate: one call with both slices (about 80 bytes each)
- *       comes close to the 204-byte per-thread DPRINT buffer.
+ * @note One `DEVICE_PRINT` per row with both slices (about 80 bytes each). The legacy `DPRINT` buffer held 204 bytes per
+ *       thread and forced two calls; a `DEVICE_PRINT` message can carry 1023 bytes.
  * @note No range check: `row_end` above 32 reads past the tile.
- * @see  https://github.com/tenstorrent/tt-metal/blob/v0.81.0/tt_metal/hw/inc/api/debug/dprint_pages.h#L124
+ * @see  tt-metal: tt_metal/hw/inc/api/debug/dprint_pages.h, tech_reports/Debugging/DEVICE_PRINT_replaces_DPRINT.md
  */
 // clang-format on
 inline void print_tile_rows(uint32_t cb_id, uint32_t tile_id, uint8_t row_begin = 0, uint8_t row_end = 32) {
@@ -68,17 +73,17 @@ inline void print_tile_rows(uint32_t cb_id, uint32_t tile_id, uint8_t row_begin 
     constexpr uint8_t half_width = 16;
     for (uint8_t r = row_begin; r < row_end; ++r) {
         const uint8_t r_next = static_cast<uint8_t>(r + 1);
-        DPRINT(
-            "{}: {}",
+        // One message per row: the two 16-column slices (about 80 bytes each) fit one DEVICE_PRINT message, which can carry
+        // up to 1023 bytes of payload.
+        DEVICE_PRINT(
+            "{}: {} {}\n",
             r,
             TileSlice(
                 cb_id,
                 tile_id,
                 SliceRange{.h0 = r, .h1 = r_next, .hs = 1, .w0 = 0, .w1 = half_width, .ws = 1},
                 /*endl_rows=*/false,
-                /*print_untilized=*/true));
-        DPRINT(
-            " {}\n",
+                /*print_untilized=*/true),
             TileSlice(
                 cb_id,
                 tile_id,
@@ -103,10 +108,13 @@ inline void print_dest_row_32bit(uint8_t r, uint32_t left_row, DataFormat format
         left[i] = dest[left_row * face_width + i];
         right[i] = dest[right_row * face_width + i];
     }
-    DPRINT("{}: {} ", r, dp_typed_array_t<face_width>(static_cast<uint16_t>(format), left));
-    DPRINT("{}\n", dp_typed_array_t<face_width>(static_cast<uint16_t>(format), right));
+    DEVICE_PRINT(
+        "{}: {} {}\n",
+        r,
+        dp_typed_array_t<face_width>(static_cast<uint16_t>(format), left),
+        dp_typed_array_t<face_width>(static_cast<uint16_t>(format), right));
 #else
-    DPRINT("print_dest_tile_rows: 32-bit DST is only supported on Blackhole\n");
+    DEVICE_PRINT("print_dest_tile_rows: 32-bit DST is only supported on Blackhole\n");
 #endif
 }
 
@@ -118,8 +126,11 @@ inline void print_dest_row_16bit(uint8_t r, uint32_t left_row, DataFormat format
     uint32_t right[words_per_face_row + 1];
     dbg_read_dest_acc_row(get_dest_row_id(left_row, /*is_float32=*/false), left);
     dbg_read_dest_acc_row(get_dest_row_id(left_row + NUM_ROWS_PER_FACE, /*is_float32=*/false), right);
-    DPRINT("{}: {} ", r, dp_typed_array_t<words_per_face_row>(static_cast<uint16_t>(format), left));
-    DPRINT("{}\n", dp_typed_array_t<words_per_face_row>(static_cast<uint16_t>(format), right));
+    DEVICE_PRINT(
+        "{}: {} {}\n",
+        r,
+        dp_typed_array_t<words_per_face_row>(static_cast<uint16_t>(format), left),
+        dp_typed_array_t<words_per_face_row>(static_cast<uint16_t>(format), right));
 }
 
 }  // namespace detail
@@ -179,8 +190,8 @@ inline void print_dest_row_16bit(uint8_t r, uint32_t left_row, DataFormat format
  * @param row_end   One past the last logical row to print, in `(row_begin, 32]`. No range check: values
  *                  above 32 read the next DST tile.
  *
- * @note Compiles to an empty function unless DPRINT is enabled.
- * @see  https://github.com/tenstorrent/tt-metal/blob/v0.81.0/tt_metal/hw/inc/api/debug/dprint_tensix.h
+ * @note Compiles to an empty function unless device print is enabled.
+ * @see  tt-metal: tt_metal/hw/inc/api/debug/dprint_tensix.h, tech_reports/Debugging/DEVICE_PRINT_replaces_DPRINT.md
  */
 // clang-format on
 inline void print_dest_tile_rows(uint32_t dst_tile, DataFormat format, uint8_t row_begin = 0, uint8_t row_end = 32) {
@@ -194,7 +205,7 @@ inline void print_dest_tile_rows(uint32_t dst_tile, DataFormat format, uint8_t r
                                   format == DataFormat::UInt8;
         if (dest_32bit ? !format_32bit : !format_16bit) {
             // Reading DST at the wrong width prints plausible-looking garbage, so refuse instead.
-            DPRINT(
+            DEVICE_PRINT(
                 "print_dest_tile_rows: format {} does not match the {}-bit DST\n",
                 static_cast<uint32_t>(format),
                 dest_32bit ? 32 : 16);
@@ -203,7 +214,7 @@ inline void print_dest_tile_rows(uint32_t dst_tile, DataFormat format, uint8_t r
             // whole register, so start at the half math is using. Debug-bus reads (16-bit path) are already
             // relative to that half (checked on the device), so they need no offset.
             const uint32_t half_base = dest_32bit && ckernel::dest_offset_id != 0 ? BIT32_DEST_REGISTER_HALF_SIZE : 0;
-            DPRINT("DST tile {}\n", dst_tile);
+            DEVICE_PRINT("DST tile {}\n", dst_tile);
             for (uint8_t r = row_begin; r < row_end; ++r) {
                 // Register row of the left face (columns 0-15); the right face follows NUM_ROWS_PER_FACE later.
                 const uint32_t left_row = half_base + dst_tile * NUM_ROWS_PER_TILE +
@@ -220,7 +231,7 @@ inline void print_dest_tile_rows(uint32_t dst_tile, DataFormat format, uint8_t r
 }
 
 #else
-// No-op versions, used for non-compute kernels or when DPRINT is disabled.
+// No-op versions, used for non-compute kernels or when device print is disabled.
 
 inline void print_tile_rows(uint32_t, uint32_t, uint8_t = 0, uint8_t = 32) {}
 
