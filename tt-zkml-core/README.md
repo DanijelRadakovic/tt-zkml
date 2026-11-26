@@ -1,5 +1,8 @@
-# tt-zkml
-TT kernels for executing ZKML on Tenstorren hardware.
+# tt-zkml-core
+The C++ core of tt-zkml: the kernels for executing quantized networks on Tenstorrent hardware, the device operations and planner, and the
+public C++ API (`src/api/`: `zkml::Device`, `zkml::Model`, `zkml::Trace`, umbrella header `api/tt_zkml.hpp`). The C ABI for Rust and Python is the
+`abi/` project of the repository root. All commands in this file and in the benchmark READMEs run from this directory (`tt-zkml-core/`); see the
+README of the repository root for the whole layout.
 
 
 ## Setup

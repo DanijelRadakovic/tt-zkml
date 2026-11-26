@@ -1,39 +1,13 @@
 cmake_minimum_required(VERSION 3.22...4.2)
 
-# Require TT_METAL_HOME
-if(NOT DEFINED TT_METAL_HOME)
-    if(DEFINED ENV{TT_METAL_HOME})
-        set(TT_METAL_HOME $ENV{TT_METAL_HOME})
-    else()
-        message(FATAL_ERROR "TT_METAL_HOME must be set (environment or -DTT_METAL_HOME=...)")
-    endif()
-endif()
-message(STATUS "Using TT_METAL_HOME: ${TT_METAL_HOME}")
-
-# Verify tt-metal is built
-set(TT_METAL_BUILD_DIR "${TT_METAL_HOME}/build")
-if(NOT EXISTS "${TT_METAL_BUILD_DIR}")
-    message(FATAL_ERROR "tt-metal build directory not found: ${TT_METAL_BUILD_DIR}")
-endif()
-
-project(tt_zkml LANGUAGES C CXX)
+project(tt_zkml_core VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Dependencies (fmt, umd, spdlog, ...) are found through the build prefix
-list(PREPEND CMAKE_PREFIX_PATH "${TT_METAL_BUILD_DIR}")
-# Point straight at the installed config; build/tt-metalium-config.cmake is an incomplete intermediate copy
-set(TT-Metalium_DIR "${TT_METAL_BUILD_DIR}/lib/cmake/tt-metalium")
-set(TT-NN_DIR "${TT_METAL_BUILD_DIR}/lib/cmake/tt-nn")
-
-if(NOT TARGET TT::Metalium)
-    find_package(TT-Metalium 0.81 REQUIRED)
-endif()
-if(NOT TARGET TTNN::TTNN)
-    find_package(TT-NN 0.81 REQUIRED)
-endif()
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(TtMetal)  # TT_METAL_HOME, TT::Metalium, TTNN::TTNN, GTest
 
 # Editor setup: generate .clangd from .clangd.in with this machine's absolute paths. 
 # Kernels need -I<repo>/src, which clangd cannot take as a relative path (see .clangd.in).
@@ -62,38 +36,15 @@ add_library(
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
 
-add_executable(zkml_quant src/bin/quantization.cpp)
-target_link_libraries(zkml_quant PRIVATE TT::Metalium)
-
-add_executable(zkml_pot_quant_per_tensor src/bin/pot_quant_per_tensor.cpp)
-target_link_libraries(zkml_pot_quant_per_tensor PRIVATE zkml_ops)
-target_compile_definitions(zkml_pot_quant_per_tensor PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
-
-# NoC / DRAM microbenchmark (latency per bank and per core distance, bandwidth); see benchmarks/noc_bench/
-add_executable(zkml_noc_bench benchmarks/noc_bench/noc_bench.cpp)
-target_include_directories(zkml_noc_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(zkml_noc_bench PRIVATE TT::Metalium)
-target_compile_definitions(zkml_noc_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+# The public C++ API (src/api): zkml::Device, zkml::Model, zkml::Trace on top of the operations. The C ABI of the repository's abi/ project wraps it.
+add_library(zkml_api STATIC src/api/model.cpp)
+add_library(tt_zkml::core ALIAS zkml_api)
+target_link_libraries(zkml_api PUBLIC zkml_ops)
+target_compile_definitions(zkml_api PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
 # Tests (GoogleTest; every one needs a Tenstorrent device).
 # tt-metal builds GoogleTest but installs no CMake config for it, so use its build products directly.
 enable_testing()
-find_package(GTest QUIET)
-if(NOT TARGET GTest::gtest_main)
-    file(GLOB ZKML_GTEST_INCLUDE_DIRS "${TT_METAL_HOME}/.cpmcache/gtest/*/googletest/include")
-    find_package(Threads REQUIRED)
-    foreach(lib gtest gtest_main)
-        add_library(GTest::${lib} STATIC IMPORTED)
-        set_target_properties(
-            GTest::${lib}
-            PROPERTIES
-                IMPORTED_LOCATION "${TT_METAL_BUILD_DIR}/lib/lib${lib}.a"
-                INTERFACE_INCLUDE_DIRECTORIES "${ZKML_GTEST_INCLUDE_DIRS}"
-        )
-    endforeach()
-    target_link_libraries(GTest::gtest INTERFACE Threads::Threads)
-    target_link_libraries(GTest::gtest_main INTERFACE GTest::gtest)
-endif()
 
 # zkml_add_test(<name> <source> <libs...>): one gtest binary, run as a single ctest test. Run the binary
 # directly with --gtest_filter to pick cases. Not gtest_discover_tests, which would run it at build time.
@@ -111,6 +62,7 @@ zkml_add_test(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization
 # check_if_cbs_can_fit_in_l1 on its own; deliberately not part of the op tests
 zkml_add_test(test_pot_quant_m31 tests/cpp/operations/pot_quantization/test_pot_quant_m31.cpp zkml_ops)
 zkml_add_test(test_execute_layer tests/cpp/operations/layer_execution/test_execute_layer.cpp zkml_ops)
+zkml_add_test(test_model_api tests/cpp/api/test_model_api.cpp zkml_api)
 zkml_add_test(test_execute_network tests/cpp/operations/network_execution/test_execute_network.cpp zkml_ops)
 zkml_add_test(test_sequential tests/cpp/nn/test_sequential.cpp zkml_ops)
 zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
