@@ -44,6 +44,11 @@ uint32_t qmode() {
     return e ? static_cast<uint32_t>(std::atoi(e)) : 0;
 }
 
+uint32_t qlm() {
+    const char* e = std::getenv("ZKML_QLM");  // 1: pass 2 of the x / W quantization with SFPLOADMACRO
+    return e ? static_cast<uint32_t>(std::atoi(e)) : 0;
+}
+
 struct Dims {
     uint32_t Mt, Kt, Nt;
     bool relu;
@@ -132,7 +137,7 @@ dist::MeshWorkload build(dist::MeshDevice& dev, const Buffers& b, const Dims& s,
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = mode,
             .math_approx_mode = false,
-            .compile_args = {s.Mt, s.Kt, s.Nt, out_cb_pages, s.relu ? 1u : 0u, variant, qmode()},
+            .compile_args = {s.Mt, s.Kt, s.Nt, out_cb_pages, s.relu ? 1u : 0u, variant, qmode(), qlm()},
             .compiler_include_paths = {
                 zkml::common::kernel_include_dir(), zkml::common::kernel_path(__FILE__, "kernels")}});
     SetRuntimeArgs(

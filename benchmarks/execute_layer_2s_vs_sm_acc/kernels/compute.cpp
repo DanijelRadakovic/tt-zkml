@@ -63,6 +63,7 @@
 constexpr uint32_t VARIANT = get_compile_time_arg_val(5);
 constexpr uint32_t QMODE =
     get_compile_time_arg_val(6);  // experiments on the quantization: 1 no SFPU in pass 1, 2 no SFPU in pass 2
+constexpr uint32_t QUANT_LM = get_compile_time_arg_val(7);  // 1: x / W pass 2 with SFPLOADMACRO (quant_sm8_lm), 0: pipelined TTI (quant_sm8)
 
 constexpr uint32_t DST_TILES = 4;  // fp32 DST, half sync
 constexpr uint32_t dst_scale = DST_TILES - 1;
@@ -127,6 +128,8 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
         MATH(zkml::sfpu::sfpi_requant_init());  // SFPU init only (absmax_init would zero LReg7)
     } else if constexpr (acc_in) {
         MATH((zkml::sfpu::quant_small_init<true, true>()));  // variants 0, 1: float requantizer, UInt8 packer
+    } else if constexpr (QUANT_LM == 1) {
+        MATH((zkml::sfpu::quant_sm8_lm_init()));
     } else {
         MATH((zkml::sfpu::quant_sm8_init()));
     }
@@ -142,7 +145,9 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
             copy_tile(cb_in, blocks.done() + i, i);
         }
         for (uint32_t i = 0; i < n; i++) {
-            if constexpr (acc_in && (VARIANT == 2 || VARIANT == 4)) {
+            if constexpr (acc_in && QMODE == 4) {
+                // experiment: no requantization SFPU work at all (copy + pack only)
+            } else if constexpr (acc_in && (VARIANT == 2 || VARIANT == 4)) {
                 MATH((zkml::sfpu::requant_tile<relu>(i)));
             } else if constexpr (acc_in && VARIANT == 3) {
                 MATH((zkml::sfpu::requant_sm_tile<relu>(i)));
@@ -155,7 +160,11 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
                 if constexpr (acc_in) {
                     MATH((zkml::sfpu::quant_small_tile<true, true>(i)));
                 } else if constexpr (QMODE != 2) {
-                    MATH((zkml::sfpu::quant_sm8_tile(i)));
+                    if constexpr (QUANT_LM == 1) {
+                        MATH((zkml::sfpu::quant_sm8_lm_tile(i)));
+                    } else {
+                        MATH((zkml::sfpu::quant_sm8_tile(i)));
+                    }
                 }
             }
         }

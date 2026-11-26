@@ -87,3 +87,70 @@ Where the rest goes (x, 32 tiles, `ZKML_QMODE` experiments in `kernels/compute.c
 (184 per tile) and the SFPU alone 4.8k; pass 2 is 11.0k of which copy + pack is 5.1k. copy_tile of an fp32 tile and the SFPU instructions
 run on the same math thread and add up, so the SFPU work is what is left to cut. Tried and not possible on Blackhole: SFPCAST from fp32 to
 sign-magnitude with rounding (`FP32_TO_SM32_RNE` exists only on Quasar), which would save the magic-number add.
+
+## SFPLOADMACRO for pass 2 of the quantization (`run_quant_lm.sh`, `results/quant_lm.txt`)
+
+`ZKML_QLM=0` is the pipelined hand-written kernel (`quant_sm8`, 5 instructions per 4 rows x 8 lanes), `ZKML_QLM=1` the SFPLOADMACRO
+kernel (`quant_sm8_lm`). All accumulator variants still agree (`check`); the op tests compare the LM kernel with the host model.
+
+`SFPLOADMACRO` loads a row and schedules up to four more instructions, one per SFPU sub-unit (Simple, MAD, Round, Store), for later
+cycles. Here one macro per row schedules the SFPMAD (x * 2^k + magic, MAD unit), the SFPIADD (minus the magic bits, Simple unit) and the
+SFPSTORE (Store unit); the SFPCAST to sign-magnitude is the one instruction issued normally, in the slot between two macros. That is 2 issue
+slots per row instead of 5, and the loop runs at about 2 cycles per row (the Simple unit does 2 instructions per row).
+
+| Mt,Kt,Nt (ReLU, `sm_int`) | QX_P2 (cycles) TTI -> LM | QUANT_X | QUANT_W | call (wall) |
+|---|---|---|---|---|
+| 2,4,2 | 2855 -> 2178 | 6262 -> 5178 | 5160 -> 4082 | 12.8 -> 11.4 us |
+| 4,8,4 | 10953 -> 7085 (-35%) | 21285 -> 17076 (-20%) | 19448 -> 15225 (-22%) | 46.1 -> 39.5 us (-14%) |
+| 4,16,4 | 21697 -> 13600 | 40407 -> 31917 | 38446 -> 30034 | 80.3 -> 68.3 us |
+| 2,32,2 | 21705 -> 13597 | 40322 -> 31820 | 38474 -> 30032 | 68.3 -> 56.3 us |
+
+What the LM kernel needs (tt-isa-documentation, `SFPLOADMACRO.md`): the macro config (`SFPCONFIG`: the sequence bytes, two instruction
+templates captured by issuing an instruction with VD = 12 + i, the delay kind), 4 row registers (an SFPSWAP-like write-back or a late store
+must not meet the next load), no regular SFPU instruction on a sub-unit on a cycle where a scheduled one arrives (the regular one is
+silently dropped), SFPNOPs before the first macro (SFPLOADMACRO does not stall for an FPU write to Dst, as with the bf16 copy_tile) and
+after the last (scheduled instructions only advance when instructions are issued).
+
+### What did not work: SFPLOADMACRO for pass 1 (the absmax)
+
+The macro form (load + scheduled SFPABS, the SFPSWAP issued normally) gave wrong results: SFPSWAP keeps the Simple sub-unit busy for 2
+cycles, and the scheduled SFPABS that lands on the cycle after a swap is lost (all negative values were missed). The swaps are also the
+cost: a software-pipelined pair kernel (3 swaps per 2 rows, the loads of the next pair in the gaps, 6 issue slots per pair) measured
+148 cycles per tile for the SFPU part, the same as the earlier version, i.e. about 3.1 cycles per SFPSWAP, so pass 1 is bound by the
+swaps and not by the issue slots. The shipped absmax is the pipelined pair kernel (whole tile in one call).
+
+### bf16 input now uses the same kernel
+
+For bf16 input the q buffers are UInt8 buffers (the JIT does not allow an Int8 one next to a bf16 one). The packer is now configured for
+Int8 by hand (`pack_reconfig_int8_view`, like the unpacker's Int8 view for the matmul), so the bf16 path uses the same LM kernel and
+Int8 packer as fp32 instead of the 8-instruction UInt8 kernel. `benchmarks/execute_layer` with `ZKML_DTYPE=bf16`, 4,8,4 ReLU:
+QUANT_X 17032 -> 9982 cycles, call 40.4 -> 29.8 us (fp32 39.8 us).
+
+## SFPLOADMACRO for the requantize sweep: analysis, not implemented
+
+The requantize sweep is the other SFPU-bound stage (REQUANT zone, 16 tiles at 4,8,4). I measured how much of it is the sweep
+(`results/requant_sfpu_cost.txt`, `ZKML_QMODE=4` removes the sweep and keeps copy_tile + pack): 5037 of the 8403 cycles with ReLU
+(315 per tile, 9.8 cycles per 4 rows x 8 lanes for 11 instructions) and 5905 of 9441 without (11.5 cycles for 13 instructions). That
+is about one cycle per instruction: issue-bound, as quantize pass 2 was. But SFPLOADMACRO cannot reach the same kind of gain here:
+
+- **The work is almost all on the Simple sub-unit.** Per row the integer algorithm needs 8 (ReLU) or 10 (no activation) Simple
+  instructions (shifts, AND, IADDs, SETCC/ENCC, ...). The Simple unit does one instruction per cycle, so that is the floor, whatever
+  the issue slots: 8 against 9.8 cycles with ReLU, 10 against 11.5 without. A macro can only take the load, the store and at most
+  ONE Simple instruction off the issue stream (one instruction per sub-unit column). The MAD column (float multiply-add) and the Round
+  column (SFPSTOCHRND, SFPSHFT2) have nothing to do in an exact integer shift-and-round.
+- **The chain is longer than a macro can schedule.** The delay of a scheduled instruction is 3 bits, so it executes at most 8 cycles
+  after the macro. A row's chain is 9 to 11 Simple instructions long, so its scheduled store (and any scheduled last instruction)
+  would have to run before the data is final.
+- **The CC instructions do not mix with overlapping rows.** The ReLU is done with SFPSETCC / conditional load / SFPENCC (lane flags
+  are global state), and the "no negative zero" gate uses them too; with several rows in flight at once the flags of one row would
+  disable lanes of another row's scheduled instructions. An arithmetic version (mask = arithmetic shift, XOR, add) needs the same
+  number of instructions.
+- **SFPSTOCHRND (Round column) as the final shift-and-round** does shift right with rounding, but rounds ties away from zero, and the
+  correction for ties to even needs `mag - 1 + bit` as an input (a borrow at mag = 0 turns the SM value into a huge magnitude);
+  its round-to-zero mode is wrong when 23 bits are discarded and all of them are ones (documented hardware bug), which happens for
+  an accumulator with 30 magnitude bits. Neither is exact.
+
+Upper bound of what a perfect schedule could win: about 1.5 cycles per row, 50 per tile, 0.8k cycles of the 8.4k of the zone, 1.5% of a
+call. That is not worth the risk of a kernel that is hard to get right, so the requantizer stays the hand-written 11 / 13 instruction
+kernel (`requant_tile`). A real gain would need fewer Simple instructions, i.e. a different algorithm (for example finding a
+one-instruction exact "round half to even shift"), not a different way of issuing them.

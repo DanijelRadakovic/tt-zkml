@@ -48,30 +48,45 @@ sfpi_inline sfpi::vFloat max_nonneg(sfpi::vFloat a, sfpi::vFloat b) {
 
 inline void absmax_reset() {
     sfpi::l_reg[SCALE_LREG] = sfpi::vFloat(0.0f);
-    sfpi::l_reg[sfpi::LRegs::LReg6] = sfpi::vFloat(0.0f);  // the running min of absmax_accumulate_face
+    sfpi::l_reg[sfpi::LRegs::LReg6] = sfpi::vFloat(0.0f);  // the running min of absmax_tile_body
 }
 
-// One 16x16 face: 8 SFPU rows of 32 lanes. Hand-written instructions, 2.5 per 4 rows x 8 lanes: SFPSWAP with mod1 = 9
-// puts the max in VD and the min in VC (mod1 = 1 the other way round), independent of the VDGetsMin state of other SFPU
-// kernels (but not of the lane config EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX, which must stay clear:
-// tt-isa-documentation SFPSWAP.md), and compares sign-magnitude. Two rows a, b are ordered with one swap, the larger
-// goes against the running max (SCALE_LREG), the smaller against the running min (LREG6, <= 0): |x| <= max(running max,
-// -running min) needs no SFPABS. The final max of the two is taken in absmax_reduce_to_scaler. The tile must be fp32 in
-// DST.
-template <int ITERATIONS = 8>
-inline void absmax_accumulate_face() {
-    static_assert(ITERATIONS % 2 == 0, "rows are handled in pairs");
-#pragma GCC unroll 4
-    for (int d = 0; d < ITERATIONS; d += 2) {
-        TTI_SFPLOAD(ckernel::p_sfpu::LREG0, ckernel::InstrModLoadStore::FP32, ckernel::ADDR_MOD_7, 2 * d);
-        TTI_SFPLOAD(ckernel::p_sfpu::LREG1, ckernel::InstrModLoadStore::FP32, ckernel::ADDR_MOD_7, 2 * d + 2);
-        TTI_SFPSWAP(
-            0, ckernel::p_sfpu::LREG0, ckernel::p_sfpu::LREG1, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // L1 = max, L0 = min
-        TTI_SFPSWAP(
-            0, ckernel::p_sfpu::LREG1, ckernel::p_sfpu::LREG7, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // L7 = max(L7, L1)
-        TTI_SFPSWAP(
-            0, ckernel::p_sfpu::LREG0, ckernel::p_sfpu::LREG6, sfpi::SFPSWAP_MOD1_VEC_MIN_MAX);  // L6 = min(L6, L0)
+// The absmax of one tile, hand-written and software pipelined (SFPLOADMACRO does not help here: SFPSWAP keeps the Simple sub-unit
+// busy for 2 cycles, and a scheduled instruction landing on the cycle after it is lost). Rows (4 rows x 8 lanes each, 32 per tile) are
+// handled in pairs: SFPSWAP with mod1 = 9 puts the max in VD and the min in VC (mod1 = 1 the other way round; the lane config
+// EXCHANGE_SRCB_SRCC and ENABLE_DEST_INDEX must stay clear, see tt-isa-documentation SFPSWAP.md), and compares sign-magnitude. A swap
+// orders the pair, the larger goes against the running max (SCALE_LREG), the smaller against the running min (LREG6, <= 0): |x| <=
+// max(running max, -running min) needs no SFPABS. The final max of the two is taken in absmax_reduce_to_scaler. Per pair 3 swaps = 6
+// Simple-unit cycles, and the loads of the next pair (into the other register pair) are issued in the gaps: 6 issue slots per 2 rows.
+// The tile must be fp32 in DST; no other SFPU code may be issued while it runs.
+inline void absmax_tile_body() {
+    // an FPU write to Dst (the bf16 copy_tile) needs 3 unrelated instructions before a load reads it; the wrapper's STALLWAIT holds
+    // back SFPU instructions only, so these are SFPNOPs issued after the stall is released
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    using namespace ckernel;
+    TT_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::FP32, ADDR_MOD_7, 0);
+    TT_SFPLOAD(p_sfpu::LREG1, InstrModLoadStore::FP32, ADDR_MOD_7, 2);
+#pragma GCC unroll 16
+    for (int g = 0; g < 16; g++) {
+        const int P = p_sfpu::LREG0 + 2 * (g & 1), Q = P + 1;
+        const int P2 = p_sfpu::LREG0 + 2 * ((g + 1) & 1), Q2 = P2 + 1;
+        TT_SFPSWAP(0, P, Q, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // Q = max, P = min of the pair
+        if (g < 15) {
+            TT_SFPLOAD(P2, InstrModLoadStore::FP32, ADDR_MOD_7, 4 * (g + 1));
+        } else {
+            TTI_SFPNOP;
+        }
+        TT_SFPSWAP(0, Q, p_sfpu::LREG7, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);  // running max
+        if (g < 15) {
+            TT_SFPLOAD(Q2, InstrModLoadStore::FP32, ADDR_MOD_7, 4 * (g + 1) + 2);
+        } else {
+            TTI_SFPNOP;
+        }
+        TT_SFPSWAP(0, P, p_sfpu::LREG6, sfpi::SFPSWAP_MOD1_VEC_MIN_MAX);  // running min
     }
+    TTI_SFPNOP;
 }
 
 // Reduce the 32 lanes of SCALE_LREG to the tensor absmax, then replace it with the scaler 2^k:
@@ -146,7 +161,7 @@ inline void absmax_init() {
 
 // Folds |tile| of DST tile idst into the running absmax. The tile must be fp32 in DST.
 inline void absmax_tile(uint32_t idst) {
-    _llk_math_eltwise_unary_sfpu_params_(absmax_accumulate_face<8>, idst, VectorMode::RC);
+    _llk_math_eltwise_unary_sfpu_params_(absmax_tile_body, idst, VectorMode::None);
 }
 
 // Turns the running absmax into the scaler 2^k (see absmax_reduce_to_scaler) and writes it into

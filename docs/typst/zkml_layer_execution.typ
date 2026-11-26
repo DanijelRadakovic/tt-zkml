@@ -326,7 +326,7 @@ The diagram follows one layer from the float inputs to the next layer's input, w
 
 #table(columns: (auto, 1fr), inset: 4pt, stroke: 0.4pt + luma(170), align: (left, left),
   [*stage*], [*what the compute kernel does*],
-  [quantize `x`, `W` (the same code twice)], [Pass 1: `copy_tile` into DST, absmax of every tile with one SFPSWAP per row pair against a running max and min (the 32 lanes are reduced at the end); the scaler $2^k$ stays in an SFPU register (LReg7) and is packed to its output tensor. Pass 2: multiply by $2^k$, add the magic number $1.5 dot 2^23$ (this rounds half to even in the fp32 adder), subtract its bits, one `SFPCAST` to sign-magnitude, and the *Int8 packer* writes sign + 7 magnitude bits into an Int8 circular buffer. That is exactly the format of the FPU's int8 type, so no conversion is needed.],
+  [quantize `x`, `W` (the same code twice)], [Pass 1: `copy_tile` into DST, absmax of every tile with one SFPSWAP per row pair against a running max and min (the 32 lanes are reduced at the end); the scaler $2^k$ stays in an SFPU register (LReg7) and is packed to its output tensor. Pass 2: multiply by $2^k$, add the magic number $1.5 dot 2^23$ (this rounds half to even in the fp32 adder), subtract its bits, one `SFPCAST` to sign-magnitude, and the *Int8 packer* writes sign + 7 magnitude bits into an Int8 circular buffer. That is exactly the format of the FPU's int8 type, so no conversion is needed. The pass uses `SFPLOADMACRO`: one macro per 4 rows $times$ 8 lanes loads the row and schedules the multiply-add, the subtract and the store on three different sub-units of the SFPU, and only the cast is issued normally, so a row takes 2 issue slots instead of 5.],
   [matmul], [The FPU multiplies the two Int8 buffers at HiFi4 into an int32 accumulator in DST, exact. Output blocks of 4 tiles: the K loop, then one short SFPU sweep, then the packer drains the block while the FPU starts the next one.],
   [activation + absmax], [The sweep after each block folds the integer absmax of the activated accumulator into LReg7 (one SFPSWAP per row; with ReLU a negative entry never beats the running max, so there is no masking). The tile itself is not modified.],
   [`acc`], [The packer writes the block as Int32 into the resident accumulator buffer, which the writer returns as `acc`: the raw sign-magnitude bits, no conversion (the FPU's native format).],
@@ -352,25 +352,25 @@ One core, device profiler cycles at 1.35 GHz, $x$ of $128 times 256$, $W$ of $25
 
 #align(center)[#text(size: 8.5pt)[#table(columns: 4, inset: 4pt, stroke: 0.4pt + luma(170), align: (left, right, right, right),
   [*zone*], [*first version*], [*now*], [*change*],
-  [quantize `x` (32 tiles)], [26577], [21211], [−20%],
-  [quantize `W` (32 tiles)], [24954], [19326], [−23%],
+  [quantize `x` (32 tiles)], [26577], [16798], [−37%],
+  [quantize `W` (32 tiles)], [24954], [15198], [−39%],
   [matmul + activation sweep], [19331], [10755], [−44%],
   [requantize], [12406], [8380], [−32%],
-  [*sum*], [*83268*], [*59672*], [*−28%*],
-  [host time per call (cached program)], [62.5 µs], [45.6 µs], [−27%]
+  [*sum*], [*83268*], [*51163*], [*−39%*],
+  [host time per call (cached program)], [62.5 µs], [39.8 µs], [−36%]
 )]]
 
-The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up. The activation sweep does not overlap with the matmul of the next block.
+The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up, and pass 1 (the absmax) is bound by `SFPSWAP` (about 3 cycles each, 48 per tile), which `SFPLOADMACRO` cannot speed up: a swap keeps the SFPU's simple sub-unit busy for 2 cycles and a scheduled instruction that lands on the cycle after it is lost. The activation sweep does not overlap with the matmul of the next block.
 
 == Input types: fp32 and bf16
 
-`x` and `W` may be fp32 or bf16 (both the same; fp16 is not supported). The JIT refuses to build a program with an Int8 circular buffer and a bf16 one (different exponent families), so for bf16 the quantized bytes go to UInt8 buffers (exempt from that check) written by the UInt8 packer, which needs 3 more SFPU instructions per row than the single `SFPCAST` of the Int8 packer (8 instead of 5 per 4 rows $times$ 8 lanes). The unpacker reads a UInt8 buffer as unsigned bytes, so before the matmul the two source registers are configured for the Int8 format by hand (the registers `reconfig_data_format` writes for an Int8 buffer, which also enables the INT8 math); after that the FPU reads the sign-magnitude bytes as usual. bf16 tiles are half the size, so the unpack of a tile is cheaper and the call is faster in spite of the longer kernel:
+`x` and `W` may be fp32 or bf16 (both the same; fp16 is not supported). The JIT refuses to build a program with an Int8 circular buffer and a bf16 one (different exponent families), so for bf16 the quantized bytes go to UInt8 buffers (exempt from that check). Two things are then configured by hand, because the generic configuration of a UInt8 buffer is "plain unsigned bytes": the packer is set to the Int8 format before the quantizer (so it writes sign + 7 magnitude bits of the sign-magnitude int32 the SFPU produced, the same as for fp32, with the same SFPU kernel), and the two FPU source registers are set to the Int8 format before the matmul (the unpacker reads a UInt8 buffer as unsigned bytes otherwise; the registers are the ones `reconfig_data_format` writes for an Int8 buffer, which also enables the INT8 math). bf16 tiles are half the size, so the unpack of a tile is cheaper and a bf16 call is clearly faster than an fp32 one:
 
 #align(center)[#text(size: 8.5pt)[#table(columns: 4, inset: 4pt, stroke: 0.4pt + luma(170), align: (left, right, right, right),
   [*Mt,Kt,Nt (ReLU)*], [*fp32 sum of zones*], [*bf16 sum of zones*], [*host time per call fp32 / bf16*],
-  [4, 8, 4], [59438], [52014], [46.5 / 40.4 µs],
-  [4, 16, 4], [105834], [91308], [80.5 / 69.6 µs],
-  [2, 32, 2], [89840], [75422], [69.3 / 57.8 µs]
+  [4, 8, 4], [51163], [37908], [39.8 / 29.8 µs],
+  [4, 16, 4], [89464], [63265], [68.4 / 48.6 µs],
+  [2, 32, 2], [73424], [47150], [56.4 / 37.3 µs]
 )]]
 
 The outputs are identical in format for both input types (`out`, `acc`, the scalers are fp32 and the same). The tests compare both against the same host model, with the inputs rounded to bf16 for the bf16 cases.

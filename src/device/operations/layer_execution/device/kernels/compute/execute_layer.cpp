@@ -25,7 +25,9 @@
  *
  * - Quantize (twice, the same code): pass 1 finds the absmax and the scaler `2^k` of the tensor, kept in LReg7 and packed to
  *   its scaler CB; pass 2 multiplies by it from LReg7, rounds half to even and packs the sign-magnitude byte
- *   (`quant_sm8_tile`: SFPCAST to sign-magnitude) through the Int8 packer, which writes sign + 7 magnitude bits: the FPU's Int8 format.
+ *   (`quant_sm8_lm_tile`: SFPLOADMACRO schedules the multiply-add, the subtract and the store, the SFPCAST to sign-magnitude is issued
+ *   between two macros) through the Int8 packer, which writes sign + 7 magnitude bits: the FPU's Int8 format. For bf16 input the
+ *   buffers are UInt8 and the packer is configured for Int8 by hand (`pack_reconfig_int8_view`).
  * - Matmul: `q_x` and `q_w` are Int8 CBs. Reconfigured to Int8, the FPU multiplies at HiFi4 into an int32 accumulator in DST, exact.
  *   Output blocks of up to `DST_TILES` tiles: the K loop, then an SFPU sweep (layer_sfpu.hpp) that folds the integer absmax of the
  *   activated accumulator into LReg7 (the tile is untouched), then the block is packed as Int32 to `c_6`: the raw sign-magnitude bits.
@@ -95,6 +97,19 @@ ALWI void scale_pass(uint32_t tiles) {
     scaler.push_back(1);
 }
 
+// bf16 input: the quantized bytes are written to UInt8 circular buffers (an Int8 one cannot share a program with the bf16 input
+// buffer). The packer writes a UInt8 buffer as plain bytes and saturates outside [0, 255], but the quantizer produces sign-magnitude
+// int32, which the Int8 packer turns into sign + 7 magnitude bits (the FPU's Int8 format). So the packer is configured for Int8 by
+// hand, with the geometry of the buffer: the registers `pack_reconfig_data_format` writes for an Int8 buffer.
+ALWI void pack_reconfig_int8_view(uint32_t cb_out) {
+    constexpr uint32_t i8 = static_cast<uint32_t>(DataFormat::Int8);
+    PACK(({
+        const uint32_t id = get_output_id(cb_out);
+        _llk_pack_reconfig_data_format_<DST_ACCUM_MODE>(
+            i8, i8, get_local_cb_interface(id).fifo_page_size, get_output_tile_c_dim(id), get_output_num_faces(id), false);
+    }));
+}
+
 // Pass 2: quantize the `tiles` resident tiles of `cb_in` with the scaler in LReg7 into sign-magnitude bytes in
 // `cb_out`, a ring of `out_pages` pages (the whole tensor for q_x and q_w). With `acc_in` the tiles are the raw
 // sign-magnitude int32 accumulator and the integer requantizer runs instead (k in LReg7, max(0, .) when `relu`).
@@ -105,13 +120,14 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     reconfig_data_format_srca(cb_in);
     if constexpr (acc_in) {
         MATH((zkml::sfpu::requant_init<relu>()));
-    } else if constexpr (fp32_in) {
-        MATH((zkml::sfpu::quant_sm8_init()));
     } else {
-        MATH((zkml::sfpu::quant_smu8_init()));
+        MATH((zkml::sfpu::quant_sm8_lm_init()));  // fp32 and bf16: the Int8 packer writes both (bf16 through pack_reconfig_int8_view)
     }
     copy_init(cb_in);
     pack_reconfig_data_format(cb_out);
+    if constexpr (!acc_in && !fp32_in) {
+        pack_reconfig_int8_view(cb_out);
+    }
     zkml::common::RingCursor in_ring(tiles), out_ring(out_pages);
     zkml::common::DstBlockMediator blocks(DST_TILES, tiles, in_ring, out_ring);
     while (const uint32_t n = blocks.next()) {
@@ -124,10 +140,8 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
         for (uint32_t i = 0; i < n; i++) {
             if constexpr (acc_in) {
                 MATH((zkml::sfpu::requant_tile<relu>(i)));
-            } else if constexpr (fp32_in) {
-                MATH((zkml::sfpu::quant_sm8_tile(i)));
             } else {
-                MATH((zkml::sfpu::quant_smu8_tile(i)));
+                MATH((zkml::sfpu::quant_sm8_lm_tile(i)));
             }
         }
         tile_regs_commit();

@@ -155,52 +155,72 @@ inline void quant_sm8_face(const uint dst_index_in0, const uint dst_index_in1, c
 #undef ZKML_QSM8_FINISH
 }
 
-// Sign-magnitude int8 for the UInt8 packer (which writes the low byte of the int32, saturating outside [0, 255]): the
-// same n, then the byte |n| | ((n >>> 24) & 0x80), 8 instructions per 4 rows x 8 lanes (software pipelined like
-// quant_sm8). The UInt8 format is exempt from the JIT's exponent-family check, so this is the one to use with a bf16
-// input buffer; the FPU reads a UInt8 buffer as Int8 (the LLK maps UInt8 to the unpacker's INT8 format, and INT8 math
-// is enabled for it).
-inline void quant_smu8_constants() {
-    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, RNE_MAGIC_BITS);
-    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG2, 0u - RNE_MAGIC_BITS);
-    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG3, INT8_BYTE_SIGN);
+// quant_sm8 with SFPLOADMACRO: one macro per 4 rows x 8 lanes schedules the SFPMAD (m = x * 2^k + magic, MAD sub-unit), the SFPIADD (n =
+// bits(m) - bits(magic), Simple sub-unit) and the SFPSTORE (Store sub-unit) after its load, and the one remaining instruction, the
+// SFPCAST to sign-magnitude, is issued normally in the slot between two macros: 2 issue slots per 4 rows x 8 lanes instead of 5.
+// Timeline of row r (slot = the instruction issued at that cycle; the macro is issued in slot 2r, row r uses LREG(r & 3)):
+//   2r     SFPLOADMACRO  load x
+//   2r+1   [MAD]         a = x * 2^k + magic          (result at 2r+3)
+//   2r+4   [Simple]      a = a + (-magic)             (the 2r+3 slot is taken by the SFPCAST of the previous row)
+//   2r+5   SFPCAST       a = sign-magnitude(a)        (issued normally)
+//   2r+6   [Store]       Dst = a
+// The macro config (SFPCONFIG: the sequence, two instruction templates, the delay kind) is written by quant_sm8_lm_init(). The macros
+// hold the sub-unit slots, so no other SFPU code may be issued between the first and last row of a tile. Needs LREG4 = magic,
+// LREG5 = -magic, LREG7 = 2^k; LREG0 to LREG3 carry the rows. See tt-isa-documentation, SFPLOADMACRO.md.
+inline void quant_sm8_lm_init() {
+    ckernel::llk_math_eltwise_unary_sfpu_init<SfpuType::unused, DST_ACCUM_MODE>();
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG4, RNE_MAGIC_BITS);
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, 0u - RNE_MAGIC_BITS);
+    // InstructionTemplate[0]: LReg[VD] = LReg[VC] + LReg[VB] with VC = -magic; the macro fills in VB and VD with the row register.
+    TTI_SFPIADD(0, p_sfpu::LREG5, 12, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
+    // InstructionTemplate[1]: VD = VA * VB + VC with VA = 2^k, VC = magic; the macro fills in VB and VD.
+    TTI_SFPMAD(SCALE_LREG_ID, p_sfpu::LREG0, p_sfpu::LREG4, 13, 0);
+    // Macro 0. Sub-unit byte: 0x80 = the row register is VB, bits 5:3 = delay, bits 2:0 = 4 + template (3 = store).
+    constexpr uint simple_bits = 0x80 | (3 << 3) | 4;  // template 0, executes in slot 2r + 4
+    constexpr uint mad_bits = 0x80 | (0 << 3) | 5;     // template 1, executes in slot 2r + 1
+    constexpr uint round_bits = 0;
+    constexpr uint store_bits = (5 << 3) | 3;  // executes in slot 2r + 6
+    TTI_SFPLOADI(0, sfpi::SFPLOADI_MOD0_LOWER, (mad_bits << 8) | simple_bits);
+    TTI_SFPLOADI(0, sfpi::SFPLOADI_MOD0_UPPER, (store_bits << 8) | round_bits);
+    TTI_SFPCONFIG(0, 4 + 0, 0);
+    TTI_SFPNOP;
+    // Misc: StoreMod0 = INT32 (raw), delays count issued instructions on all four sub-units.
+    TTI_SFPCONFIG(0xF00 | static_cast<uint>(InstrModLoadStore::INT32), 8, 1);
+    TTI_SFPNOP;
 }
 
-template <int ITERATIONS = 8>
-inline void quant_smu8_face(const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
-    static_assert(ITERATIONS == 8, "unrolled by hand in pairs");
-    constexpr std::uint32_t dst_tile_size = 64;
-    const std::uint32_t in_off = dst_index_in0 * dst_tile_size;
-    const std::uint32_t out_off = dst_index_out * dst_tile_size;
-    (void)dst_index_in1;
-#define ZKML_QSMU8_LOAD(R, d)                                             \
-    TT_SFPLOAD(R, InstrModLoadStore::FP32, ADDR_MOD_7, in_off + 2 * (d)); \
-    TTI_SFPMAD(R, SCALE_LREG_ID, p_sfpu::LREG5, R, 0)
-#define ZKML_QSMU8_FINISH(Q, d)                                                                     \
-    TTI_SFPIADD(0, p_sfpu::LREG2, Q, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE); \
-    TTI_SFPCAST(Q, p_sfpu::LREG4, sfpi::SFPCAST_MOD1_INT32_ABS);                                    \
-    TTI_SFPSHFT((-24) & 0xfff, Q, Q, 1);                                                            \
-    TTI_SFPAND(0, p_sfpu::LREG3, Q, 0);                                                             \
-    TTI_SFPOR(0, p_sfpu::LREG4, Q, 0);                                                              \
-    TT_SFPSTORE(Q, InstrModLoadStore::INT32_2S_COMP, ADDR_MOD_7, out_off + 2 * (d))
-    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 0);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 1);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 0);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 2);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 1);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 3);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 2);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 4);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 3);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 5);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 4);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 6);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 5);
-    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 7);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 6);
-    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 7);
-#undef ZKML_QSMU8_LOAD
-#undef ZKML_QSMU8_FINISH
+inline void quant_sm8_lm_body() {
+    // SFPLOADMACRO does not stall for an FPU write to Dst: at least 3 unrelated instructions in between; the
+    // wrapper's STALLWAIT holds back SFPU instructions only (not Tensix NOPs), so these are SFPNOPs, issued after the stall is released
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+#define ZKML_LM_ROW(d) TT_SFPLOADMACRO((0 << 2) | ((d) & 3), InstrModLoadStore::FP32, ADDR_MOD_7, 2 * (d))
+#define ZKML_LM_CAST(d) TT_SFPCAST(p_sfpu::LREG0 + ((d) & 3), p_sfpu::LREG0 + ((d) & 3), sfpi::SFPCAST_MOD1_INT32_TO_SM32)
+    ZKML_LM_ROW(0);
+    TTI_SFPNOP;
+    ZKML_LM_ROW(1);
+    TTI_SFPNOP;
+#pragma GCC unroll 30
+    for (int d = 2; d < 32; d++) {
+        // the loop is unrolled, so (d & 3) is a constant per iteration; the macros need it as an immediate
+        TT_SFPLOADMACRO((0 << 2) | (d & 3), InstrModLoadStore::FP32, ADDR_MOD_7, 2 * d);
+        TT_SFPCAST(p_sfpu::LREG0 + ((d - 2) & 3), p_sfpu::LREG0 + ((d - 2) & 3), sfpi::SFPCAST_MOD1_INT32_TO_SM32);
+    }
+    // slots 64 .. 70: the casts of rows 30 and 31 and the store of row 31 (slot 68)
+    TTI_SFPNOP;
+    ZKML_LM_CAST(30);
+    TTI_SFPNOP;
+    ZKML_LM_CAST(31);
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+    TTI_SFPNOP;
+#undef ZKML_LM_ROW
+#undef ZKML_LM_CAST
+}
+
+inline void quant_sm8_lm_tile(uint32_t idst) {
+    _llk_math_eltwise_unary_sfpu_params_(quant_sm8_lm_body, idst, VectorMode::None);
 }
 
 // One face of a tile: 8 iterations of 4 rows x 8 lanes, SFPI code (the conditionals need the condition codes).
@@ -255,16 +275,6 @@ inline void quant_sm8_init() { ckernel::llk_math_eltwise_binary_sfpu_init<SfpuTy
 inline void quant_sm8_tile(uint32_t idst) {
     ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
     _llk_math_eltwise_binary_sfpu_params_(quant_sm8_face<8>, idst, idst, idst, VectorMode::RC);
-}
-
-// Once, after absmax_to_scaler() and before the first quant_smu8_tile(). The output tile goes to a CB of format UInt8.
-inline void quant_smu8_init() {
-    ckernel::llk_math_eltwise_binary_sfpu_init<SfpuType::quant_int32>(quant_smu8_constants);
-}
-
-inline void quant_smu8_tile(uint32_t idst) {
-    ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
-    _llk_math_eltwise_binary_sfpu_params_(quant_smu8_face<8>, idst, idst, idst, VectorMode::RC);
 }
 
 // Once, after absmax_to_scaler() and before the first quant32_tile().
