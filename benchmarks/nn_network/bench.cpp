@@ -12,6 +12,8 @@
 //   zkml_nn_network_bench cpu     <threads> <M> <width> <L> <reps>     the chained network on the CPU
 //   zkml_nn_network_bench device  <fp32|bf16> <M> <width> <L> <reps>   one execute_network call (program cached)
 //   zkml_nn_network_bench layers  <fp32|bf16> <M> <width> <L> <reps>   L execute_layer calls (not chained), for comparison
+//   zkml_nn_network_bench hostprof <fp32|bf16> <M> <width> <L> <reps>  where the HOST time of one call goes (no device time): the
+//                                                                    pieces of ttnn::device_operation::launch, for both ops
 //   zkml_nn_network_bench check   <M> <width> <L>                      CPU against device: every output byte, accumulator and scaler
 // All layers are `width` x `width` (x is M x width).
 
@@ -36,7 +38,11 @@
 #include <ttnn/types.hpp>
 
 #include "device/operations/layer_execution/execute_layer.hpp"
+#include "device/operations/layer_execution/device/execute_layer_device_operation.hpp"
+#include "device/operations/network_execution/device/execute_network_device_operation.hpp"
 #include "device/operations/network_execution/execute_network.hpp"
+#include <ttnn/device_operation.hpp>
+#include <ttnn/mesh_device_operation_adapter.hpp>
 
 using Clock = std::chrono::steady_clock;
 
@@ -384,6 +390,89 @@ int run_device(bool chained, const std::string& dt, size_t M, size_t W, int L, i
     return 0;
 }
 
+
+// ----------------------------------------------------------------------------------------------------------------------------
+// Where the host time of one call goes. ttnn::device_operation::launch does, in this order: collect and validate the input
+// tensors, create_output_tensors, place_output_tensors, look up the program cache (the hash and the exact canonical key of the
+// attributes and the tensor arguments), then on a hit override_runtime_arguments and enqueue the workload. The first four pieces
+// are public and are timed on their own here; "rest" is the total of a real call minus them: place_output_tensors, the cache
+// lookup of the key, override_runtime_arguments, the enqueue and the bookkeeping of the call.
+
+template <typename F>
+double time_us(int reps, F&& f) {
+    for (int i = 0; i < 5; i++) {
+        f();
+    }
+    std::vector<double> v;
+    for (int i = 0; i < reps; i++) {
+        const auto t0 = Clock::now();
+        f();
+        v.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
+    }
+    return median(v);
+}
+
+template <typename Op, typename Launch>
+void host_profile(
+    const char* label, ttnn::MeshDevice* dev, const typename Op::operation_attributes_t& attrs, const typename Op::tensor_args_t& args, Launch&& launch, int reps) {
+    using Adapter = ttnn::device_operation::MeshDeviceOperationAdapter<Op>;
+    std::vector<std::reference_wrapper<const Tensor>> inputs;
+    ttsl::reflection::visit_object_of_type<Tensor>([&inputs](const Tensor& t) { inputs.push_back(std::cref(t)); }, args);
+
+    const double validate = time_us(reps, [&] { ttnn::device_operation::detail::validate_input_tensors<Op>(attrs, inputs); });
+    const double outputs = time_us(reps, [&] { auto o = Op::create_output_tensors(attrs, args); (void)o; });
+    const double hash = time_us(reps, [&] {
+        volatile auto h = ttnn::device_operation::detail::compute_program_hash<Op>(attrs, args);
+        (void)h;
+    });
+    const std::string name = std::string(ttsl::get_type_name<Op>());
+    const double canonical = time_us(reps, [&] {
+        auto k = Adapter::compute_mesh_workload_canonical_key(dev, name, attrs, args);
+        (void)k;
+    });
+    // A real call: host time until it returns, the device is not waited for inside the timing (it is after each batch).
+    auto sync = [&] { tt::tt_metal::distributed::Finish(dev->mesh_command_queue()); };
+    for (int i = 0; i < 3; i++) {
+        launch();
+    }
+    sync();
+    std::vector<double> calls;
+    for (int i = 0; i < reps; i++) {
+        const auto t0 = Clock::now();
+        launch();
+        calls.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
+        sync();
+    }
+    const double total = median(calls);
+    const double rest = total - validate - outputs - hash - canonical;
+    std::printf(
+        "net hostprof %s: validate_us=%.1f create_outputs_us=%.1f program_hash_us=%.1f canonical_key_us=%.1f rest_us=%.1f total_call_us=%.1f\n",
+        label, validate, outputs, hash, canonical, rest, total);
+}
+
+int run_hostprof(const std::string& dt, size_t M, size_t W, int L, int reps) {
+    DeviceCtx c = make_device(dt, M, W, L);
+    std::vector<zkml::prim::Activation> acts(L, zkml::prim::Activation::ReLU);
+    acts.back() = zkml::prim::Activation::None;
+    {
+        using Op = zkml::operations::network_execution::ExecuteNetworkOperation;
+        const Op::operation_attributes_t a{acts, c.tx.memory_config()};
+        const Op::tensor_args_t t{c.tx, c.tw};
+        host_profile<Op>(
+            ("execute_network L=" + std::to_string(L) + " (" + std::to_string(2 + 3 * L) + " outputs)").c_str(),
+            c.dev.get(), a, t, [&] { (void)zkml::prim::execute_network(c.tx, c.tw, acts); }, reps);
+    }
+    {
+        using Op = zkml::operations::layer_execution::ExecuteLayerOperation;
+        const Op::operation_attributes_t a{zkml::prim::Activation::ReLU, c.tx.memory_config()};
+        const Op::tensor_args_t t{c.tx, c.tw[0]};
+        host_profile<Op>(
+            "execute_layer (5 outputs)", c.dev.get(), a, t, [&] { (void)zkml::prim::execute_layer(c.tx, c.tw[0], zkml::prim::Activation::ReLU); }, reps);
+    }
+    c.dev->close();
+    return 0;
+}
+
 int run_check(size_t M, size_t W, int L) {
     DeviceCtx c = make_device("fp32", M, W, L);
     std::vector<zkml::prim::Activation> acts(L, zkml::prim::Activation::ReLU);
@@ -422,6 +511,9 @@ int main(int argc, char** argv) {
     }
     if ((cmd == "device" || cmd == "layers") && argc >= 7) {
         return run_device(cmd == "device", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
+    }
+    if (cmd == "hostprof" && argc >= 7) {
+        return run_hostprof(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
     }
     if (cmd == "check" && argc >= 5) {
         return run_check(std::stoul(argv[2]), std::stoul(argv[3]), std::atoi(argv[4]));
