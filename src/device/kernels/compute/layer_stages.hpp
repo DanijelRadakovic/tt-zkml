@@ -29,6 +29,14 @@
 #include "device/kernels/compute/pot_scale_sfpu.hpp"
 #include "device/kernels/compute/quant_sfpu.hpp"
 
+// Profiler-only fine zones (what each of the three TRISCs does inside a stage). Off unless the program is built with ZKML_FINE_ZONES (the program
+// factory sets it when the environment variable ZKML_FINE_ZONES is set): they fill the profiler buffer of a RISC after about 6 layers.
+#if defined(ZKML_FINE_ZONES)
+#define ZKML_FZONE(name) DeviceZoneScopedN(name)
+#else
+#define ZKML_FZONE(name)
+#endif
+
 namespace zkml::stages {
 
 constexpr uint32_t DST_TILES = 4;  // fp32 DST, half sync
@@ -51,25 +59,34 @@ ALWI void scale_pass_rt(uint32_t cb_in, uint32_t cb_scaler, uint32_t tiles) {
         const uint32_t n = tiles - done < DST_TILES ? tiles - done : DST_TILES;
         in.wait_front(done + n);
         tile_regs_acquire();
-        for (uint32_t i = 0; i < n; i++) {
-            copy_tile(cb_in, done + i, i);
+        {
+            ZKML_FZONE("SP_COPY");  // profiler-only fine zones: what each of the three TRISCs does in this block
+            for (uint32_t i = 0; i < n; i++) {
+                copy_tile(cb_in, done + i, i);
+            }
         }
-        for (uint32_t i = 0; i < n; i++) {
-            MATH(zkml::sfpu::absmax_tile(i));
+        {
+            ZKML_FZONE("SP_SFPU");
+            for (uint32_t i = 0; i < n; i++) {
+                MATH(zkml::sfpu::absmax_tile(i));
+            }
         }
         tile_regs_commit();
         tile_regs_wait();
         tile_regs_release();
         done += n;
     }
-    tile_regs_acquire();
-    MATH(zkml::sfpu::absmax_to_scaler<magnitude_bits>(dst_scale));
-    tile_regs_commit();
-    tile_regs_wait();
-    pack_reconfig_data_format(cb_scaler);
-    pack_tile(dst_scale, cb_scaler);
-    tile_regs_release();
-    scaler.push_back(1);
+    {
+        ZKML_FZONE("SP_SCALER");
+        tile_regs_acquire();
+        MATH(zkml::sfpu::absmax_to_scaler<magnitude_bits>(dst_scale));
+        tile_regs_commit();
+        tile_regs_wait();
+        pack_reconfig_data_format(cb_scaler);
+        pack_tile(dst_scale, cb_scaler);
+        tile_regs_release();
+        scaler.push_back(1);
+    }
 }
 template <uint32_t cb_in, uint32_t cb_scaler>
 ALWI void scale_pass(uint32_t tiles) {
@@ -125,22 +142,31 @@ ALWI void quant_pass_rt(uint32_t cb_in, uint32_t cb_out, uint32_t tiles, uint32_
         in.wait_front(blocks.done() + n);
         out.reserve_back(n);
         tile_regs_acquire();
-        for (uint32_t i = 0; i < n; i++) {
-            copy_tile(cb_in, blocks.done() + i, i);
+        {
+            ZKML_FZONE("QP_COPY");
+            for (uint32_t i = 0; i < n; i++) {
+                copy_tile(cb_in, blocks.done() + i, i);
+            }
         }
-        for (uint32_t i = 0; i < n; i++) {
-            if constexpr (acc_in && acc_float) {
-                MATH((zkml::sfpu::requant_lm_tile(i)));
-            } else if constexpr (acc_in) {
-                MATH((zkml::sfpu::requant_tile<relu>(i)));
-            } else {
-                MATH((zkml::sfpu::quant_sm8_lm_tile(i)));
+        {
+            ZKML_FZONE("QP_SFPU");
+            for (uint32_t i = 0; i < n; i++) {
+                if constexpr (acc_in && acc_float) {
+                    MATH((zkml::sfpu::requant_lm_tile(i)));
+                } else if constexpr (acc_in) {
+                    MATH((zkml::sfpu::requant_tile<relu>(i)));
+                } else {
+                    MATH((zkml::sfpu::quant_sm8_lm_tile(i)));
+                }
             }
         }
         tile_regs_commit();
         tile_regs_wait();
-        for (uint32_t i = 0; i < n; i++) {
-            pack_tile(i, cb_out);
+        {
+            ZKML_FZONE("QP_PACK");
+            for (uint32_t i = 0; i < n; i++) {
+                pack_tile(i, cb_out);
+            }
         }
         tile_regs_release();
         out.push_back(n);
@@ -196,23 +222,32 @@ ALWI void matmul_stage_rt(uint32_t cb_a, uint32_t cb_b, uint32_t cb_acc, uint32_
         tile_regs_acquire();
         // (mt, nt) of the first output tile of the block: one division per block, not per tile
         const uint32_t mt0 = o0 / Nt, nt0 = o0 - mt0 * Nt;
-        for (uint32_t kt = 0; kt < Kt; kt++) {
-            uint32_t mt = mt0, nt = nt0;
-            for (uint32_t i = 0; i < n; i++) {
-                matmul_tiles(cb_a, cb_b, mt * Kt + kt, kt * Nt + nt, i);
-                if (++nt == Nt) {
-                    nt = 0;
-                    mt++;
+        {
+            ZKML_FZONE("MM_FPU");
+            for (uint32_t kt = 0; kt < Kt; kt++) {
+                uint32_t mt = mt0, nt = nt0;
+                for (uint32_t i = 0; i < n; i++) {
+                    matmul_tiles(cb_a, cb_b, mt * Kt + kt, kt * Nt + nt, i);
+                    if (++nt == Nt) {
+                        nt = 0;
+                        mt++;
+                    }
                 }
             }
         }
-        for (uint32_t i = 0; i < n; i++) {
-            MATH((zkml::sfpu::acc_absmax_tile<relu>(i)));
+        {
+            ZKML_FZONE("MM_SWEEP");
+            for (uint32_t i = 0; i < n; i++) {
+                MATH((zkml::sfpu::acc_absmax_tile<relu>(i)));
+            }
         }
         tile_regs_commit();
         tile_regs_wait();
-        for (uint32_t i = 0; i < n; i++) {
-            pack_tile(i, cb_acc);
+        {
+            ZKML_FZONE("MM_PACK");
+            for (uint32_t i = 0; i < n; i++) {
+                pack_tile(i, cb_acc);
+            }
         }
         tile_regs_release();
         acc.push_back(n);
@@ -238,6 +273,7 @@ template <bool acc_float = false>
 ALWI void pack_requant_scaler_rt(uint32_t cb_acc, uint32_t cb_scaler) {
     reconfig_data_format(cb_acc, cb_acc);
     CircularBuffer scaler(cb_scaler);
+    ZKML_FZONE("RQ_SCALER");
     scaler.reserve_back(1);
     tile_regs_acquire();
     if constexpr (acc_float) {

@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 #include <algorithm>
+#include <cstdlib>
+#include <map>
+#include <string>
 #include <vector>
 
 #include <tt-metalium/constants.hpp>
@@ -112,6 +115,7 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
             .unpack_to_dest_mode = std::move(unpack_to_dest_mode),
             .math_approx_mode = false,
             .compile_args = compute_ct_args,
+            .defines = std::getenv("ZKML_FINE_ZONES") ? std::map<std::string, std::string>{{"ZKML_FINE_ZONES", "1"}} : std::map<std::string, std::string>{},
             .compiler_include_paths = {kernel_include_dir()},
         });
 
