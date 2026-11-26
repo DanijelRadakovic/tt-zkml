@@ -163,6 +163,13 @@ target_include_directories(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE ${CMAKE
 target_link_libraries(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_execute_layer_2s_vs_sm_acc_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# A network of identical quantized layers: CPU (1 and N threads) against the device; see benchmarks/nn_layers/README.md
+find_package(Threads REQUIRED)
+add_executable(zkml_nn_bench benchmarks/nn_layers/bench.cpp)
+target_link_libraries(zkml_nn_bench PRIVATE zkml_ops Threads::Threads)
+target_compile_options(zkml_nn_bench PRIVATE -O3 -march=native -fno-math-errno)
+target_compile_definitions(zkml_nn_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.
