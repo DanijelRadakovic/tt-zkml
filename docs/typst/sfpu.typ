@@ -338,13 +338,138 @@ At the end of each thread's frontend sits the *Wait Gate*, which is where "the b
 
 Idioms: `STALLWAIT(B8, C4)` holds SFPU instructions until the FPU is done, which is exactly what tt-metal's `_llk_math_eltwise_sfpu_start_` does (`TTI_STALLWAIT(p_stall::STALL_SFPU, p_stall::MATH)`). Handing a `Dst` half to another thread is `STALLWAIT(B1, C4 [| C11])` followed by `SEMPOST`. Note the documented one-cycle lag: the instruction right after `STALLWAIT` is always subject to the block mask for at least one cycle. #isa #tm
 
-== The MOP and Replay expanders
+== The MOP and Replay expanders in detail
 
-Both are optional, both sit before the Wait Gate, and both turn one pushed instruction into many: #isa
-- *`REPLAY(Index, Count, Exec, Load)`*: records the next `Count` instructions into a per-thread replay buffer and/or replays a recorded sequence (see `REPLAY.md` for the buffer size and the exact `Count` rules, which differ between Wormhole and Blackhole). A replayed sequence of 8 `SFPU` instructions costs the RISC-V one push.
-- *`MOP`* (macro-op): a small loop engine with templates, which the LLK layer uses for unpack, FPU and pack loops. (Not to be confused with `SFPLOADMACRO`, which is unrelated.)
+The Tensix frontend has two optional stages, one pair per thread, that let a *single pushed instruction expand into many*. They exist so that the RISC-V core does not have to be the source of every instruction: "the expanders allow a RISCV core to push instructions at a rate of less than one instruction per cycle, but the Tensix backend to still receive one instruction per cycle per thread". #isa
 
-Their purpose is to free the RISC-V core from being the instruction source. SFPU kernels in tt-metal use `REPLAY` for fixed straight-line sequences (for example the `quant_int8` kernel loads a replay buffer once and replays it per row group). The cost is that the buffer is shared state per thread and a replay is, like everything in the frontend, in order. Neither expander removes the *one instruction per cycle* limit of the SFPU. #tm
+#align(center)[
+#block(width: 100%, stroke: 0.6pt + luma(120), radius: 5pt, inset: 8pt, fill: luma(252))[
+  #grid(columns: (1fr, 0.1fr, 1.15fr, 0.1fr, 1.15fr, 0.1fr, 1fr), column-gutter: 2pt, align: center + horizon,
+    blk(w: 100%)[FIFO \ (pushed by RISC-V T#sub[i]) ],
+    arrr,
+    blk(w: 100%, fill: rgb("#dbeafe"))[*MOP expander* \ `MOP`, `MOP_CFG` \ 1 #arrr up to 32,639 \ (loops, from `MopCfg`)],
+    arrr,
+    blk(w: 100%, fill: rgb("#dcfce7"))[*Replay expander* \ `REPLAY` \ 1 #arrr `Count` \ (from a recorded buffer)],
+    arrr,
+    blk(w: 100%, fill: rgb("#fee2e2"))[Wait Gate #arrr \ backend unit \ (SFPU: 1 per cycle)]
+  )
+  #v(3pt)
+  #text(size: 8pt)[RISCV B's pushes join between the two expanders (it cannot use `MOP`). The MOP expander can emit `REPLAY`s, never the other way round.]
+]
+]
+#text(size: 8pt)[_Figure 5b. The two expanders in the frontend of one thread (ISA `MOPExpander.md`, `REPLAY.md`, `PushTensixInstruction.md`)._]
+
+Neither expander makes the SFPU faster: it still accepts one instruction per cycle (section 1.6). What they change is the *RISC-V side*: how many cycles and how much code the core spends pushing. For a kernel that is bound by the SFPU's instruction rate that matters little; for a kernel whose body is long and repeated it shrinks the binary and frees the core.
+
+=== `REPLAY`: record a sequence once, replay it many times
+
+`TT_REPLAY(Index, Count, Exec, Load)` has four fields: the buffer slot `Index`, the number of instructions `Count`, and two flags. The ISA's model is an asynchronous generator in the Replay expander: #isa
+
+```py
+async def ReplayExpander():
+  ReplayBuffer = [0] * 32               # per-thread state
+  while True:
+    insn = await GetNextIncomingInstruction()
+    if insn.Opcode != REPLAY:  yield insn;  continue         # everything else passes through
+    if insn.Load:                                            # record the next Count instructions
+      for i in range(insn.Count):
+        x = await GetNextIncomingInstruction()               # a REPLAY cannot be recorded
+        ReplayBuffer[(insn.Index + i) % 32] = x
+        if insn.Exec: yield x                                # Exec: also execute them while recording
+    else:                                                    # replay Count instructions from Index
+      for i in range(insn.Count):
+        yield ReplayBuffer[(insn.Index + i) % 32]
+```
+
+(32 entries and the wrap modulo 32 are the Wormhole figures, which the Blackhole page refers to; on Blackhole a `Count` of 0 means 64. Check `REPLAY.md` before relying on the buffer size.)
+
+#tbl((auto, 1fr),
+  [*`Load = 1, Exec = 0`*], [*Record without executing.* The `REPLAY` is ingested, and for the next `Count` cycles the expander ingests one instruction per cycle into the buffer and emits nothing. This is the usual form in an `init` function (`lltt::record<NoExec>(slot, len)` in tt-metal). The recorded instructions must come *immediately* after the `REPLAY`, and there must be exactly `Count` of them.],
+  [*`Load = 1, Exec = 1`*], [*Record and execute.* The same, but each instruction is also emitted, so the first run happens while recording. No penalty.],
+  [*`Load = 0`*], [*Replay.* The `REPLAY` is ingested and `Count` buffered instructions are emitted, one per cycle. While it emits, the expander does *not* ingest: instructions pushed meanwhile queue up in the FIFO in front of it. Between modes there is no transition penalty.],
+)
+
+Consequences for SFPU code: #isa #tm
+- *The recorded instructions are fixed words.* A replay emits exactly what was recorded, so everything that varies per use must be outside the buffer. tt-metal's own comment on its quantize kernel: variable addresses "can't live inside the replay buffer because `TT_*` macros write to `instrn_buffer[0]`". The idiom is: per row, push the varying `SFPLOAD` (with its address) normally, then one `REPLAY` for the constant register-only body, then the `SFPSTORE` with an address mode that steps the `Dst` address (`ADDR_MOD_6`, increment 2). The address of each row therefore comes from the address counter, not from the recorded word.
+- *Slots are shared state.* The buffer belongs to the thread; two kernels in one compute kernel must use distinct slots or each `init` overwrites the other's recording. tt-metal's quant, requant and dequant kernels define `QUANT_REPLAY_SLOT = 0` (length 5 or 6), `REQUANT_REPLAY_SLOT` right after it (length up to 10), `DEQUANT_REPLAY_SLOT` after that, each `init` records its body, each kernel replays it. The recorded body also depends on constants in `LReg`s that the `init` loaded, so the `init` of the right op must run before the kernel.
+- *The benefit is on the RISC-V side.* tt-metal states the purpose: replaying "shrinks the unrolled binary from `~ITERATIONS * REPLAY_LEN` body instructions down to one replay invocation per iteration". The SFPU still executes every instruction: a replay of 5 instructions is 5 SFPU cycles.
+- *Restrictions of the sync unit (Blackhole).* The tracking of in-flight instructions must stay consistent: a `REPLAY` with `Load` set and `Exec` clear is only allowed if the core then pushes exactly the `Count` instructions it loads, one store each, none of them `MOP`; a `Count` of 0 with `Load` is undefined; and if instruction fusion is enabled the recorded instructions must not be pushed as part of a fused `.ttinsn` sequence (fusion only takes effect from the second execution of a code sequence, so the problem typically shows up inside loops; tt-metal's `load_replay_buf` can switch the instruction cache's "gathering" (the fusion) off around the recording, but only when the JIT build defines `ENABLE_GATHERING`, which is not the default). #isa
+
+A skeleton, with the structure of tt-metal's `quant_init` / `calculate_quant_int32`: #tm
+
+```cpp
+// init, once: constants first, then record the register-only body (not executed now)
+_sfpu_load_imm32_(p_sfpu::LREG2, zero_point);
+lltt::record<lltt::NoExec>(SLOT, LEN);      // = TTI_REPLAY(SLOT, LEN, /*Exec*/0, /*Load*/1)
+{                                           // exactly LEN instructions, all TTI_ (constants)
+    TTI_SFPMAD(p_sfpu::LREG0, p_sfpu::LREG1, p_sfpu::LREG5, p_sfpu::LREG0, 0);
+    TTI_SFPNOP;
+    TTI_SFPSWAP(0, p_sfpu::LREG12, p_sfpu::LREG0, sfpi::SFPSWAP_MOD1_VEC_MAX_MIN);
+    TTI_SFPSWAP(0, p_sfpu::LREG13, p_sfpu::LREG0, sfpi::SFPSWAP_MOD1_VEC_MIN_MAX);
+    TTI_SFPIADD(0, p_sfpu::LREG2, p_sfpu::LREG0, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
+}
+// kernel, per row: the varying instructions are pushed normally, the constant body is one REPLAY
+for (int d = 0; d < 8; d++) {
+    TT_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::FP32, ADDR_MOD_7, in0_off);   // varying address
+    TT_SFPLOAD(p_sfpu::LREG1, InstrModLoadStore::FP32, ADDR_MOD_7, in1_off);
+    lltt::replay(SLOT, LEN);                                                   // 5 instructions, 1 push
+    TT_SFPSTORE(p_sfpu::LREG0, InstrModLoadStore::INT32_2S_COMP, ADDR_MOD_6, out_off);  // store, dst += 2
+}
+```
+
+=== `MOP`: loops expanded in hardware
+
+`TT_MOP(Template, Count1, MaskLo)` triggers the MOP expander, which replaces it with a sequence defined by `MopCfg`, a *write-only* array of nine 32-bit words per RISC-V core (memory-mapped at `TENSIX_MOP_CFG_BASE`; T0 writes T0's, T1 T1's, T2 T2's; RISCV B cannot). There are two templates. #isa
+
+*Template 1* is a nested loop, which `ckernel_template` in tt-llk describes as:
+
+```text
+LOOP_OUTER (OuterCount):
+    START_OP
+    LOOP_INNER (InnerCount):
+        LOOP_OP0
+        LOOP_OP1            // optional; with two ops the inner loop alternates them
+    END_LOOP_INNER
+    END_OP0
+    END_OP1
+END_LOOP_OUTER
+// the last iteration of the inner loop can be replaced by Loop1Last,
+// and if it is also the last outer iteration, by Loop0Last
+```
+
+*Template 0* ("unpack-style") emits, `Count1 + 1` times, either the group `A0 [A1 A2 A3] [B]` or, when the corresponding bit of a 32-bit mask is set, the skip group `SkipA0 [SkipB]`. The mask is the 16 bits of the `MOP` instruction plus the 16 bits given by a preceding `MOP_CFG`. This is for loops where some iterations should do something else (for example skip an unpack).
+
+#tbl((auto, 1fr, 1fr),
+  [*`MopCfg[i]`*], [*Template 0*], [*Template 1*],
+  [0], [unused], [outer loop count (low 7 bits on Wormhole, 10 on Blackhole)],
+  [1], [flags: `HasB`, `HasA123`], [inner loop count (7 / 10 bits)],
+  [2], [`InsnB`], [`StartOp` (skipped if a `NOP`)],
+  [3], [`InsnA0`], [`EndOp0` (skipped if a `NOP`)],
+  [4], [`InsnA1`], [`EndOp1`],
+  [5], [`InsnA2`], [`LoopOp`],
+  [6], [`InsnA3`], [`LoopOp1` (if not a `NOP`: the inner loop alternates `LoopOp` and `LoopOp1`, running twice as many iterations)],
+  [7], [`SkipA0`], [`Loop0Last`],
+  [8], [`SkipB`], [`Loop1Last`],
+)
+
+Facts that matter in practice: #isa
+- *It is free control flow.* The expander resolves as much control flow as needed to find the next instruction to emit; it ingests and emits one instruction per cycle, and a typical configuration expands to 10 to 100 instructions.
+- *One-cycle transition penalty.* After a `MOP`'s expansion, if the next incoming instruction is not a `MOP`, the expander neither ingests nor emits for one cycle. To keep the backend fed every cycle, at least one instruction the expansion emits should be a `REPLAY` that expands to at least two instructions.
+- *Do not change `MopCfg` during an expansion*; the hardware samples it as it goes. Wait for the expansion to finish first (RISC-V Manual TTSync `MOPExpanderDoneCheck`). Some degenerate configurations (an empty expansion, a start op of `NOP` with an inner count of 0 and a non-`NOP` end op, and others) are undefined or have a hardware bug; the documentation lists them.
+- *In tt-metal* the class `ckernel_template` programs it (`ckernel_template tmp(outer, inner, loop_op0, loop_op1); tmp.set_start_op(...); tmp.set_end_ops(...); tmp.program();`) and `ckernel_template::run()` pushes the single `MOP`. This is how the unpack, matmul and pack LLKs get their loops: per tile the compute kernel pushes one `MOP`.
+
+#note[*Is the MOP useful for SFPU kernels?* The stock SFPU kernels are straight-line code that is unrolled in C++, and the `MOP` is built around fixed instruction words, which an SFPU row sequence with a stepping address mode (`ADDR_MOD_6`, `dest += 2`) could in principle be (a loop op `SFPLOADMACRO` with an address mode that steps, and an `SFPNOP`). We have not tried this; none of our kernels use the MOP or `REPLAY`. Our hand-written kernels push every instruction as an immediate, which costs one RISC-V instruction per SFPU instruction and runs at one SFPU instruction per cycle, the same rate as the SFPU can accept.]
+
+=== Which mechanism for which job
+
+#tbl((auto, 1fr, 1fr),
+  [*Situation*], [*Use*], [*Why*],
+  [Constant register-only body, used for many rows], [`REPLAY` (record in `init`, replay per row)], [One push instead of `LEN`; smaller binary. Varying addresses stay outside.],
+  [A loop of fixed instruction words repeated many times], [`MOP` template 1 (or 0 for skip patterns), with a `REPLAY` inside for the transition penalty], [One push per tile; the core is free.],
+  [Per-iteration variable operands or addresses], [Normal `TT_` / `TTI_` pushes with an `ADDR_MOD` that steps the address], [The expanders replay fixed words.],
+  [More parallelism inside the SFPU], [`SFPLOADMACRO` (section 3)], [A different mechanism: it works in the backend (several sub-units), not in the frontend. It can be combined with the others.],
+  [The SFPU is already the bottleneck at 1 instruction per cycle], [Neither expander helps], [Both only reduce the RISC-V push work.],
+)
 
 == Issue slots
 
