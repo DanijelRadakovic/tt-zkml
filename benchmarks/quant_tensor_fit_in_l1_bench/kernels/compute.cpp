@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 // Compute kernel for the L1-fit benchmark: the real pot_quantize kernel (src/operations/
-// pot_quantization/per_tensor/device/kernels/compute/quantize.cpp) minus debug prints, plus
+// pot_quantization/per_tensor/pot_quantize/device/kernels/compute/quantize.cpp) minus debug prints, plus
 //   - RESIDENT (compile-time arg 4): the whole tensor sits in c_0 (c_0 has num_tiles pages). Pass 1
 //     waits for tiles cumulatively and does NOT pop, so pass 2 re-reads the same pages from L1
 //     (copy_tile(cb, i, ...) addresses read_ptr + i, nothing has to be reset). The reader sends

@@ -5,7 +5,7 @@
 // Benchmark: pot_quantize_per_tensor with the SFPU multiply (current) against the FPU multiply (new).
 //
 // Both variants run the REAL kernels of the op (reader, compute, writer under
-// src/operations/pot_quantization/per_tensor/device/kernels/), with the same CBs the program factory
+// src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/), with the same CBs the program factory
 // builds. The only difference is the compile-time arg `use_fpu` of the compute kernel (and what it implies:
 // scaler unpack mode, c_16 size). Every run is checked against the host reference.
 //
@@ -235,7 +235,7 @@ Setup build(const Params& p, uint32_t n_cores) {
     cb(tt::CBIndex::c_16, out_cb_pages, s.out_tile_bytes, out_format);
     cb(tt::CBIndex::c_17, 1, scale_tile_bytes, scale_format);
 
-    const std::string op_dir = "../../src/operations/pot_quantization/per_tensor/device/kernels/";
+    const std::string op_dir = "../../src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/";
     std::vector<uint32_t> reader_ct = {batch_tiles};
     TensorAccessorArgs(*s.in_buf[0]->get_backing_buffer()).append_to(reader_ct);
     const auto reader = CreateKernel(
