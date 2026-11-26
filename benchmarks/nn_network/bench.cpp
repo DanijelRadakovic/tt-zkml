@@ -179,7 +179,32 @@ inline void dot4(
     out[3] = s3;
 }
 
-// The whole network: x [M, W], L weights [W, W]; relu after every layer but the last.
+// The weights of the network quantized beforehand (the CPU counterpart of the pre-quantized device weights): q_w transposed [W, W] per layer and
+// the scaler 2^kw.
+struct Prepared {
+    std::vector<std::vector<int8_t>> q;
+    std::vector<float> sw;
+};
+
+void prepare_scalar(Pool& pool, Scratch& s, const std::vector<std::vector<float>>& ws, size_t W, Prepared& pw) {
+    pw.q.assign(ws.size(), std::vector<int8_t>(W * W));
+    pw.sw.assign(ws.size(), 0.f);
+    for (size_t l = 0; l < ws.size(); l++) {
+        const float* w = ws[l].data();
+        const float sw = std::ldexp(1.0f, pot_k(absmax_parallel(pool, s, w, W * W)));
+        pw.sw[l] = sw;
+        int8_t* q = pw.q[l].data();
+        pool.parallel_for(W, [&](size_t lo, size_t hi) {
+            for (size_t k = lo; k < hi; k++) {
+                for (size_t n = 0; n < W; n++) {
+                    q[n * W + k] = quant1(w[k * W + n], sw);
+                }
+            }
+        });
+    }
+}
+
+// The whole network: x [M, W], L weights [W, W]; relu after every layer but the last. With `pw` the weights are not quantized here.
 void run_network(
     Pool& pool,
     Scratch& s,
@@ -188,7 +213,8 @@ void run_network(
     size_t M,
     size_t W,
     NetResult& r,
-    bool keep_acc) {
+    bool keep_acc,
+    const Prepared* pw = nullptr) {
     const size_t L = ws.size();
     s.q_in.resize(M * W);
     s.q_next.resize(M * W);
@@ -211,17 +237,24 @@ void run_network(
 
     for (size_t l = 0; l < L; l++) {
         const bool relu = l + 1 < L, last = l + 1 == L;
-        const float* w = ws[l].data();
-        const int32_t kw = pot_k(absmax_parallel(pool, s, w, W * W));
-        const float sw = std::ldexp(1.0f, kw);
-        r.scaler_w[l] = sw;
-        pool.parallel_for(W, [&](size_t lo, size_t hi) {
-            for (size_t k = lo; k < hi; k++) {
-                for (size_t n = 0; n < W; n++) {
-                    s.qwT[n * W + k] = quant1(w[k * W + n], sw);
+        const int8_t* qw;
+        if (pw) {
+            qw = pw->q[l].data();
+            r.scaler_w[l] = pw->sw[l];
+        } else {
+            const float* w = ws[l].data();
+            const int32_t kw = pot_k(absmax_parallel(pool, s, w, W * W));
+            const float sw = std::ldexp(1.0f, kw);
+            r.scaler_w[l] = sw;
+            pool.parallel_for(W, [&](size_t lo, size_t hi) {
+                for (size_t k = lo; k < hi; k++) {
+                    for (size_t n = 0; n < W; n++) {
+                        s.qwT[n * W + k] = quant1(w[k * W + n], sw);
+                    }
                 }
-            }
-        });
+            });
+            qw = s.qwT.data();
+        }
 
         s.part_i.assign(pool.size(), 0);
         pool.run([&](unsigned t) {
@@ -231,12 +264,12 @@ void run_network(
                 int32_t* row = &s.acc[i * W];
                 size_t j = 0;
                 for (; j + 4 <= W; j += 4) {
-                    dot4(&s.q_in[i * W], &s.qwT[j * W], &s.qwT[(j + 1) * W], &s.qwT[(j + 2) * W], &s.qwT[(j + 3) * W], W, row + j);
+                    dot4(&s.q_in[i * W], &qw[j * W], &qw[(j + 1) * W], &qw[(j + 2) * W], &qw[(j + 3) * W], W, row + j);
                 }
                 for (; j < W; j++) {
                     int32_t a = 0;
                     for (size_t k = 0; k < W; k++) {
-                        a += static_cast<int32_t>(s.q_in[i * W + k]) * s.qwT[j * W + k];
+                        a += static_cast<int32_t>(s.q_in[i * W + k]) * qw[j * W + k];
                     }
                     row[j] = a;
                 }
@@ -318,22 +351,33 @@ void report(const char* what, const std::string& cfg, size_t M, size_t W, int L,
     std::printf("net %s %sM=%zu W=%zu L=%d: net_us=%.1f layer_us=%.1f (median of %d)\n", what, cfg.c_str(), M, W, L, us, us / L, reps);
 }
 
+template <typename F>
+double median_us(int reps, F&& f) {
+    f();
+    f();
+    std::vector<double> runs;
+    for (int i = 0; i < reps; i++) {
+        const auto t0 = Clock::now();
+        f();
+        runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
+    }
+    return median(runs);
+}
+
+// Three numbers: the whole forward pass with the weights quantized inside it (`cpu`), the quantization of the weights alone (`cpuload`, done once when the
+// model is loaded) and the forward pass with the weights quantized beforehand (`cpuq`).
 int run_cpu(unsigned threads, size_t M, size_t W, int L, int reps) {
     Pool pool(threads);
     const auto x = uniform(M * W, 7, -2.f, 2.f);
     const auto ws = make_ws(W, L);
     Scratch s;
     NetResult r;
-    auto network = [&] { run_network(pool, s, x.data(), ws, M, W, r, false); };
-    network();
-    network();
-    std::vector<double> runs;
-    for (int i = 0; i < reps; i++) {
-        const auto t0 = Clock::now();
-        network();
-        runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
-    }
-    report("cpu", "threads=" + std::to_string(threads) + " ", M, W, L, median(runs), reps);
+    Prepared pw;
+    const std::string cfg = "threads=" + std::to_string(threads) + " ";
+    report("cpu", cfg, M, W, L, median_us(reps, [&] { run_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
+    report("cpuload", cfg, M, W, L, median_us(reps, [&] { prepare_scalar(pool, s, ws, W, pw); }), reps);
+    prepare_scalar(pool, s, ws, W, pw);
+    report("cpuq", cfg, M, W, L, median_us(reps, [&] { run_network(pool, s, x.data(), ws, M, W, r, false, &pw); }), reps);
     return 0;
 }
 
@@ -360,6 +404,54 @@ struct VnniScratch {
     std::vector<int32_t> acc;          // [M, W]
 };
 
+struct VPrepared {
+    std::vector<std::vector<int8_t>> wp;
+    std::vector<std::vector<int32_t>> corr;
+    std::vector<float> sw;
+};
+
+void vnni_prepare(Pool& pool, VnniScratch& s, const std::vector<std::vector<float>>& ws, size_t W, VPrepared& pw) {
+    pw.wp.assign(ws.size(), std::vector<int8_t>(W * W));
+    pw.corr.assign(ws.size(), std::vector<int32_t>(W));
+    pw.sw.assign(ws.size(), 0.f);
+    const size_t col_blocks = W / 16;
+    for (size_t l = 0; l < ws.size(); l++) {
+        const float* w = ws[l].data();
+        s.partial.assign(pool.size(), 0.0f);
+        pool.run([&](unsigned t) {
+            const size_t n = W * W, lo = n * t / pool.size(), hi = n * (t + 1) / pool.size();
+            float m = 0.0f;
+            for (size_t i = lo; i < hi; i++) {
+                m = std::max(m, std::fabs(w[i]));
+            }
+            s.partial[t] = m;
+        });
+        const float sw = std::ldexp(1.0f, pot_k(*std::max_element(s.partial.begin(), s.partial.end())));
+        pw.sw[l] = sw;
+        int8_t* wp = pw.wp[l].data();
+        int32_t* corr = pw.corr[l].data();
+        pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
+            for (size_t k4 = lo; k4 < hi; k4++) {
+                for (size_t n = 0; n < W; n++) {
+                    for (size_t kk = 0; kk < 4; kk++) {
+                        wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
+                    }
+                }
+            }
+        });
+        pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
+            const __m512i ones = _mm512_set1_epi8(1);
+            for (size_t cb = lo; cb < hi; cb++) {
+                __m512i a = _mm512_setzero_si512();
+                for (size_t k4 = 0; k4 < W / 4; k4++) {
+                    a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&wp[cb * (W * 16) + k4 * 64]));
+                }
+                _mm512_storeu_si512(&corr[cb * 16], _mm512_slli_epi32(a, 7));
+            }
+        });
+    }
+}
+
 void vnni_network(
     Pool& pool,
     VnniScratch& s,
@@ -368,7 +460,8 @@ void vnni_network(
     size_t M,
     size_t W,
     NetResult& r,
-    bool keep_acc) {
+    bool keep_acc,
+    const VPrepared* pw = nullptr) {
     const size_t L = ws.size();
     s.xu.resize(M * W);
     s.xu_next.resize(M * W);
@@ -404,31 +497,41 @@ void vnni_network(
     const size_t col_blocks = W / 16, row_blocks = M / kRows, tasks = col_blocks * row_blocks;
     for (size_t l = 0; l < L; l++) {
         const bool relu = l + 1 < L, last = l + 1 == L;
-        const float* w = ws[l].data();
-        const int32_t kw = pot_k(absmax(w, W * W));
-        const float sw = std::ldexp(1.0f, kw);
-        r.scaler_w[l] = sw;
-        // quantize and pack: wp[cb][k / 4][column in block][k % 4]
-        pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
-            for (size_t k4 = lo; k4 < hi; k4++) {
-                for (size_t n = 0; n < W; n++) {
-                    for (size_t kk = 0; kk < 4; kk++) {
-                        s.wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
+        const int8_t* wpd;
+        const int32_t* corrd;
+        if (pw) {
+            wpd = pw->wp[l].data();
+            corrd = pw->corr[l].data();
+            r.scaler_w[l] = pw->sw[l];
+        } else {
+            const float* w = ws[l].data();
+            const int32_t kw = pot_k(absmax(w, W * W));
+            const float sw = std::ldexp(1.0f, kw);
+            r.scaler_w[l] = sw;
+            // quantize and pack: wp[cb][k / 4][column in block][k % 4]
+            pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
+                for (size_t k4 = lo; k4 < hi; k4++) {
+                    for (size_t n = 0; n < W; n++) {
+                        for (size_t kk = 0; kk < 4; kk++) {
+                            s.wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
+                        }
                     }
                 }
-            }
-        });
-        // corr[n] = 128 * sum_k w[k][n], with vpdpbusd against a vector of ones
-        pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
-            const __m512i ones = _mm512_set1_epi8(1);
-            for (size_t cb = lo; cb < hi; cb++) {
-                __m512i a = _mm512_setzero_si512();
-                for (size_t k4 = 0; k4 < W / 4; k4++) {
-                    a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&s.wp[cb * (W * 16) + k4 * 64]));
+            });
+            // corr[n] = 128 * sum_k w[k][n], with vpdpbusd against a vector of ones
+            pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
+                const __m512i ones = _mm512_set1_epi8(1);
+                for (size_t cb = lo; cb < hi; cb++) {
+                    __m512i a = _mm512_setzero_si512();
+                    for (size_t k4 = 0; k4 < W / 4; k4++) {
+                        a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&s.wp[cb * (W * 16) + k4 * 64]));
+                    }
+                    _mm512_storeu_si512(&s.corr[cb * 16], _mm512_slli_epi32(a, 7));
                 }
-                _mm512_storeu_si512(&s.corr[cb * 16], _mm512_slli_epi32(a, 7));
-            }
-        });
+            });
+            wpd = s.wp.data();
+            corrd = s.corr.data();
+        }
 
         s.part_i.assign(pool.size(), 0);
         pool.run([&](unsigned t) {
@@ -437,7 +540,7 @@ void vnni_network(
             for (size_t task = t_lo; task < t_hi; task++) {
                 const size_t rb = task / col_blocks, cb = task % col_blocks;
                 const size_t m0 = rb * kRows;
-                const int8_t* wb = &s.wp[cb * (W * 16)];
+                const int8_t* wb = &wpd[cb * (W * 16)];
                 __m512i acc[kRows];
                 for (size_t i = 0; i < kRows; i++) {
                     acc[i] = _mm512_setzero_si512();
@@ -450,7 +553,7 @@ void vnni_network(
                         acc[i] = _mm512_dpbusd_epi32(acc[i], _mm512_set1_epi32(xb), wv);
                     }
                 }
-                const __m512i corr = _mm512_loadu_si512(&s.corr[cb * 16]);
+                const __m512i corr = _mm512_loadu_si512(&corrd[cb * 16]);
                 for (size_t i = 0; i < kRows; i++) {
                     const __m512i v = _mm512_sub_epi32(acc[i], corr);
                     _mm512_storeu_si512(&s.acc[(m0 + i) * W + cb * 16], v);
@@ -509,16 +612,12 @@ int run_cpu_vnni(unsigned threads, size_t M, size_t W, int L, int reps) {
     const auto ws = make_ws(W, L);
     VnniScratch s;
     NetResult r;
-    auto network = [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false); };
-    network();
-    network();
-    std::vector<double> runs;
-    for (int i = 0; i < reps; i++) {
-        const auto t0 = Clock::now();
-        network();
-        runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
-    }
-    report("cpu-vnni", "threads=" + std::to_string(threads) + " ", M, W, L, median(runs), reps);
+    VPrepared pw;
+    const std::string cfg = "threads=" + std::to_string(threads) + " ";
+    report("cpu-vnni", cfg, M, W, L, median_us(reps, [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
+    report("cpu-vnniload", cfg, M, W, L, median_us(reps, [&] { vnni_prepare(pool, s, ws, W, pw); }), reps);
+    vnni_prepare(pool, s, ws, W, pw);
+    report("cpu-vnniq", cfg, M, W, L, median_us(reps, [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false, &pw); }), reps);
     return 0;
 }
 
@@ -535,7 +634,16 @@ int run_vnni_check() {
         run_network(pool, a, x.data(), ws, M, W, ra, true);
         vnni_network(pool, b, x.data(), ws, M, W, rb, true);
         size_t bad = ra.out != rb.out || ra.scaler_x != rb.scaler_x || ra.scaler_w != rb.scaler_w || ra.scaler_out != rb.scaler_out || ra.acc != rb.acc;
-        std::printf("vnnicheck M=%zu W=%zu L=%zu: %s\n", M, W, L, bad ? "DIFFERENT" : "identical (bytes, accumulators, scalers)");
+        // the weights quantized beforehand give the same result, scalar and VNNI
+        Prepared pa;
+        VPrepared pb;
+        NetResult rc, rd;
+        prepare_scalar(pool, a, ws, W, pa);
+        vnni_prepare(pool, b, ws, W, pb);
+        run_network(pool, a, x.data(), ws, M, W, rc, true, &pa);
+        vnni_network(pool, b, x.data(), ws, M, W, rd, true, &pb);
+        bad += rc.out != ra.out || rc.scaler_w != ra.scaler_w || rc.acc != ra.acc || rd.out != ra.out || rd.scaler_w != ra.scaler_w || rd.acc != ra.acc;
+        std::printf("vnnicheck M=%zu W=%zu L=%zu: %s\n", M, W, L, bad ? "DIFFERENT" : "identical (bytes, accumulators, scalers; also with the weights quantized beforehand)");
         bad_total += static_cast<int>(bad);
     }
     return bad_total ? 1 : 0;
@@ -576,11 +684,25 @@ int run_device(bool chained, bool quantized, const std::string& dt, size_t M, si
     acts.back() = zkml::prim::Activation::None;
     std::vector<Tensor> qw, scalers;  // pre-quantized weights (`deviceq`)
     if (quantized) {
-        for (const auto& w : c.tw) {
-            auto [q, s] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, DataType::UINT8);
-            qw.push_back(q);
-            scalers.push_back(s);
+        // `load_parameters` of nn::Sequential: one pot_quantize_per_tensor per weight (UINT8 sign-magnitude bytes), then wait for the device
+        auto load = [&] {
+            qw.clear();
+            scalers.clear();
+            for (const auto& w : c.tw) {
+                auto [q, sc] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, DataType::UINT8);
+                qw.push_back(q);
+                scalers.push_back(sc);
+            }
+            sync();
+        };
+        load();  // compile
+        std::vector<double> loads;
+        for (int i = 0; i < reps; i++) {
+            const auto t0 = Clock::now();
+            load();
+            loads.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
         }
+        report("deviceload", dt + " ", M, W, L, median(loads), reps);
     }
     double enqueue_us = 0;  // host time until the last call has returned (before the device is waited for)
     auto network = [&] {

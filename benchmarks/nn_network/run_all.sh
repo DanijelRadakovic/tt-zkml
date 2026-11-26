@@ -44,4 +44,5 @@ for m in $BATCHES; do
   done
 done
 python3 -I benchmarks/nn_network/summarize.py "$OUT/net.txt" | tee "$OUT/net.md"
+python3 -I benchmarks/nn_network/summarize_workflow.py "$OUT/net.txt" | tee "$OUT/workflow.md"
 cat "$OUT/check.txt"

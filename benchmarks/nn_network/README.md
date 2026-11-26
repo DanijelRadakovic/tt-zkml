@@ -74,3 +74,12 @@ All of them are bit-exact with the host model. `dev bf16 q` in `results/optimize
 VNNI` is the time of the best CPU (plain or VNNI, 1 / 6 / 12 threads) divided by the device time (above 1: the device is faster).
 Kernel time (profiler): 128 x 256, 8 layers 342 -> 187 us; 32 x 128, 8 layers 56 -> 22 us. Wall time, 32 x 128, 8 layers: 98 -> 58 us before the
 packed outputs and 49 us with them (the host call costs about 20 us, of which 11 us are the three output tensors).
+
+## Correction and the whole workflow (`results/workflow/`)
+
+The "dev bf16 q vs best VNNI" column above compared a device whose weights were quantized beforehand with a CPU that quantizes the weights inside
+every forward pass. `results/workflow/` fixes this: the CPU also has `cpuq` / `cpu-vnniq` (forward pass with the weights quantized beforehand) and
+`cpuload` / `cpu-vnniload` (the one-time quantization), the device has `deviceload` (one `pot_quantize_per_tensor` per weight plus the wait for the
+device, which is what `nn::Sequential::load_parameters` does), and `workflow.md` gives the total time of load + N forward passes (N = 1, 10, 100) for
+device per call, device pre-quantized, CPU per call and CPU pre-quantized. With the like-for-like comparison the pre-quantized CPU forward pass is 1.4x to 5x
+faster than the device forward pass; the device wins only per call at narrow, deep networks.

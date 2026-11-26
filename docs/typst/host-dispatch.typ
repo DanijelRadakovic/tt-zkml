@@ -208,7 +208,7 @@ Creating the outputs is now a constant 11 us (three tensors) and the call is 18 
 *Wall time of the whole network* (us, bf16, median of 20; the layer loop is `L` calls of `execute_layer`):
 
 #tbl((auto, auto, auto, auto, auto),
-  [*M x W, 8 layers*], [*layer loop*], [*fused, weights quantized each call*], [*fused, weights pre-quantized*], [*best CPU (VNNI)*],
+  [*M x W, 8 layers*], [*layer loop*], [*fused, weights quantized each call*], [*fused, weights pre-quantized*], [*best CPU (VNNI), weights quantized on every call*],
   [32 x 64], [194], [58], [51], [58],
   [32 x 128], [195], [73], [49], [92],
   [128 x 128], [204], [130], [100], [125],
@@ -224,4 +224,6 @@ Before the fix the fused call lost to the loop for wide layers (for example 32 x
 - Two further options remain, neither needed now: *reuse the outputs* (pass preallocated tensors in, so a call has no allocation) and *trace replay* (capture the enqueue once and replay it for a fixed network, which removes the per-call host work).
 - For a model that is run repeatedly with the same weights, quantize the weights once (`nn::Sequential::load_parameters` does this) and use `execute_network_quantized`: it removes 30% to 55% of the kernel time and needs no weight scaler outputs.
 
-#good[With packed outputs the fused network is the faster choice at every size we measured, against the layer loop. With pre-quantized weights it is also faster than the best CPU baseline (including AVX-512 VNNI) for networks of 8 or more layers at most widths, and loses only for short, narrow networks where fixed per-call costs dominate.]
+#good[With packed outputs the fused network is the faster choice at every size we measured, against the layer loop of `execute_layer` calls.]
+
+#warn[*Correction.* The CPU column above quantizes the weights inside every forward pass, while the "pre-quantized" device column does not, so that pair is not like for like. With the CPU weights also quantized beforehand (`benchmarks/nn_network/results/workflow/`), the CPU forward pass is 1.4x to 5x faster than the device forward pass at every size we ran, and over a whole workflow (load once, then N forward passes) the pre-quantized CPU wins for N of 10 or more. The device wins only per call at narrow, deep networks (for example 32 x 128, 8 layers: 74 us against 93 us), and for a single call.]
