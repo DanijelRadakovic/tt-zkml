@@ -35,7 +35,7 @@ inline std::string kernel_path(const char* source_file, const char* relative_pat
  *
  * tt-metal compiles kernels at runtime and does not search `src/` for includes. Passing this
  * directory in a kernel config's `compiler_include_paths` lets kernels include shared headers such
- * as `#include "common/kernel_debug.hpp"`.
+ * as `#include "device/kernels/compute/kernel_debug.hpp"`.
  *
  * Here `__FILE__` is the path of this header, `<repo>/src/common/kernel_path.hpp`. It is absolute
  * because CMake puts `src/` on the include path as an absolute path.

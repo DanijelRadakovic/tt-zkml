@@ -9,11 +9,11 @@
 #include "api/compute/reconfig_data_format.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/debug/kernel_profiler.hpp"
-#include "common/block_processing.hpp"
-#include "common/kernel_debug.hpp"
-#include "operations/pot_quantization/pot_range.hpp"
-#include "pot_scale_sfpu.hpp"
-#include "quant_sfpu.hpp"
+#include "device/kernels/block_processing.hpp"
+#include "device/kernels/compute/kernel_debug.hpp"
+#include "common/pot.hpp"
+#include "device/kernels/compute/pot_scale_sfpu.hpp"
+#include "device/kernels/compute/quant_sfpu.hpp"
 
 // clang-format off
 /**
@@ -21,7 +21,7 @@
  *
  * The formulas are:
  * - `Q = 2^m - 1` with `m` = 7, 15, 31 for 8, 16, 32 bits, or 30 for 32 bits with `m31_range` (see
- *   operations/pot_quantization/pot_range.hpp),
+ *   common/pot.hpp),
  * - `k = max{k : absmax(x) * 2^k <= Q}`,
  * - `q = clamp(round_half_even(x * 2^k), -Q, Q)` (the clamp never fires).
  *
@@ -79,7 +79,7 @@
  *       already hides behind the SFPU. Pass 1 is bound by the SFPU absmax (~210 cycles per tile).
  * @pre  The input is finite. An Inf or NaN absmax gives a meaningless scaler.
  * @note Rounding is round-half-to-even. A ZK circuit that checks this result must use the same rule.
- * @see ../dataflow/reader.cpp, ../dataflow/writer.cpp, pot_scale_sfpu.hpp, common/block_processing.hpp
+ * @see ../dataflow/reader.cpp, ../dataflow/writer.cpp, pot_scale_sfpu.hpp, device/kernels/block_processing.hpp
  */
 // clang-format on
 

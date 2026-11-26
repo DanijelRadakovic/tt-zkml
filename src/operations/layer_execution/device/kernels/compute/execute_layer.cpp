@@ -10,10 +10,10 @@
 #include "api/compute/tile_move_copy.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/debug/kernel_profiler.hpp"
-#include "common/block_processing.hpp"
+#include "device/kernels/block_processing.hpp"
 #include "layer_sfpu.hpp"
-#include "operations/pot_quantization/per_tensor/pot_quantize/device/kernels/compute/pot_scale_sfpu.hpp"
-#include "operations/pot_quantization/per_tensor/pot_quantize/device/kernels/compute/quant_sfpu.hpp"
+#include "device/kernels/compute/pot_scale_sfpu.hpp"
+#include "device/kernels/compute/quant_sfpu.hpp"
 
 // clang-format off
 /**

@@ -39,7 +39,7 @@
 
 #include <cstdint>
 
-#include "pot_scale_sfpu.hpp"
+#include "device/kernels/compute/pot_scale_sfpu.hpp"
 
 #ifdef TRISC_MATH
 #include "llk_math_eltwise_unary_sfpu_init.h"

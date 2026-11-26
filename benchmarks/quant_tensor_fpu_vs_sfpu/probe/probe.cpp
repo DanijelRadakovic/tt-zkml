@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
             .compiler_include_paths = {
                 zkml::common::kernel_path(
                     __FILE__,
-                    "../../../src/operations/pot_quantization/per_tensor/pot_quantize/device/kernels/compute"),
+                    "../../../src/device/kernels/compute"),
                 zkml::common::kernel_include_dir()}});
     SetRuntimeArgs(program, reader, core, {uint32_t(in_buf->address()), num_tiles});
     SetRuntimeArgs(program, writer, core, {uint32_t(out_buf->address())});

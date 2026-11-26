@@ -116,7 +116,7 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
                  in_cb_pages,
                  dst_tiles,
                  attributes.range == zkml::prim::QuantRange::M31 ? 1u : 0u},
-            // Lets the kernel include shared headers from src/, e.g. common/kernel_debug.hpp
+            // Lets the kernel include shared headers from src/, e.g. device/kernels/compute/kernel_debug.hpp
             .compiler_include_paths = {kernel_include_dir()},
         });
 
