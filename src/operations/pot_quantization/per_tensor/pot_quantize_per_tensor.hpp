@@ -9,6 +9,7 @@
 #include <tuple>
 
 #include "operations/pot_quantization/bit_width.hpp"
+#include "operations/pot_quantization/compute_unit.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/types.hpp"
 
@@ -45,6 +46,11 @@ namespace zkml::prim {
  *        - Must be at least 2, so the reader can fill one batch while compute drains the other.
  *        - A larger factor lets the reader run further ahead when reads are slow.
  *        - The CB must fit in L1, otherwise the operation throws.
+ * @param compute_unit Which math unit multiplies by the scaler in pass 2. `Auto` (the default) uses the FPU for
+ *        BFLOAT16 input at 16 or 32 bits (about 10% faster) and the SFPU otherwise (at 8 bits the SFPU has a
+ *        fused op and the FPU would be 2.3x slower). `Fpu` requires a BFLOAT16 input. The result does not
+ *        depend on the unit: for BFLOAT16 the product is exact on both. Measurements:
+ *        `tools/quant_tensor_fpu_vs_sfpu/README.md`.
  * @return `(quantized, scaler)`.
  *         - `quantized` has the shape of `input` and TILE layout.
  *         - `scaler` is a FLOAT32 tensor of shape `[1, 1]` holding `2^k`.
@@ -56,6 +62,7 @@ std::tuple<ttnn::Tensor, ttnn::Tensor> pot_quantize_per_tensor(
     tt::tt_metal::DataType output_dtype = tt::tt_metal::DataType::INT32,
     const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt,
     uint32_t noc_read_tile_batch_size = 16,
-    uint32_t cb_in_size_factor = 2);
+    uint32_t cb_in_size_factor = 2,
+    ComputeUnit compute_unit = ComputeUnit::Auto);
 
 }  // namespace zkml::prim

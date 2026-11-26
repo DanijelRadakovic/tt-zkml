@@ -29,6 +29,7 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
 
     const uint32_t num_tiles = input.physical_volume() / TILE_HW;
     const bool is_output_int8 = attributes.output_dtype == DataType::INT8;
+    const bool use_fpu = PotQuantizePerTensorOperation::use_fpu(attributes, input.dtype());
 
     Program program{};
     const CoreCoord core{0, 0};
@@ -45,8 +46,10 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     // might perform fewer reads than the batch size, meaning that not all CB slots would be updated, which is fine.
     const uint32_t batch_tiles = std::min(attributes.noc_read_tile_batch_size, num_tiles);
     const uint32_t in_cb_pages = batch_tiles * attributes.cb_in_size_factor;
-    // c_16 holds two compute blocks (dst_tiles - 1 tiles each) so packing overlaps the writer.
-    const uint32_t out_cb_pages = 2 * (dst_tiles - 1);
+    // c_16 holds two compute blocks so packing overlaps the writer. A block is dst_tiles - 1 tiles: the last DST
+    // slot holds the scaler. With the FPU multiply the scaler is read through SrcB, so a block is dst_tiles tiles.
+    const uint32_t block_tiles = use_fpu ? dst_tiles : dst_tiles - 1;
+    const uint32_t out_cb_pages = 2 * block_tiles;
 
     const uint32_t in_tile_bytes = tt::tile_size(in_format);
     const uint32_t out_tile_bytes = tt::tile_size(out_format);
@@ -99,7 +102,8 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     if (in_format == DataFormat::Float32) {
         unpack_to_dest_mode[cb_in] = UnpackToDestMode::UnpackToDestFp32;
     }
-    unpack_to_dest_mode[cb_scale] = UnpackToDestMode::UnpackToDestFp32;
+    // The scaler goes to DST (copy_tile) when the SFPU multiplies, and to SrcB (mul_tiles) when the FPU does.
+    unpack_to_dest_mode[cb_scale] = use_fpu ? UnpackToDestMode::Default : UnpackToDestMode::UnpackToDestFp32;
 
     const KernelHandle compute_id = CreateKernel(
         program,
@@ -110,8 +114,9 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack_to_dest_mode),
             .math_approx_mode = false,
-            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section
-            .compile_args = {is_output_int8 ? 1u : 0u, attributes.bit_width.bits(), in_cb_pages, dst_tiles},
+            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, FPU multiply
+            .compile_args =
+                {is_output_int8 ? 1u : 0u, attributes.bit_width.bits(), in_cb_pages, dst_tiles, use_fpu ? 1u : 0u},
             // Lets the kernel include shared headers from src/, e.g. common/kernel_debug.hpp
             .compiler_include_paths = {kernel_include_dir()},
         });
