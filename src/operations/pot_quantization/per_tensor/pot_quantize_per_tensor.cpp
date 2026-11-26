@@ -16,7 +16,8 @@ std::tuple<ttnn::Tensor, ttnn::Tensor> pot_quantize_per_tensor(
     const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config,
     uint32_t noc_read_tile_batch_size,
     uint32_t cb_in_size_factor,
-    ComputeUnit compute_unit) {
+    ComputeUnit compute_unit,
+    QuantRange range) {
     using Op = zkml::operations::pot_quantization::PotQuantizePerTensorOperation;
     const auto attributes = Op::operation_attributes_t{
         .bit_width = bit_width,
@@ -25,6 +26,7 @@ std::tuple<ttnn::Tensor, ttnn::Tensor> pot_quantize_per_tensor(
         .noc_read_tile_batch_size = noc_read_tile_batch_size,
         .cb_in_size_factor = cb_in_size_factor,
         .compute_unit = compute_unit,
+        .range = range,
     };
     return ttnn::device_operation::launch<Op>(attributes, Op::tensor_args_t{input});
 }

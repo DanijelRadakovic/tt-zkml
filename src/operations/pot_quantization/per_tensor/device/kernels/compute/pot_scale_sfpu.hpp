@@ -20,6 +20,8 @@
 
 #include <cstdint>
 
+#include "operations/pot_quantization/pot_range.hpp"
+
 #ifdef TRISC_MATH
 #include "llk_math_eltwise_unary_sfpu_init.h"
 #include "llk_math_eltwise_unary_sfpu_params.h"
@@ -56,14 +58,15 @@ inline void absmax_accumulate_face() {
 }
 
 // Reduce the 32 lanes of SCALE_LREG to the tensor absmax, then replace it with the scaler 2^k:
-//   Q = 2^(BITS-1) - 1,  k = the largest integer with absmax * 2^k <= Q, capped at 127.
+//   Q = 2^MAG - 1 (MAG = pot_magnitude_bits(bits, range): 7, 15, 31 or 30),  k = the largest integer with absmax * 2^k <= Q,
+//   capped at 127.
 // Every lane ends up holding the same 2^k.
-template <uint32_t BITS>
+template <uint32_t MAG>
 inline void absmax_reduce_to_scaler() {
-    static_assert(BITS == 8 || BITS == 16 || BITS == 32, "bit width must be 8, 16 or 32");
-    // fp32 cannot hold 2^31 - 1 and rounds it to 2^31. Harmless: absmax * 2^k is a power-of-two
-    // multiple of an fp32, so it is never strictly between 2^31 - 1 and 2^31.
-    constexpr float Q = static_cast<float>((1ull << (BITS - 1)) - 1);
+    static_assert(MAG == 7 || MAG == 15 || MAG == 30 || MAG == 31, "magnitude bits must be 7, 15, 30 or 31");
+    // fp32 cannot hold 2^MAG - 1 for MAG > 24 and rounds it to 2^MAG. Harmless: absmax * 2^k is a power-of-two
+    // multiple of an fp32, so it is never strictly between 2^MAG - 1 and 2^MAG.
+    constexpr float Q = static_cast<float>((1ull << MAG) - 1);
 
     // Lanes are 4 rows x 8 columns. Transposing 8 copies leaves row i of the accumulator in
     // register i (broadcast over its 4 rows), so the max of the first four is the column max.
@@ -85,10 +88,10 @@ inline void absmax_reduce_to_scaler() {
     a = max_nonneg(a, r);
     const sfpi::vFloat absmax = a;
 
-    // absmax = m * 2^E with m in [1, 2), biased exponent Eb = E + 127. Q has exponent BITS - 2, so
-    // the candidate is k = BITS - 2 - E, i.e. biased exponent 252 + BITS - Eb, and absmax * 2^k
-    // lies in [2^(BITS-2), 2^(BITS-1)). If that is above Q, k - 1 is the answer.
-    sfpi::vInt field = sfpi::vInt(252 + BITS) - sfpi::exexp(absmax, sfpi::ExponentMode::Biased);
+    // absmax = m * 2^E with m in [1, 2), biased exponent Eb = E + 127. Q has exponent MAG - 1, so
+    // the candidate is k = MAG - 1 - E, i.e. biased exponent 253 + MAG - Eb, and absmax * 2^k
+    // lies in [2^(MAG-1), 2^MAG). If that is above Q, k - 1 is the answer.
+    sfpi::vInt field = sfpi::vInt(253 + MAG) - sfpi::exexp(absmax, sfpi::ExponentMode::Biased);
     // Cap at k = 127 (biased 254) so 2^k stays a finite fp32. This also covers absmax = 0
     // (Eb = 0): every k works there and 2^127 is used.
     v_if(field > 254) { field = 254; }
@@ -130,9 +133,9 @@ inline void absmax_tile(uint32_t idst) {
 
 // Turns the running absmax into the scaler 2^k (see absmax_reduce_to_scaler) and writes it into
 // every element of DST tile idst, which quant_tile() reads as its scale operand.
-template <uint32_t BITS>
+template <uint32_t MAG>
 inline void absmax_to_scaler(uint32_t idst) {
-    _llk_math_eltwise_unary_sfpu_params_(absmax_reduce_to_scaler<BITS>, idst, VectorMode::RC_custom);
+    _llk_math_eltwise_unary_sfpu_params_(absmax_reduce_to_scaler<MAG>, idst, VectorMode::RC_custom);
     _llk_math_eltwise_unary_sfpu_params_(scaler_store_face<8>, idst, VectorMode::RC);
 }
 

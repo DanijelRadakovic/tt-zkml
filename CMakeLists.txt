@@ -49,6 +49,9 @@ add_library(
     src/operations/pot_quantization/per_tensor/pot_quantize_per_tensor.cpp
     src/operations/pot_quantization/per_tensor/device/pot_quantize_per_tensor_device_operation.cpp
     src/operations/pot_quantization/per_tensor/device/pot_quantize_per_tensor_program_factory.cpp
+    src/operations/pot_quantization/m31/pot_quant_m31.cpp
+    src/operations/pot_quantization/m31/device/pot_quant_m31_device_operation.cpp
+    src/operations/pot_quantization/m31/device/pot_quant_m31_program_factory.cpp
 )
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
@@ -100,6 +103,7 @@ endfunction()
 
 zkml_add_test(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization/test_pot_quantize_per_tensor.cpp zkml_ops)
 # check_if_cbs_can_fit_in_l1 on its own; deliberately not part of the op tests
+zkml_add_test(test_pot_quant_m31 tests/cpp/operations/pot_quantization/test_pot_quant_m31.cpp zkml_ops)
 zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
 
 # Does keeping the tensor in L1 between the two passes help? Profiler-based bench; see
@@ -110,6 +114,11 @@ target_link_libraries(zkml_quant_l1_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_quant_l1_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
 # SFPU against FPU multiply in pot_quantize_per_tensor: cycles, wall time, power. See
+# Wall-clock benchmark of the execution-trace operations (trace flag, pot_quant_m31); see tools/quant_tensor_trace_bench/
+add_executable(zkml_quant_trace_bench tools/quant_tensor_trace_bench/bench.cpp)
+target_link_libraries(zkml_quant_trace_bench PRIVATE zkml_ops)
+target_compile_definitions(zkml_quant_trace_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # tools/quant_tensor_fpu_vs_sfpu/README.md
 add_executable(zkml_quant_fpu_vs_sfpu_bench tools/quant_tensor_fpu_vs_sfpu/bench.cpp)
 target_include_directories(

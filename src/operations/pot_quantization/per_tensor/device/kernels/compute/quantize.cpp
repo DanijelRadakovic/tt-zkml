@@ -18,6 +18,7 @@
 #include "api/debug/kernel_profiler.hpp"
 #include "common/block_processing.hpp"
 #include "common/kernel_debug.hpp"
+#include "operations/pot_quantization/pot_range.hpp"
 #include "pot_scale_sfpu.hpp"
 
 // clang-format off
@@ -25,7 +26,8 @@
  * @brief Per-tensor power-of-two (PoT) symmetric quantization. The device computes the scaler.
  *
  * The formulas are:
- * - `Q = 2^(bit_width.bits() - 1) - 1`,
+ * - `Q = 2^m - 1` with `m` = 7, 15, 31 for 8, 16, 32 bits, or 30 for 32 bits with `m31_range` (see
+ *   operations/pot_quantization/pot_range.hpp),
  * - `k = max{k : absmax(x) * 2^k <= Q}`,
  * - `q = clamp(round_half_even(x * 2^k), -Q, Q)`.
  *
@@ -78,6 +80,8 @@
  * | 3     | `DST_TILES`     | 2 .. 4     | DST tiles used per section; the host passes `dst_tiles` (4)         |
  * | 4     | `use_fpu`       | 0          | Pass 2 multiplies on the SFPU: any input dtype                      |
  * |       |                 | 1          | Pass 2 multiplies on the FPU (`mul_tiles`): Float16_b input only    |
+ * | 5     | `m31_range`     | 0          | `Q = 2^(bit_width - 1) - 1`                                         |
+ * |       |                 | 1          | 32 bits capped at `Q = 2^30 - 1` (values map injectively into M31)  |
  *
  * **Runtime args**
  *
@@ -119,6 +123,9 @@ void kernel_main() {
     constexpr uint32_t absmax_dst_slots = DST_TILES;
     // Pass 2 (quantize) keeps the last DST slot for the scaler, unless the FPU multiplies: mul_tiles reads the
     // scaler from c_1 through SrcB, so no DST slot is needed for it.
+    constexpr zkml::prim::QuantRange range =
+        get_compile_time_arg_val(5) == 1 ? zkml::prim::QuantRange::M31 : zkml::prim::QuantRange::Full;
+    constexpr uint32_t magnitude_bits = zkml::prim::pot_magnitude_bits(bit_width, range);
     constexpr uint32_t quant_dst_slots = use_fpu ? DST_TILES : DST_TILES - 1;
     constexpr uint32_t out_ring_pages = 2 * quant_dst_slots;  // c_16 holds two blocks (see the host)
 
@@ -176,7 +183,7 @@ void kernel_main() {
     // broadcast, the pack and the per-tile copy.
     {
         DeviceZoneScopedN("SCALER");
-        MATH(zkml::sfpu::absmax_to_scaler<bit_width>(dst_scale));
+        MATH(zkml::sfpu::absmax_to_scaler<magnitude_bits>(dst_scale));
         DPRINT_MATH("Scaler in DST {}:\n", dst_scale);
         zkml::debug::print_dest_tile_rows(dst_scale, DataFormat::Float32, 0, 1);
         tile_regs_commit();
@@ -191,7 +198,7 @@ void kernel_main() {
     }
 
     // ---- Pass 2: quantize ----
-    if constexpr (bit_width == 8 && !use_fpu) {
+    if constexpr ((bit_width == 8 && !use_fpu)) {
         // Records the replay body and loads LREG constants, so it must come after pass 1.
         if constexpr (is_output_int8) {
             quant_int8_tile_init(zero_point_bits);
@@ -200,9 +207,9 @@ void kernel_main() {
         }
     }
     
-    // fp32 bit patterns of -Q and Q for the clamp for 16/32-bit scaler. 2^31 - 1 rounds to 2^31 in fp32; the
-    // fp32 -> int32 typecast saturates 2^31 to INT32_MAX, and |x * 2^k| <= Q keeps it unreachable.
-    constexpr float q_max = static_cast<float>((1ull << (bit_width - 1)) - 1);
+    // fp32 bit patterns of -Q and Q for the clamp for 16/32-bit scaler. 2^31 - 1 rounds to 2^31 in fp32 (2^30 - 1 to
+    // 2^30); the fp32 -> int32 typecast saturates 2^31 to INT32_MAX, and |x * 2^k| <= Q keeps the rounded bound unreachable.
+    constexpr float q_max = static_cast<float>(zkml::prim::pot_qmax(bit_width, range));
     constexpr uint32_t q_max_bits = __builtin_bit_cast(uint32_t, q_max);
     constexpr uint32_t q_min_bits = __builtin_bit_cast(uint32_t, -q_max);
     
@@ -237,7 +244,7 @@ void kernel_main() {
             copy_init(cb_scale_id);
             copy_tile(cb_scale_id, 0, dst_scale);  // once per block
         }
-        if constexpr (bit_width == 8 && !use_fpu) {
+        if constexpr ((bit_width == 8 && !use_fpu)) {
             for (uint32_t i = 0; i < n; i++) {
                 if constexpr (is_output_int8) {
                     // DST holds each result as its two's-complement byte: negative q prints as 256 + q.

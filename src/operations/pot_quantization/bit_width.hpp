@@ -7,12 +7,15 @@
 #include <cstdint>
 #include <tuple>
 
+#include "operations/pot_quantization/pot_range.hpp"
+
 namespace zkml::prim {
 
 /**
  * @brief Width of the quantized integers of a power-of-two (PoT) quantization.
  *
- * Quantized values lie in `[-Q, Q]` with `Q = 2^(width.bits() - 1) - 1`.
+ * Quantized values lie in `[-Q, Q]` with `Q = 2^(bits - 1) - 1` (127, 32767, 2^31 - 1), or with `QuantRange::M31`
+ * `Q = 2^30 - 1` at 32 bits (see pot_range.hpp).
  *
  * It behaves like an enum with the values `BitWidth::Bits8`, `BitWidth::Bits16` and `BitWidth::Bits32`,
  * but it is a class, because a C++ `enum class` cannot have member functions. Its only constructor
@@ -37,6 +40,9 @@ public:
 
     /// Number of bits: 8, 16 or 32.
     constexpr uint32_t bits() const { return value_; }
+
+    /// Largest quantized magnitude Q for the range: 127, 32767, and 2^31 - 1 (2^30 - 1 for QuantRange::M31).
+    constexpr int64_t qmax(QuantRange range = QuantRange::Full) const { return pot_qmax(value_, range); }
 
     constexpr bool operator==(const BitWidth&) const = default;
 

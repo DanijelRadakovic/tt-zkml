@@ -6,10 +6,11 @@
 // CPU reference. Handy with tt-metal's debug tools (see "Debugging" in README.md).
 //
 // Computes, with the scaler derived on the device from the data:
-//   Q = 2^(bits - 1) - 1,  k = max{k <= 127 : absmax(x) * 2^k <= Q},
+//   Q = 2^(bits - 1) - 1 (2^30 - 1 at 32 bits with --m31),  k = max{k <= 127 : absmax(x) * 2^k <= Q},
 //   q = clamp(round_half_even(x * 2^k), -Q, Q)
 //
-// Usage: zkml_pot_quant_per_tensor [bit_width ...]     bit widths 8, 16, 32 (default: all three)
+// Usage: zkml_pot_quant_per_tensor [--m31] [bit_width ...]     bit widths 8, 16, 32 (default: all three)
+//        --m31: QuantRange::M31, 32 bits capped at 2^30 - 1 (for pot_quant_m31); default: every bit
 //
 // TT_METAL_RUNTIME_ROOT defaults to the TT_METAL_HOME used at configure time; set it to override.
 
@@ -19,6 +20,7 @@
 #include <ttnn/tensor/tensor.hpp>
 #include <cmath>
 #include <optional>
+#include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -29,8 +31,9 @@ using namespace ttnn;
 using tt::tt_metal::DataType;
 using zkml::prim::BitWidth;
 using zkml::prim::ComputeUnit;
+using zkml::prim::QuantRange;
 
-static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width, ComputeUnit unit) {
+static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width, ComputeUnit unit, QuantRange range) {
     const uint32_t bit_count = width.bits();
     const uint32_t H = 64, W = 96;
     std::vector<float> data(H * W);
@@ -46,7 +49,7 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width,
     Tensor in = Tensor::from_vector(data, spec, dev);
     const std::vector<float> x = in.to_vector<float>();  // what the device sees (bf16 rounds)
 
-    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, 16, 2, unit);
+    auto [out, scaler] = zkml::prim::pot_quantize_per_tensor(in, width, out_dt, std::nullopt, 16, 2, unit, range);
     std::vector<int32_t> q;
     if (out_dt == DataType::INT8) {
         auto v = out.to_vector<int8_t>();
@@ -57,8 +60,8 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width,
     const float got_scaler = scaler.to_vector<float>().at(0);
 
     const float absmax = zkml::reference::absmax(x);
-    const int32_t k = zkml::reference::pot_k(absmax, bit_count);
-    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, bit_count);
+    const int32_t k = zkml::reference::pot_k(absmax, bit_count, range);
+    const std::vector<int32_t> ref = zkml::reference::pot_quantize(x, k, bit_count, range);
 
     size_t bad = 0;
     for (size_t i = 0; i < x.size(); i++) {
@@ -71,11 +74,12 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width,
     }
     const bool scaler_ok = got_scaler == std::ldexp(1.0f, k);
     std::printf(
-        "in=%s unit=%s out=%s bits=%u: absmax=%g, device scaler=%g (k=%g), reference k=%d%s, %zu/%zu mismatches\n",
+        "in=%s unit=%s out=%s bits=%u%s: absmax=%g, device scaler=%g (k=%g), reference k=%d%s, %zu/%zu mismatches\n",
         in_dt == DataType::FLOAT32 ? "f32" : "bf16",
         unit == ComputeUnit::Fpu ? "fpu" : "sfpu",
         out_dt == DataType::INT8 ? "int8" : "int32",
         bit_count,
+        range == QuantRange::M31 ? " (m31 range)" : "",
         absmax,
         got_scaler,
         std::log2(got_scaler),
@@ -88,7 +92,12 @@ static int run(MeshDevice* dev, DataType in_dt, DataType out_dt, BitWidth width,
 
 int main(int argc, char** argv) {
     std::vector<BitWidth> widths;
+    QuantRange range = QuantRange::Full;
     for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--m31") {
+            range = QuantRange::M31;
+            continue;
+        }
         const auto b = std::strtoul(argv[i], nullptr, 10);
         if (b != 8 && b != 16 && b != 32) {
             std::fprintf(stderr, "usage: %s [bit_width ...]   (bit widths: 8, 16, 32)\n", argv[0]);
@@ -114,9 +123,9 @@ int main(int argc, char** argv) {
         for (const Case c : {Case{DataType::FLOAT32, ComputeUnit::Sfpu},
                              Case{DataType::BFLOAT16, ComputeUnit::Sfpu},
                              Case{DataType::BFLOAT16, ComputeUnit::Fpu}}) {
-            fails += run(dev.get(), c.in_dt, DataType::INT32, width, c.unit);
+            fails += run(dev.get(), c.in_dt, DataType::INT32, width, c.unit, range);
             if (width == BitWidth::Bits8) {
-                fails += run(dev.get(), c.in_dt, DataType::INT8, width, c.unit);
+                fails += run(dev.get(), c.in_dt, DataType::INT8, width, c.unit, range);
             }
         }
     }
