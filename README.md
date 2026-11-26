@@ -36,6 +36,17 @@ cmake --build .build/default
 ctest --test-dir .build/default --output-on-failure
 ```
 
+## API documentation
+
+The doc comments in `src/` are turned into HTML by Doxygen (Graphviz adds the include graphs):
+
+```bash
+cmake --build .build/default --target docs
+xdg-open .build/default/docs/html/index.html
+```
+
+The `docs` target exists only when `doxygen` is installed. Write doc comments as `/** @brief ... @param ... */`.
+
 ## PoT per-tensor quantization
 
 `zkml::prim::pot_quantize_per_tensor(input, bit_width, output_dtype)` computes the scaler on the
@@ -52,6 +63,18 @@ The host program runs it for the given bit widths (default: 8 16 32):
 ```bash
 .build/default/zkml_pot_quant_per_tensor 8 16
 ```
+
+## NoC / DRAM microbenchmark
+
+`tools/noc_bench` measures DRAM latency per bank, core-to-core round-trip and one-way latency, and
+DRAM bandwidth for 1..all cores. It is the source of the chip-level numbers in
+`docs/typst/dataflow.typ`. Run one part or everything (all takes a few minutes):
+
+```bash
+.build/default/zkml_noc_bench bw          # all | bank | c2c | oneway | bw
+```
+
+Output is one line per measurement; the format is described at the top of `tools/noc_bench/noc_bench.cpp`.
 
 ## Debuggin
 
