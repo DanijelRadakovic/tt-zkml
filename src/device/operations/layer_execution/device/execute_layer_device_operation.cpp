@@ -26,13 +26,14 @@ void ExecuteLayerOperation::validate_on_program_cache_miss(
         TT_FATAL(t->buffer() != nullptr, "execute_layer: inputs must be allocated on device");
         TT_FATAL(t->layout() == Layout::TILE, "execute_layer: inputs must be in TILE layout");
         TT_FATAL(
-            t->dtype() == DataType::FLOAT32,
-            "execute_layer: inputs must be FLOAT32 (an Int8 circular buffer cannot share a program with a bf16 one), "
-            "got {}",
+            t->dtype() == DataType::FLOAT32 || t->dtype() == DataType::BFLOAT16,
+            "execute_layer: inputs must be FLOAT32 or BFLOAT16, got {}",
             t->dtype());
         TT_FATAL(!t->memory_config().is_sharded(), "execute_layer: sharded inputs are not supported");
         TT_FATAL(t->logical_shape().rank() == 2, "execute_layer: inputs must be 2-D");
     }
+    TT_FATAL(
+        x.dtype() == w.dtype(), "execute_layer: x and w must have the same dtype, got {} and {}", x.dtype(), w.dtype());
     TT_FATAL(!attributes.output_memory_config.is_sharded(), "execute_layer: sharded output is not supported");
     const auto m = x.logical_shape()[0], k = x.logical_shape()[1];
     const auto k2 = w.logical_shape()[0], n = w.logical_shape()[1];

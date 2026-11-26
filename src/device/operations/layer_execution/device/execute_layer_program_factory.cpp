@@ -34,6 +34,12 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
     Program program{};
     const CoreCoord core{0, 0};
 
+    // fp32 or bf16 inputs. bf16 is a B-exponent format, which the JIT refuses to combine with an Int8 CB, so the quantized
+    // bytes then go to UInt8 CBs (exempt from the check; the FPU reads a UInt8 CB as Int8) with the UInt8 packer.
+    const bool fp32_in = x.dtype() == DataType::FLOAT32;
+    const DataFormat in_format = fp32_in ? DataFormat::Float32 : DataFormat::Float16_b;
+    const DataFormat q_format = fp32_in ? DataFormat::Int8 : DataFormat::UInt8;
+    const uint32_t in_bytes = tt::tile_size(in_format);
     const uint32_t f32_bytes = tt::tile_size(DataFormat::Float32);
     const uint32_t i32_bytes = tt::tile_size(DataFormat::Int32);
     const uint32_t u8_bytes = tt::tile_size(DataFormat::UInt8);
@@ -52,8 +58,8 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
 
     // In the order the program creates them (the check repeats tt-metal's placement).
     const std::vector<zkml::common::CbSpec> cbs = {
-        {c_x, Mt * Kt, f32_bytes},
-        {c_w, Kt * Nt, f32_bytes},
+        {c_x, Mt * Kt, in_bytes},
+        {c_w, Kt * Nt, in_bytes},
         {c_qx, Mt * Kt, u8_bytes},
         {c_qw, Kt * Nt, u8_bytes},
         {c_acc, Mt * Nt, i32_bytes},
@@ -71,10 +77,10 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
             core,
             CircularBufferConfig(pages * page_bytes, {{index, format}}).set_page_size(index, page_bytes));
     };
-    create_cb(c_x, Mt * Kt, f32_bytes, DataFormat::Float32);
-    create_cb(c_w, Kt * Nt, f32_bytes, DataFormat::Float32);
-    create_cb(c_qx, Mt * Kt, u8_bytes, DataFormat::Int8);  // written by the Int8 packer, read by the FPU
-    create_cb(c_qw, Kt * Nt, u8_bytes, DataFormat::Int8);
+    create_cb(c_x, Mt * Kt, in_bytes, in_format);
+    create_cb(c_w, Kt * Nt, in_bytes, in_format);
+    create_cb(c_qx, Mt * Kt, u8_bytes, q_format);  // written by the packer, read by the FPU
+    create_cb(c_qw, Kt * Nt, u8_bytes, q_format);
     create_cb(c_acc, Mt * Nt, i32_bytes, DataFormat::Int32);
     create_cb(c_out, out_cb_pages, u8_bytes, DataFormat::UInt8);
     create_cb(c_scale_x, 1, f32_bytes, DataFormat::Float32);
@@ -100,7 +106,9 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
     // fp32 DST: the int32 accumulator of the FPU and the fp32 SFPU work. Float32 CBs go to DST at full precision.
     std::vector<UnpackToDestMode> unpack_to_dest_mode(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
     for (uint32_t cb : {c_x, c_w, c_acc}) {
-        unpack_to_dest_mode[cb] = UnpackToDestMode::UnpackToDestFp32;
+        if (cb == c_acc || fp32_in) {
+            unpack_to_dest_mode[cb] = UnpackToDestMode::UnpackToDestFp32;
+        }
     }
     CreateKernel(
         program,
@@ -111,8 +119,8 @@ ExecuteLayerOperation::SingleCore::cached_program_t ExecuteLayerOperation::Singl
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack_to_dest_mode),
             .math_approx_mode = false,
-            // Mt, Kt, Nt, c_16 pages, activation
-            .compile_args = {Mt, Kt, Nt, out_cb_pages, static_cast<uint32_t>(attributes.activation)},
+            // Mt, Kt, Nt, c_16 pages, activation, fp32 input
+            .compile_args = {Mt, Kt, Nt, out_cb_pages, static_cast<uint32_t>(attributes.activation), fp32_in ? 1u : 0u},
             .compiler_include_paths = {kernel_include_dir()},
         });
 

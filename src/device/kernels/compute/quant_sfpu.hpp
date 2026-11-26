@@ -155,6 +155,53 @@ inline void quant_sm8_face(const uint dst_index_in0, const uint dst_index_in1, c
 #undef ZKML_QSM8_FINISH
 }
 
+// Sign-magnitude int8 for the UInt8 packer (which writes the low byte of the int32, saturating outside [0, 255]): the same n, then
+// the byte |n| | ((n >>> 24) & 0x80), 8 instructions per 4 rows x 8 lanes (software pipelined like quant_sm8). The UInt8 format is
+// exempt from the JIT's exponent-family check, so this is the one to use with a bf16 input buffer; the FPU reads a UInt8 buffer as
+// Int8 (the LLK maps UInt8 to the unpacker's INT8 format, and INT8 math is enabled for it).
+inline void quant_smu8_constants() {
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, RNE_MAGIC_BITS);
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG2, 0u - RNE_MAGIC_BITS);
+    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG3, INT8_BYTE_SIGN);
+}
+
+template <int ITERATIONS = 8>
+inline void quant_smu8_face(const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
+    static_assert(ITERATIONS == 8, "unrolled by hand in pairs");
+    constexpr std::uint32_t dst_tile_size = 64;
+    const std::uint32_t in_off = dst_index_in0 * dst_tile_size;
+    const std::uint32_t out_off = dst_index_out * dst_tile_size;
+    (void)dst_index_in1;
+#define ZKML_QSMU8_LOAD(R, d)                                                                        \
+    TT_SFPLOAD(R, InstrModLoadStore::FP32, ADDR_MOD_7, in_off + 2 * (d));                            \
+    TTI_SFPMAD(R, SCALE_LREG_ID, p_sfpu::LREG5, R, 0)
+#define ZKML_QSMU8_FINISH(Q, d)                                                                      \
+    TTI_SFPIADD(0, p_sfpu::LREG2, Q, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);  \
+    TTI_SFPCAST(Q, p_sfpu::LREG4, sfpi::SFPCAST_MOD1_INT32_ABS);                                     \
+    TTI_SFPSHFT((-24) & 0xfff, Q, Q, 1);                                                             \
+    TTI_SFPAND(0, p_sfpu::LREG3, Q, 0);                                                              \
+    TTI_SFPOR(0, p_sfpu::LREG4, Q, 0);                                                               \
+    TT_SFPSTORE(Q, InstrModLoadStore::INT32_2S_COMP, ADDR_MOD_7, out_off + 2 * (d))
+    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 0);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 1);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 0);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 2);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 1);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 3);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 2);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 4);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 3);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 5);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 4);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG0, 6);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 5);
+    ZKML_QSMU8_LOAD(p_sfpu::LREG1, 7);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG0, 6);
+    ZKML_QSMU8_FINISH(p_sfpu::LREG1, 7);
+#undef ZKML_QSMU8_LOAD
+#undef ZKML_QSMU8_FINISH
+}
+
 // One face of a tile: 8 iterations of 4 rows x 8 lanes, SFPI code (the conditionals need the condition codes).
 template <int ITERATIONS = 8>
 inline void quant32_face() {
@@ -207,6 +254,14 @@ inline void quant_sm8_init() { ckernel::llk_math_eltwise_binary_sfpu_init<SfpuTy
 inline void quant_sm8_tile(uint32_t idst) {
     ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
     _llk_math_eltwise_binary_sfpu_params_(quant_sm8_face<8>, idst, idst, idst, VectorMode::RC);
+}
+
+// Once, after absmax_to_scaler() and before the first quant_smu8_tile(). The output tile goes to a CB of format UInt8.
+inline void quant_smu8_init() { ckernel::llk_math_eltwise_binary_sfpu_init<SfpuType::quant_int32>(quant_smu8_constants); }
+
+inline void quant_smu8_tile(uint32_t idst) {
+    ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
+    _llk_math_eltwise_binary_sfpu_params_(quant_smu8_face<8>, idst, idst, idst, VectorMode::RC);
 }
 
 // Once, after absmax_to_scaler() and before the first quant32_tile().

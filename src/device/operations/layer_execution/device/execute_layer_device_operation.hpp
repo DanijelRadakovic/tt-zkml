@@ -60,7 +60,7 @@ struct ExecuteLayerOperation {
 
     /// A fp32 DST (fp32_dest_acc_en) with half sync holds 4 tiles.
     static constexpr uint32_t dst_tiles = 4;
-    /// Largest K in tiles: |acc| <= K * 127 * 127 stays below 2^24, so the int32 -> fp32 conversion is exact.
+    /// Largest K in tiles: K * 127 * 127 stays below 2^30 (31 magnitude bits of the accumulator).
     static constexpr uint32_t max_k_tiles = 2080;
 
     static program_factory_t select_program_factory(const operation_attributes_t&, const tensor_args_t&);

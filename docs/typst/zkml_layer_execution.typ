@@ -362,7 +362,20 @@ One core, device profiler cycles at 1.35 GHz, $x$ of $128 times 256$, $W$ of $25
 
 The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up. The activation sweep does not overlap with the matmul of the next block.
 
-Not covered by this operation yet: more than one core, a pre-quantized weight input, `q_x` and `q_w` as outputs, bf16/fp16 inputs (an Int8 buffer cannot share a program with a bf16 one), and activations other than ReLU.
+== Input types: fp32 and bf16
+
+`x` and `W` may be fp32 or bf16 (both the same; fp16 is not supported). The JIT refuses to build a program with an Int8 circular buffer and a bf16 one (different exponent families), so for bf16 the quantized bytes go to UInt8 buffers (exempt from that check) written by the UInt8 packer, which needs 3 more SFPU instructions per row than the single `SFPCAST` of the Int8 packer (8 instead of 5 per 4 rows $times$ 8 lanes). The unpacker reads a UInt8 buffer as unsigned bytes, so before the matmul the two source registers are configured for the Int8 format by hand (the registers `reconfig_data_format` writes for an Int8 buffer, which also enables the INT8 math); after that the FPU reads the sign-magnitude bytes as usual. bf16 tiles are half the size, so the unpack of a tile is cheaper and the call is faster in spite of the longer kernel:
+
+#align(center)[#text(size: 8.5pt)[#table(columns: 4, inset: 4pt, stroke: 0.4pt + luma(170), align: (left, right, right, right),
+  [*Mt,Kt,Nt (ReLU)*], [*fp32 sum of zones*], [*bf16 sum of zones*], [*host time per call fp32 / bf16*],
+  [4, 8, 4], [59438], [52014], [46.5 / 40.4 µs],
+  [4, 16, 4], [105834], [91308], [80.5 / 69.6 µs],
+  [2, 32, 2], [89840], [75422], [69.3 / 57.8 µs]
+)]]
+
+The outputs are identical in format for both input types (`out`, `acc`, the scalers are fp32 and the same). The tests compare both against the same host model, with the inputs rounded to bf16 for the bf16 cases.
+
+Not covered by this operation yet: more than one core, a pre-quantized weight input, `q_x` and `q_w` as outputs, fp16 inputs, mixed dtypes of `x` and `W`, and activations other than ReLU.
 
 = Trace the host builds and its constraints
 

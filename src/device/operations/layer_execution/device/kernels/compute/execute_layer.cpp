@@ -42,7 +42,8 @@
  * | `c_16`          | UInt8                   | out tiles, a ring                                        |
  * | `c_17`..`c_19`  | Float32                 | scaler tiles of x, W and the requantization              |
  *
- * **Compile-time args**: `[0]` Mt, `[1]` Kt, `[2]` Nt, `[3]` out ring pages, `[4]` activation (0 none, 1 ReLU).
+ * **Compile-time args**: `[0]` Mt, `[1]` Kt, `[2]` Nt, `[3]` out ring pages, `[4]` activation (0 none, 1 ReLU), `[5]` 1 for fp32
+ * input, 0 for bf16.
  * @pre  The program enables `fp32_dest_acc_en`, HiFi4. Float32 CBs use `UnpackToDestFp32`. Kt <= 2080.
  * @note Between `absmax_to_scaler` and the last quantize sweep of a tensor nothing may use LReg7 (quant_sfpu.hpp).
  */
@@ -97,14 +98,17 @@ ALWI void scale_pass(uint32_t tiles) {
 // Pass 2: quantize the `tiles` resident tiles of `cb_in` with the scaler in LReg7 into sign-magnitude bytes in
 // `cb_out`, a ring of `out_pages` pages (the whole tensor for q_x and q_w). With `acc_in` the tiles are the raw
 // sign-magnitude int32 accumulator and the integer requantizer runs instead (k in LReg7, max(0, .) when `relu`).
-template <uint32_t cb_in, uint32_t cb_out, bool acc_in = false, bool relu = false>
+// `fp32_in`: the input is fp32 and cb_out an Int8 CB (SFPCAST + Int8 packer); otherwise (bf16) cb_out is UInt8.
+template <uint32_t cb_in, uint32_t cb_out, bool acc_in = false, bool relu = false, bool fp32_in = true>
 ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     CircularBuffer in(cb_in), out(cb_out);
     reconfig_data_format_srca(cb_in);
     if constexpr (acc_in) {
         MATH((zkml::sfpu::requant_init<relu>()));
-    } else {
+    } else if constexpr (fp32_in) {
         MATH((zkml::sfpu::quant_sm8_init()));
+    } else {
+        MATH((zkml::sfpu::quant_smu8_init()));
     }
     copy_init(cb_in);
     pack_reconfig_data_format(cb_out);
@@ -120,8 +124,10 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
         for (uint32_t i = 0; i < n; i++) {
             if constexpr (acc_in) {
                 MATH((zkml::sfpu::requant_tile<relu>(i)));
-            } else {
+            } else if constexpr (fp32_in) {
                 MATH((zkml::sfpu::quant_sm8_tile(i)));
+            } else {
+                MATH((zkml::sfpu::quant_smu8_tile(i)));
             }
         }
         tile_regs_commit();
@@ -135,12 +141,29 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
     }
 }
 
+// bf16 input: q_x and q_w live in UInt8 circular buffers (an Int8 one cannot share a program with the bf16 input buffer). The
+// unpacker treats a UInt8 buffer as unsigned (SrcAUnsigned) and the data as plain bytes, but the quantizer wrote sign-magnitude
+// bytes, which is what the FPU's Int8 format is. So srcA and srcB are configured for Int8 by hand, with the geometry of the
+// buffers: the same registers `reconfig_data_format` writes for an Int8 buffer, which also enables the INT8 math.
+ALWI void reconfig_int8_view(uint32_t cb_srca, uint32_t cb_srcb) {
+    constexpr uint32_t i8 = static_cast<uint32_t>(DataFormat::Int8);
+    UNPACK(({
+        const uint32_t a = get_operand_id(cb_srca), b = get_operand_id(cb_srcb);
+        _llk_unpack_reconfig_data_format_srca_impl_<DST_ACCUM_MODE, p_dim_stride_target::IGNORE, false>(
+            i8, i8, get_local_cb_interface(a).fifo_page_size, get_operand_face_r_dim(a), get_operand_num_faces(a));
+        _llk_unpack_reconfig_data_format_srcb_impl_<DST_ACCUM_MODE, p_dim_stride_target::IGNORE, false>(
+            i8, i8, get_local_cb_interface(b).fifo_page_size, get_operand_face_r_dim(b), get_operand_num_faces(b));
+    }));
+    MATH((_llk_math_reconfig_data_format_<DST_ACCUM_MODE, false>(i8, i8)));
+}
+
 void kernel_main() {
     constexpr uint32_t Mt = get_compile_time_arg_val(0);
     constexpr uint32_t Kt = get_compile_time_arg_val(1);
     constexpr uint32_t Nt = get_compile_time_arg_val(2);
     constexpr uint32_t out_pages = get_compile_time_arg_val(3);
     constexpr bool relu = get_compile_time_arg_val(4) == 1;
+    constexpr bool fp32_in = get_compile_time_arg_val(5) == 1;
     static_assert(Kt <= 2080, "K must be at most 66560: K * 127 * 127 must stay below 2^30 (31 magnitude bits)");
 
     CircularBuffer qx(c_qx), qw(c_qw), acc(c_acc);
@@ -151,12 +174,12 @@ void kernel_main() {
     {
         DeviceZoneScopedN("QUANT_X");
         scale_pass<c_x, c_scale_x>(Mt * Kt);
-        quant_pass<c_x, c_qx>(Mt * Kt, Mt * Kt);
+        quant_pass<c_x, c_qx, false, false, fp32_in>(Mt * Kt, Mt * Kt);
     }
     {
         DeviceZoneScopedN("QUANT_W");
         scale_pass<c_w, c_scale_w>(Kt * Nt);
-        quant_pass<c_w, c_qw>(Kt * Nt, Kt * Nt);
+        quant_pass<c_w, c_qw, false, false, fp32_in>(Kt * Nt, Kt * Nt);
     }
 
     // ---- matmul (FPU, int8 -> int32); SFPU: integer absmax of the activated accumulator; pack int32 ----
@@ -164,7 +187,11 @@ void kernel_main() {
     qw.wait_front(Kt * Nt);
     {
         DeviceZoneScopedN("MATMUL");
-        reconfig_data_format<SrcOrder::Reverse>(c_qx, c_qw);  // in0 -> SrcB, in1 -> SrcA; turns the INT8 math on
+        if constexpr (fp32_in) {
+            reconfig_data_format<SrcOrder::Reverse>(c_qx, c_qw);  // in0 -> SrcB, in1 -> SrcA; turns the INT8 math on
+        } else {
+            reconfig_int8_view(c_qw, c_qx);  // srcA = q_w, srcB = q_x
+        }
         pack_reconfig_data_format(c_acc);
         MATH(zkml::sfpu::absmax_init());  // LReg7 = 0
         constexpr uint32_t out_tiles = Mt * Nt;

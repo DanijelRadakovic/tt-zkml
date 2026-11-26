@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -104,6 +105,18 @@ std::vector<float> uniform(size_t n, uint32_t seed, float lo, float hi) {
     return v;
 }
 
+// float -> bf16 (round to nearest even) -> float: the values the device sees when the input tensor is bf16.
+std::vector<float> round_bf16(std::vector<float> v) {
+    for (auto& f : v) {
+        uint32_t b;
+        std::memcpy(&b, &f, 4);
+        b += 0x7FFF + ((b >> 16) & 1);
+        b &= 0xFFFF0000u;
+        std::memcpy(&f, &b, 4);
+    }
+    return v;
+}
+
 class ExecuteLayer : public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
@@ -116,21 +129,25 @@ protected:
     }
     static MeshDevice* dev() { return device_.get(); }
     static inline std::shared_ptr<MeshDevice> device_;
+    // The dtype of x and w in `run`; with BFLOAT16 the inputs are first rounded to bf16 (the host model sees the same values).
+    static inline DataType dtype_ = DataType::FLOAT32;
 
     // Runs one case and compares with the host model. Returns the number of wrong output bytes.
     static size_t run(
         const std::string& label,
-        const std::vector<float>& x,
-        const std::vector<float>& w,
+        const std::vector<float>& x_in,
+        const std::vector<float>& w_in,
         uint32_t M,
         uint32_t K,
         uint32_t N,
         Activation act,
         bool verbose = true) {
+        const bool bf16 = dtype_ == DataType::BFLOAT16;
+        const std::vector<float> x = bf16 ? round_bf16(x_in) : x_in, w = bf16 ? round_bf16(w_in) : w_in;
         auto spec = [&](uint32_t h, uint32_t wd) {
             return tt::tt_metal::TensorSpec(
                 Shape({h, wd}),
-                tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+                tt::tt_metal::TensorLayout(dtype_, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
         };
         Tensor tx = Tensor::from_vector(x, spec(M, K), dev());
         Tensor tw = Tensor::from_vector(w, spec(K, N), dev());
@@ -292,4 +309,76 @@ TEST_F(ExecuteLayer, ProgramCache) {
     EXPECT_EQ(dev()->num_program_cache_entries(), entries);
     run("other activation: a new program", x, w, M, K, N, Activation::None, false);
     EXPECT_EQ(dev()->num_program_cache_entries(), entries + 1);
+}
+
+// bf16 inputs: quantized through UInt8 circular buffers (an Int8 one cannot share a program with a bf16 one).
+class ExecuteLayerBf16 : public ExecuteLayer {
+protected:
+    void SetUp() override { dtype_ = DataType::BFLOAT16; }
+    void TearDown() override { dtype_ = DataType::FLOAT32; }
+};
+
+TEST_F(ExecuteLayerBf16, SingleTile) {
+    const uint32_t M = 32, K = 32, N = 32;
+    for (Activation act : {Activation::None, Activation::ReLU}) {
+        run("bf16 one tile",
+            uniform(static_cast<size_t>(M) * K, 61, -2.f, 2.f),
+            uniform(static_cast<size_t>(K) * N, 62, -2.f, 2.f),
+            M,
+            K,
+            N,
+            act);
+    }
+}
+
+TEST_F(ExecuteLayerBf16, Shapes) {
+    struct S {
+        uint32_t M, K, N;
+    };
+    for (const S s : {S{32, 64, 32}, S{64, 96, 64}, S{96, 64, 160}, S{160, 32, 32}, S{64, 256, 64}}) {
+        for (Activation act : {Activation::None, Activation::ReLU}) {
+            run("bf16 shape",
+                uniform(static_cast<size_t>(s.M) * s.K, 63, -3.f, 3.f),
+                uniform(static_cast<size_t>(s.K) * s.N, 64, -1.f, 1.f),
+                s.M,
+                s.K,
+                s.N,
+                act);
+        }
+    }
+}
+
+TEST_F(ExecuteLayerBf16, QuantizationTies) {
+    // The same exact half-integers and tiny negatives as the fp32 test; all of them are exact in bf16 (m / 64 with |m| <= 254).
+    const uint32_t M = 32, K = 64, N = 32;
+    auto make = [](size_t n, int salt) {
+        std::vector<float> v(n);
+        for (size_t i = 0; i < n; i++) {
+            v[i] = static_cast<float>(static_cast<int>((i * 37 + salt) % 509) - 254) / 64.0f;
+        }
+        v[0] = 127.0f / 32.0f;
+        v[1] = -1.0f / 1024.0f;
+        v[2] = -1.0f / 128.0f;
+        return v;
+    };
+    for (Activation act : {Activation::None, Activation::ReLU}) {
+        run("bf16 ties", make(static_cast<size_t>(M) * K, 3), make(static_cast<size_t>(K) * N, 11), M, K, N, act);
+    }
+}
+
+TEST_F(ExecuteLayerBf16, VeryLongK) {
+    const uint32_t M = 32, K = 2048, N = 32;
+    std::vector<float> x(static_cast<size_t>(M) * K, 1.0f), w(static_cast<size_t>(K) * N, 1.0f);
+    run("bf16 all ones, K = 2048", x, w, M, K, N, Activation::ReLU);
+}
+
+TEST_F(ExecuteLayerBf16, MixedDtypeRejected) {
+    const uint32_t M = 32, K = 32, N = 32;
+    auto spec = [&](uint32_t h, uint32_t wd, DataType t) {
+        return tt::tt_metal::TensorSpec(
+            Shape({h, wd}), tt::tt_metal::TensorLayout(t, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+    };
+    Tensor tx = Tensor::from_vector(std::vector<float>(M * K, 1.0f), spec(M, K, DataType::BFLOAT16), dev());
+    Tensor tw = Tensor::from_vector(std::vector<float>(K * N, 1.0f), spec(K, N, DataType::FLOAT32), dev());
+    EXPECT_ANY_THROW(zkml::prim::execute_layer(tx, tw, Activation::ReLU));
 }

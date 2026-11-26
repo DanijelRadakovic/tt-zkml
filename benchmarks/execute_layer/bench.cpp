@@ -7,6 +7,7 @@
 //   zkml_execute_layer_bench profile <Mt> <Kt> <Nt> <relu|none> <iters>   run `iters` times; run with
 //                                                                       TT_METAL_DEVICE_PROFILER=1 and analyze.py
 //   zkml_execute_layer_bench wall    <Mt> <Kt> <Nt> <relu|none> <iters>   host time per call, program cache warm
+// ZKML_DTYPE=bf16 selects bf16 inputs (default fp32).
 // Mt, Kt, Nt are the sizes in tiles of 32: x is (32 Mt) x (32 Kt), w is (32 Kt) x (32 Nt).
 
 #include <algorithm>
@@ -51,10 +52,13 @@ int main(int argc, char** argv) {
     for (auto& v : w) {
         v = d(rng);
     }
+    // ZKML_DTYPE=bf16 runs the op with bf16 inputs (default fp32)
+    const char* dt = std::getenv("ZKML_DTYPE");
+    const DataType dtype = (dt && std::string(dt) == "bf16") ? DataType::BFLOAT16 : DataType::FLOAT32;
     auto spec = [&](uint32_t h, uint32_t wd) {
         return tt::tt_metal::TensorSpec(
             Shape({h, wd}),
-            tt::tt_metal::TensorLayout(DataType::FLOAT32, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
+            tt::tt_metal::TensorLayout(dtype, tt::tt_metal::PageConfig(Layout::TILE), MemoryConfig{}));
     };
     Tensor tx = Tensor::from_vector(x, spec(M, K), dev.get());
     Tensor tw = Tensor::from_vector(w, spec(K, N), dev.get());
