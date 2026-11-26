@@ -360,7 +360,7 @@ One core, device profiler cycles at 1.35 GHz, $x$ of $128 times 256$, $W$ of $25
   [host time per call (cached program)], [62.5 µs], [39.8 µs], [−36%]
 )]]
 
-The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up, and pass 1 (the absmax) is bound by `SFPSWAP` (about 3 cycles each, 48 per tile), which `SFPLOADMACRO` cannot speed up: a swap keeps the SFPU's simple sub-unit busy for 2 cycles and a scheduled instruction that lands on the cycle after it is lost. The activation sweep does not overlap with the matmul of the next block.
+The matmul itself is about 8500 of the 10755 cycles of its zone. What remains is mostly the two quantizations: `copy_tile` of an fp32 tile (about 184 cycles) and the SFPU instructions run on the same thread and add up, and pass 1 (the absmax) is bound by `SFPSWAP` (about 3 cycles each, 48 per tile), which `SFPLOADMACRO` cannot speed up: a swap keeps the SFPU's simple sub-unit busy for 2 cycles and a scheduled instruction that lands on the cycle after it is lost. The activation sweep does not overlap with the matmul of the next block. The requantize sweep (about 10 cycles per 4 rows $times$ 8 lanes) is bound by the one-instruction-per-cycle simple sub-unit of the SFPU, which also rules out `SFPLOADMACRO` there: a macro can hide only the load, the store and one simple instruction, and its delay field reaches at most 8 cycles, shorter than the 9 to 11 instruction chain of a row.
 
 == Input types: fp32 and bf16
 

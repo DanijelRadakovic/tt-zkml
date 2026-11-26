@@ -1,0 +1,8 @@
+# REQUANT zone at 4,8,4 (16 accumulator tiles), sm_int variant, cycles (analyze.py: QUANT_X QUANT_W MATMUL REQUANT QX_P1 QX_P2)
+# ZKML_QLM=1; ZKML_QMODE=4 removes the requantization SFPU sweep (copy_tile + pack + the scaler step remain)
+relu qmode 0: 17042 15219 10756 8403 10255 7085
+relu qmode 4: 16999 15213 10752 3366 10196 7089
+none qmode 0: 17017 15221 11412 9441 10233 7080
+none qmode 4: 17014 15215 11405 3536 10229 7085
+# SFPU sweep only: relu 8403 - 3366 = 5037 cycles = 315 per tile = 9.8 per 4 rows x 8 lanes (11 instructions)
+#                  none 9441 - 3536 = 5905 cycles = 369 per tile = 11.5 per 4 rows x 8 lanes (13 instructions)
