@@ -1,0 +1,7 @@
+2026-11-19 19:24:47.693 | critical |          Always | TT_FATAL: All input data-formats must have the same exponent format. (assert.hpp:104)
+2026-11-19 19:24:47.694 | critical |          Always | TT_FATAL: All input data-formats must have the same exponent format. (assert.hpp:104)
+2026-11-19 19:24:47.695 | critical |          Always | TT_THROW: Failed to generate binaries for compute TT_FATAL @ /proj_sw/user_dev/ctr-dradakovic/tt-metal/tt_metal/jit_build/data_format.cpp:89: is_exp_b_format(format) == is_exp_b_format(last_valid
+2026-11-19 19:24:47.696 | critical |          Always | TT_THROW: Failed to generate binaries for writer TT_FATAL @ /proj_sw/user_dev/ctr-dradakovic/tt-metal/tt_metal/jit_build/data_format.cpp:89: is_exp_b_format(format) == is_exp_b_format(last_valid_
+2026-11-19 19:24:47.711 | critical |          Always | TT_THROW: Failed to generate binaries for reader TT_FATAL @ /proj_sw/user_dev/ctr-dradakovic/tt-metal/tt_metal/jit_build/data_format.cpp:89: is_exp_b_format(format) == is_exp_b_format(last_valid_
+Failed to generate binaries for compute TT_FATAL @ /proj_sw/user_dev/ctr-dradakovic/tt-metal/tt_metal/jit_build/data_format.cpp:89: is_exp_b_format(format) == is_exp_b_format(last_valid_format)
+exit code 134
