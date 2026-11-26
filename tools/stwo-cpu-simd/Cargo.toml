@@ -1,0 +1,17 @@
+[package]
+name = "zkml-stwo-cpu-simd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "CPU and SIMD reference of the PoT quantization trace (quantized tensor, remainder, argmax, M31 column), with a benchmark"
+
+[dependencies]
+# The M31 field and the SIMD column types of the stwo prover (the repository that replaced starkware-libs/stwo).
+stwo = { git = "https://github.com/starkware-libs/proving", rev = "c87ea10db87a3de13c8633f5d44ede1df62299bc", default-features = false, features = ["std", "prover", "parallel"] }
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false

@@ -104,7 +104,8 @@ Both are per core-run (one single-core quantization of 1024 tiles).
 **Columns.**
 - `input`: element type of the tensor read from DRAM (BFLOAT16, 2 bytes per element, on both units).
 - `bits`: the `bit_width` of the operation = the width of the quantized integers. `Q = 2^(bits-1) - 1` (127, 32767,
-  2147483647 for 8, 16, 32). The scaler `2^k` is the largest power of two with `absmax * 2^k <= Q`, so every output
+  2147483647 for 8, 16, 32; the operation has since got an optional `QuantRange::M31` that caps the 32-bit `Q` at
+  2^30 - 1, which changes no instruction count of the kernel). The scaler `2^k` is the largest power of two with `absmax * 2^k <= Q`, so every output
   value lies in `[-Q, Q]`. It is neither the input size nor the output container size.
 - `out`: dtype of the quantized output tensor. INT32 (4 bytes per element) works for any `bits`; INT8 (1 byte per
   element, so a 1 KB output tile instead of 4 KB) only for `bits = 8`. For example `bits 32, out int32` quantizes to

@@ -53,7 +53,7 @@ The `docs` target exists only when `doxygen` is installed. Write doc comments as
 device from the data and returns `(quantized, scaler)`:
 
 ```
-Q = 2^(bit_width - 1) - 1          bit_width: 8, 16 or 32
+Q = 2^(bit_width - 1) - 1          bit_width: 8, 16 or 32     (QuantRange::M31: 32 bits capped at 2^30 - 1, see below)
 k = max{k <= 127 : absmax(x) * 2^k <= Q}
 q = clamp(round_half_even(x * 2^k), -Q, Q)      scaler = 2^k, so x ~= q / scaler
 ```
@@ -68,6 +68,55 @@ The host program runs it for the given bit widths (default: 8 16 32), BFLOAT16 o
 `Auto`, uses the FPU for BFLOAT16 input at 16 and 32 bits (about 10 % faster and 9 % less energy, bit-identical result)
 and the SFPU otherwise (at 8 bits the FPU would be 2.3x slower). The absmax of pass 1 always runs on the SFPU: the FPU
 has no abs and no min. Measurements: `tools/quant_tensor_fpu_vs_sfpu/README.md`.
+
+### M31 and the witness for the stwo prover
+
+`zkml::prim::pot_quant_m31(q)` maps a quantized tensor into the field M31 (`p = 2^31 - 1`): INT32 or INT8 in, UINT32
+residues `q mod p` in `[0, p)` out (`q >= 0` stays, `q < 0` becomes `p + q`). It is a separate operation, so the quantizer
+stays field-agnostic.
+
+**The range of `q` (`QuantRange`).** By default (`QuantRange::Full`) the quantizer uses every bit, `Q = 2^(bits - 1) - 1`
+(2^31 - 1 at 32 bits), so the result can be mapped into any field later. That is too large for M31: with `Q = p` the
+values `-p`, `0` and `p` are all the field element 0, and a signed value could not be read back from a residue. A
+quantization that goes through `pot_quant_m31` must therefore pass `QuantRange::M31`, which caps 32 bits at
+`Q = 2^30 - 1 <= (p - 1) / 2` (8 and 16 bits are the same in both). Then the map is injective and
+`m <= (p - 1) / 2 ? m : m - p` recovers `q`. The price is one bit of precision at 32 bits. A two-limb
+representation (e.g. 16 + 16 bits, each range-checked) would keep all 32 bits; it is not implemented. The device
+cannot check the range of the tensor it is given, so `pot_quant_m31` trusts the caller (the test `FullRangeDoesNotFitM31`
+shows what goes wrong otherwise).
+
+```cpp
+auto [q, scaler] = zkml::prim::pot_quantize_per_tensor(x, BitWidth::Bits32, DataType::INT32, std::nullopt, 16, 2,
+                                                       ComputeUnit::Auto, QuantRange::M31);
+ttnn::Tensor m31 = zkml::prim::pot_quant_m31(q);
+```
+
+**What the prover has to check.** Without any of these a prover can cheat:
+1. `x * 2^k = q + remainder` for every element, `|remainder| <= 1/2`, and `|remainder| = 1/2` only if `q` is even (round
+   half to even). Without it `q` is not tied to `x`: a prover can pick any `q` (a floor instead of a round to bias
+   borderline values, or values unrelated to `x`).
+2. `|q| <= Q` for every element, by a range check. In M31 every `q` is just a field element, so without it a prover can claim
+   `q = 400` for an int8 weight, or `p - 5` for `-5` and let a later step read a huge positive number.
+3. `|x[argmax]| * 2^(k+1) > Q` for one element `argmax`, unless `k = 127` (capped: all-zero or tiny input). Without it `k`
+   could be any smaller exponent: a valid but coarser quantization (a prover that wants a different model output picks
+   `k - 5` and every weight collapses to 0 or +-1), since `|q| <= Q` alone does not pin `k`. The clamp never fires for an
+   honest `k` (`absmax * 2^k <= Q`), so condition 2 replaces the clamp.
+
+**Who builds the witness: the host.** The device returns `q` and `2^k` (and, through `pot_quant_m31`, the residues). The
+remainder `x * 2^k - q` and the argmax are functions of `(x, q, k)`, which the host has anyway because `x` and `q` are columns
+of the trace. The host derives them: measured, the remainder and the argmax cost 0.1 to 0.4 ns per element on one CPU thread (the other
+columns, the sign, significand and exponent of `x`, the shift and the limbs of the range checks, are not built or measured
+yet), and a wrong witness cannot be accepted because the constraints check it. Doing it on the device was built and measured (4.4 to 11 times the cost of the quantization itself, mostly an argmax
+scan on a RISC-V core) and then removed: the expanded trace is about 20 columns, 80 bytes per element, against 2 bytes of
+bf16 input, so it should cross PCIe as raw values, not as columns. It would make sense on the device only if the prover or a
+later M31 step ran there.
+
+`tools/stwo-cpu-simd` is the Rust crate that does this on the CPU (a scalar oracle and a `std::simd` version that fills stwo's
+own `BaseColumn`), and `CrossCheckWithRust` in `tests/cpp/operations/pot_quantization/test_pot_quant_m31.cpp` compares the
+device with it bit for bit (`q`, `k` and the residues, for every width, both ranges and both input dtypes). Same job, same tensor
+(quantize, scaler and M31 residues): the device takes 1.6 to 2.1 us per tile at 16 and 32 bits and about 1 us at 8 bits on
+one core. One CPU thread takes 0.75 to 0.9 us (1.3 at 8 bits) and 16 threads 0.2 to 0.6 us; the tables are in
+`tools/stwo-cpu-simd/README.md` and `tools/quant_tensor_trace_bench/README.md`.
 
 ## NoC / DRAM microbenchmark
 
