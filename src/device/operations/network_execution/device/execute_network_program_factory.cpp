@@ -55,9 +55,8 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
     create_cb(n::c_w, plan.cap_w, in_format);
     create_cb(n::c_qw, plan.cap_qw, DataFormat::UInt8);
     create_cb(n::c_acc, plan.cap_acc, DataFormat::Int32);
-    for (uint32_t l = 0; l < L; l++) {
-        create_cb(n::act_cb(l), plan.Mt * plan.Kt[l], DataFormat::UInt8);
-    }
+    create_cb(n::c_act_a, plan.cap_act, DataFormat::UInt8);
+    create_cb(n::c_act_b, plan.cap_act, DataFormat::UInt8);
     create_cb(n::c_out, plan.out_ring_pages, DataFormat::UInt8);
     create_cb(n::c_scale_x, n::scaler_pages, DataFormat::Float32);
     create_cb(n::c_scale_w, n::scaler_pages, DataFormat::Float32);
@@ -66,10 +65,10 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
     // ---- reader: x, then the weights of layer 0, 1, ... into c_1 ----
     constexpr uint32_t reader_batch = 16;
     std::vector<uint32_t> reader_ct_args = {reader_batch, L, plan.cap_w};
+    // The accessor arguments of interleaved tensors of one dtype and memory config are the same for all of them, so one set serves
+    // every weight and the reader can loop over the layers.
     TensorAccessorArgs(*x.buffer()).append_to(reader_ct_args);
-    for (const auto& w : weights) {
-        TensorAccessorArgs(*w.buffer()).append_to(reader_ct_args);
-    }
+    TensorAccessorArgs(*weights.front().buffer()).append_to(reader_ct_args);
     auto reader_config = ReaderDataMovementConfig(reader_ct_args);
     reader_config.compiler_include_paths = {kernel_include_dir()};  // network_layout.hpp
     const KernelHandle reader_id =
@@ -78,13 +77,9 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
     // ---- writer: scalers, accumulators and the output ----
     std::vector<uint32_t> writer_ct_args = {n::dst_tiles, plan.out_ring_pages, L, plan.cap_acc};
     TensorAccessorArgs(*outputs[ExecuteNetworkOperation::out_index()].buffer()).append_to(writer_ct_args);
+    // one set each for the scalers (all FLOAT32 [1, 1]) and for the accumulators (all UINT32), see the reader
     TensorAccessorArgs(*outputs[ExecuteNetworkOperation::scaler_x_index()].buffer()).append_to(writer_ct_args);
-    for (uint32_t l = 0; l < L; l++) {
-        TensorAccessorArgs(*outputs[ExecuteNetworkOperation::acc_index(l)].buffer()).append_to(writer_ct_args);
-        TensorAccessorArgs(*outputs[ExecuteNetworkOperation::scaler_w_index(L, l)].buffer()).append_to(writer_ct_args);
-        TensorAccessorArgs(*outputs[ExecuteNetworkOperation::scaler_out_index(L, l)].buffer())
-            .append_to(writer_ct_args);
-    }
+    TensorAccessorArgs(*outputs[ExecuteNetworkOperation::acc_index(0)].buffer()).append_to(writer_ct_args);
     auto writer_config = WriterDataMovementConfig(writer_ct_args);
     writer_config.compiler_include_paths = {kernel_include_dir()};
     const KernelHandle writer_id =
@@ -98,16 +93,11 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
         unpack_to_dest_mode[n::c_x] = UnpackToDestMode::UnpackToDestFp32;
         unpack_to_dest_mode[n::c_w] = UnpackToDestMode::UnpackToDestFp32;
     }
-    // L, Mt, fp32 input, output ring pages, capacities of the weight / quantized-weight / accumulator buffers (tiles),
-    // then for every layer Kt, Nt, relu
+    // Mt, fp32 input, output ring pages, capacities of the weight / quantized-weight / accumulator / activation buffers (tiles). The
+    // layers are run-time arguments (below), so the kernel is the same for every number of layers.
     std::vector<uint32_t> compute_ct_args = {
-        L, plan.Mt, plan.fp32_in ? 1u : 0u, plan.out_ring_pages, plan.cap_w, plan.cap_qw, plan.cap_acc};
-    for (uint32_t l = 0; l < L; l++) {
-        compute_ct_args.push_back(plan.Kt[l]);
-        compute_ct_args.push_back(plan.Nt[l]);
-        compute_ct_args.push_back(plan.relu[l]);
-    }
-    CreateKernel(
+        plan.Mt, plan.fp32_in ? 1u : 0u, plan.out_ring_pages, plan.cap_w, plan.cap_qw, plan.cap_acc, plan.cap_act};
+    const KernelHandle compute_id = CreateKernel(
         program,
         kernel_path(__FILE__, "kernels/compute/execute_network.cpp"),
         core,
@@ -121,6 +111,15 @@ ExecuteNetworkOperation::SingleCore::cached_program_t ExecuteNetworkOperation::S
         });
 
     // ---- runtime args ----
+    // compute: [0] number of layers, then per layer (Kt, Nt, relu). They follow from the shapes and the activations, which are part of
+    // the cache key, so they are not touched on a cache hit.
+    std::vector<uint32_t> compute_args = {L};
+    for (uint32_t l = 0; l < L; l++) {
+        compute_args.push_back(plan.Kt[l]);
+        compute_args.push_back(plan.Nt[l]);
+        compute_args.push_back(plan.relu[l]);
+    }
+    SetRuntimeArgs(program, compute_id, core, compute_args);
     // reader: [0] x address, [1] x tiles, then per layer (weight address, weight tiles)
     std::vector<uint32_t> reader_args = {x.buffer()->address(), plan.x_tiles()};
     for (uint32_t l = 0; l < L; l++) {

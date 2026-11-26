@@ -25,6 +25,7 @@
 
 #include "common/pot_reference.hpp"
 #include "device/operations/layer_execution/execute_layer.hpp"
+#include "device/operations/network_execution/device/network_layout.hpp"
 #include "device/operations/network_execution/execute_network.hpp"
 
 using namespace ttnn;
@@ -345,15 +346,35 @@ TEST_F(ExecuteNetwork, SingleActivationOverload) {
 }
 
 TEST_F(ExecuteNetwork, ManyLayers) {
+    // Deep networks: the two activation buffers are used alternately, so an even and an odd number of layers end in different ones.
     const uint32_t M = 32, K = 32;
-    const std::vector<uint32_t> Ns(6, 32);
-    run("6 layers",
-        uniform(M * K, 6, -2.f, 2.f),
-        make_weights(K, Ns, 600),
-        M,
-        K,
-        Ns,
-        std::vector<Activation>(6, Activation::ReLU));
+    for (uint32_t layers : {6u, 7u, 16u, 31u, 32u}) {
+        const std::vector<uint32_t> Ns(layers, 32);
+        std::vector<Activation> acts(layers, Activation::ReLU);
+        acts.back() = Activation::None;
+        run("many layers", uniform(M * K, 6, -2.f, 2.f), make_weights(K, Ns, 600), M, K, Ns, acts);
+    }
+}
+
+TEST_F(ExecuteNetwork, DeepWithChangingWidths) {
+    // The activation buffers are sized for the largest layer input; the layers use less of them, with padding.
+    const uint32_t M = 64, K = 32;
+    const std::vector<uint32_t> Ns = {96, 32, 160, 64, 32, 128, 64, 32, 96, 32, 64};
+    std::vector<Activation> acts;
+    for (size_t l = 0; l < Ns.size(); l++) {
+        acts.push_back(l % 3 == 2 ? Activation::None : Activation::ReLU);
+    }
+    run("11 layers, changing widths", uniform(static_cast<size_t>(M) * K, 61, -2.f, 2.f), make_weights(K, Ns, 650), M, K, Ns, acts);
+}
+
+TEST_F(ExecuteNetwork, TooManyLayers) {
+    const uint32_t M = 32, K = 32;
+    Tensor tx = to_device(uniform(M * K, 9, -1.f, 1.f), M, K);
+    std::vector<Tensor> ws;
+    for (uint32_t l = 0; l < zkml::network::max_layers + 1; l++) {
+        ws.push_back(to_device(uniform(K * K, 10 + l, -1.f, 1.f), K, K));
+    }
+    EXPECT_ANY_THROW(zkml::prim::execute_network(tx, ws, Activation::ReLU));
 }
 
 TEST_F(ExecuteNetwork, ProgramCache) {

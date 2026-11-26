@@ -35,9 +35,11 @@ constexpr uint32_t DST_TILES = 4;  // fp32 DST, half sync
 constexpr uint32_t dst_scale = DST_TILES - 1;
 constexpr uint32_t magnitude_bits = 7;  // Q = 127
 
-// Pass 1 over `tiles` resident tiles of `cb_in`: absmax, the scaler 2^k in LReg7, and packed to `cb_scaler`.
-template <uint32_t cb_in, uint32_t cb_scaler>
-ALWI void scale_pass(uint32_t tiles) {
+// Pass 1 over `tiles` resident tiles of `cb_in`: absmax, the scaler 2^k in LReg7, and packed to `cb_scaler`. The `_rt` functions
+// take the circular buffers (and sizes) as run-time values, so that one copy of the code serves every layer of execute_network; the
+// functions without the suffix are the same with the buffers as template arguments (execute_layer): once inlined with constants they
+// are the same code.
+ALWI void scale_pass_rt(uint32_t cb_in, uint32_t cb_scaler, uint32_t tiles) {
     CircularBuffer in(cb_in), scaler(cb_scaler);
     reconfig_data_format_srca(cb_in);
     MATH(zkml::sfpu::absmax_init());
@@ -69,6 +71,10 @@ ALWI void scale_pass(uint32_t tiles) {
     tile_regs_release();
     scaler.push_back(1);
 }
+template <uint32_t cb_in, uint32_t cb_scaler>
+ALWI void scale_pass(uint32_t tiles) {
+    scale_pass_rt(cb_in, cb_scaler, tiles);
+}
 
 // A circular buffer that holds the quantized bytes is a UInt8 buffer when an Int8 one cannot share the program with the
 // input buffer (bf16 input), or when the program uses UInt8 buffers throughout (execute_network). The packer writes a
@@ -94,8 +100,8 @@ ALWI void pack_reconfig_int8_view(uint32_t cb_out) {
 // raw sign-magnitude int32 accumulator and the integer requantizer runs instead (k in LReg7, max(0, .) when `relu`);
 // its bytes go through the UInt8 packer. `int8_pack_view`: cb_out is a UInt8 buffer written with the Int8 packer (see
 // pack_reconfig_int8_view); false: cb_out is an Int8 buffer.
-template <uint32_t cb_in, uint32_t cb_out, bool acc_in = false, bool relu = false, bool int8_pack_view = false>
-ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
+template <bool acc_in = false, bool relu = false, bool int8_pack_view = false>
+ALWI void quant_pass_rt(uint32_t cb_in, uint32_t cb_out, uint32_t tiles, uint32_t out_pages) {
     CircularBuffer in(cb_in), out(cb_out);
     reconfig_data_format_srca(cb_in);
     if constexpr (acc_in) {
@@ -134,6 +140,10 @@ ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
         blocks.commit(n);
     }
 }
+template <uint32_t cb_in, uint32_t cb_out, bool acc_in = false, bool relu = false, bool int8_pack_view = false>
+ALWI void quant_pass(uint32_t tiles, uint32_t out_pages) {
+    quant_pass_rt<acc_in, relu, int8_pack_view>(cb_in, cb_out, tiles, out_pages);
+}
 
 // The unpacker treats a UInt8 buffer as unsigned (SrcAUnsigned) and the data as plain bytes, but the quantizer wrote
 // sign-magnitude bytes, which is what the FPU's Int8 format is. So srcA and srcB are configured for Int8 by hand, with
@@ -156,16 +166,8 @@ ALWI void reconfig_int8_view(uint32_t cb_srca, uint32_t cb_srcb) {
 // block folds the integer absmax of the activated accumulator into LReg7 (the tile itself is untouched: the raw
 // sign-magnitude bits are packed). `int8_view`: the buffers are UInt8 buffers, so the source registers are configured
 // for Int8 by hand; false: Int8 buffers.
-template <
-    uint32_t cb_a,
-    uint32_t cb_b,
-    uint32_t cb_acc,
-    bool relu,
-    bool int8_view,
-    uint32_t Mt,
-    uint32_t Kt,
-    uint32_t Nt>
-ALWI void matmul_stage() {
+template <bool relu, bool int8_view>
+ALWI void matmul_stage_rt(uint32_t cb_a, uint32_t cb_b, uint32_t cb_acc, uint32_t Mt, uint32_t Kt, uint32_t Nt) {
     CircularBuffer a(cb_a), b(cb_b), acc(cb_acc);
     a.wait_front(Mt * Kt);
     b.wait_front(Kt * Nt);
@@ -176,16 +178,22 @@ ALWI void matmul_stage() {
     }
     pack_reconfig_data_format(cb_acc);
     MATH(zkml::sfpu::absmax_init());  // LReg7 = 0
-    constexpr uint32_t out_tiles = Mt * Nt;
+    const uint32_t out_tiles = Mt * Nt;
     for (uint32_t o0 = 0; o0 < out_tiles; o0 += DST_TILES) {
         const uint32_t n = out_tiles - o0 < DST_TILES ? out_tiles - o0 : DST_TILES;
         acc.reserve_back(n);
         tile_regs_acquire();
         matmul_init(cb_a, cb_b);
+        // (mt, nt) of the first output tile of the block: one division per block, not per tile
+        const uint32_t mt0 = o0 / Nt, nt0 = o0 - mt0 * Nt;
         for (uint32_t kt = 0; kt < Kt; kt++) {
+            uint32_t mt = mt0, nt = nt0;
             for (uint32_t i = 0; i < n; i++) {
-                const uint32_t mt = (o0 + i) / Nt, nt = (o0 + i) % Nt;
                 matmul_tiles(cb_a, cb_b, mt * Kt + kt, kt * Nt + nt, i);
+                if (++nt == Nt) {
+                    nt = 0;
+                    mt++;
+                }
             }
         }
         for (uint32_t i = 0; i < n; i++) {
@@ -200,12 +208,23 @@ ALWI void matmul_stage() {
         acc.push_back(n);
     }
 }
+template <
+    uint32_t cb_a,
+    uint32_t cb_b,
+    uint32_t cb_acc,
+    bool relu,
+    bool int8_view,
+    uint32_t Mt,
+    uint32_t Kt,
+    uint32_t Nt>
+ALWI void matmul_stage() {
+    matmul_stage_rt<relu, int8_view>(cb_a, cb_b, cb_acc, Mt, Kt, Nt);
+}
 
 // The scaler 2^k' of the requantization from the integer absmax in LReg7 (left there as k' + 24 for the requantizer),
 // packed to `cb_scaler`; the caller pushes it. The accumulator buffer is the one the matmul packed into: both source
 // registers go back to its format first (the FPU is done).
-template <uint32_t cb_acc, uint32_t cb_scaler>
-ALWI void pack_requant_scaler() {
+ALWI void pack_requant_scaler_rt(uint32_t cb_acc, uint32_t cb_scaler) {
     reconfig_data_format(cb_acc, cb_acc);
     CircularBuffer scaler(cb_scaler);
     scaler.reserve_back(1);
@@ -216,6 +235,10 @@ ALWI void pack_requant_scaler() {
     pack_reconfig_data_format(cb_scaler);
     pack_tile(dst_scale, cb_scaler);
     tile_regs_release();
+}
+template <uint32_t cb_acc, uint32_t cb_scaler>
+ALWI void pack_requant_scaler() {
+    pack_requant_scaler_rt(cb_acc, cb_scaler);
 }
 
 }  // namespace zkml::stages

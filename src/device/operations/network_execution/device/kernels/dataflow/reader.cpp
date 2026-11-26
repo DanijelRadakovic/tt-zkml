@@ -7,6 +7,7 @@
 #include "api/dataflow/circular_buffer.h"
 #include "api/dataflow/dataflow_api.h"
 #include "api/dataflow/noc.h"
+#include "api/debug/kernel_profiler.hpp"
 #include "api/tensor/noc_traits.h"
 #include "device/operations/network_execution/device/network_layout.hpp"
 
@@ -21,8 +22,8 @@
  * runs ahead: it waits (in `reserve_back`) only until compute has popped the previous layer's weights, which it does as soon as
  * the weights are quantized, so the next layer's weights are read while the previous layer's matmul and requantization run.
  *
- * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` number of layers, `[2]` `CAP_W` (tiles of `c_1`), then `TensorAccessorArgs` of x and of
- * every weight tensor.
+ * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` number of layers, `[2]` `CAP_W` (tiles of `c_1`), then `TensorAccessorArgs` of x and
+ * one set for all the weight tensors (they have the same dtype and memory config).
  * **Runtime args**: `[0]` x address, `[1]` tiles of x, then per layer `(weight address, tiles of the weight)`.
  */
 // clang-format on
@@ -31,14 +32,9 @@ constexpr uint32_t BATCH_SIZE = get_compile_time_arg_val(0);
 constexpr uint32_t LAYERS = get_compile_time_arg_val(1);
 constexpr uint32_t CAP_W = get_compile_time_arg_val(2);
 
-template <uint32_t I, uint32_t ArgsOffset>
-void read_weights(Noc& noc, CircularBuffer& cb_w) {
-    constexpr auto w_args = TensorAccessorArgs<ArgsOffset>();
-    const uint32_t w_addr = get_arg_val<uint32_t>(2 + 2 * I);
-    const uint32_t w_tiles = get_arg_val<uint32_t>(3 + 2 * I);
-    const auto w = TensorAccessor(w_args, w_addr);
+template <typename Accessor>
+void read_layer_weights(Noc& noc, CircularBuffer& cb_w, const Accessor& w, uint32_t w_tiles) {
     const uint32_t w_bytes = cb_w.get_tile_size();
-
     for (uint32_t done = 0; done < w_tiles; done += BATCH_SIZE) {
         const uint32_t n = w_tiles - done < BATCH_SIZE ? w_tiles - done : BATCH_SIZE;
         cb_w.reserve_back(n);
@@ -51,9 +47,6 @@ void read_weights(Noc& noc, CircularBuffer& cb_w) {
     if (w_tiles < CAP_W) {  // padding: no data, only the counters and the pointer
         cb_w.reserve_back(CAP_W - w_tiles);
         cb_w.push_back(CAP_W - w_tiles);
-    }
-    if constexpr (I + 1 < LAYERS) {
-        read_weights<I + 1, w_args.next_compile_time_args_offset()>(noc, cb_w);
     }
 }
 
@@ -77,5 +70,11 @@ void kernel_main() {
         noc.async_read_barrier();
         cb_x.push_back(n);
     }
-    read_weights<0, x_args.next_compile_time_args_offset()>(noc, cb_w);
+    // the accessor arguments are the same for every weight tensor: one set, one loop over the layers
+    constexpr auto w_args = TensorAccessorArgs<x_args.next_compile_time_args_offset()>();
+    for (uint32_t l = 0; l < LAYERS; l++) {
+        const auto w = TensorAccessor(w_args, get_arg_val<uint32_t>(2 + 2 * l));
+        DeviceZoneScopedN("READ_W");  // reading the weights of layer l, including the wait for space in c_1
+        read_layer_weights(noc, cb_w, w, get_arg_val<uint32_t>(3 + 2 * l));
+    }
 }

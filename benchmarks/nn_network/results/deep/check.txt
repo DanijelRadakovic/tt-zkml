@@ -1,0 +1,4 @@
+# correctness: the CPU network against execute_network (fp32): output bytes, every accumulator, every scaler
+check M=32 W=64 L=3: 0 differences (output bytes, scalers, accumulators)
+check M=128 W=256 L=6: 0 differences (output bytes, scalers, accumulators)
+check M=64 W=128 L=4: 0 differences (output bytes, scalers, accumulators)

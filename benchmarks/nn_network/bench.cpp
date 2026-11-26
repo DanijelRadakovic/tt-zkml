@@ -10,6 +10,8 @@
 // Only x and the weights are quantized from floats. The CPU implementation is bit-exact with the device op (`check`).
 //
 //   zkml_nn_network_bench cpu     <threads> <M> <width> <L> <reps>     the chained network on the CPU
+//   zkml_nn_network_bench cpuvnni <threads> <M> <width> <L> <reps>    the same network with the matmul in AVX-512 VNNI (vpdpbusd)
+//   zkml_nn_network_bench vnnicheck                                   the VNNI network against the scalar one (no device)
 //   zkml_nn_network_bench device  <fp32|bf16> <M> <width> <L> <reps>   one execute_network call (program cached)
 //   zkml_nn_network_bench layers  <fp32|bf16> <M> <width> <L> <reps>   L execute_layer calls (not chained), for comparison
 //   zkml_nn_network_bench hostprof <fp32|bf16> <M> <width> <L> <reps>  where the HOST time of one call goes (no device time): the
@@ -18,6 +20,7 @@
 // All layers are `width` x `width` (x is M x width).
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -25,6 +28,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifdef __AVX512VNNI__
+#include <immintrin.h>
+#endif
 #include <functional>
 #include <random>
 #include <string>
@@ -329,6 +335,211 @@ int run_cpu(unsigned threads, size_t M, size_t W, int L, int reps) {
     return 0;
 }
 
+
+// ----------------------------------------------------------------------------------------------------------------------------
+// The same network with the int8 matmul in AVX-512 VNNI.
+//
+// vpdpbusd multiplies 64 unsigned bytes by 64 signed bytes, sums groups of 4 products and adds them to 16 int32 lanes: 64 multiply-adds
+// per instruction. Both our operands are signed, so the activations are stored as x + 128 (unsigned) and the matmul computes
+// sum((x + 128) w) = sum(x w) + 128 sum(w); the per-column correction 128 sum_k w[k][n] is subtracted at the end (it is computed
+// with the same instruction, from a vector of ones). The weights are packed for the instruction: a block of 16 output columns is
+// stored as [k / 4][column in block][4 consecutive k], so one 64-byte load holds 4 k values of 16 columns, and the 16 lanes of the
+// accumulator are 16 output columns (no horizontal sums). The work is split into tasks of 8 rows x 16 columns, shared by the
+// threads; every task keeps 8 accumulators and reuses each weight load for the 8 rows.
+#ifdef __AVX512VNNI__
+constexpr size_t kRows = 8;  // rows per task
+
+struct VnniScratch {
+    std::vector<float> partial;
+    std::vector<int32_t> part_i;
+    std::vector<uint8_t> xu, xu_next;  // activations + 128, [M, W]
+    std::vector<int8_t> wp;            // packed weights
+    std::vector<int32_t> corr;         // 128 * column sums of the weights
+    std::vector<int32_t> acc;          // [M, W]
+};
+
+void vnni_network(
+    Pool& pool,
+    VnniScratch& s,
+    const float* x,
+    const std::vector<std::vector<float>>& ws,
+    size_t M,
+    size_t W,
+    NetResult& r,
+    bool keep_acc) {
+    const size_t L = ws.size();
+    s.xu.resize(M * W);
+    s.xu_next.resize(M * W);
+    s.wp.resize(W * W);
+    s.corr.resize(W);
+    s.acc.resize(M * W);
+    r.scaler_w.assign(L, 0.f);
+    r.scaler_out.assign(L, 0.f);
+    r.acc.clear();
+    r.out.resize(M * W);
+    auto absmax = [&](const float* v, size_t n) {
+        s.partial.assign(pool.size(), 0.0f);
+        pool.run([&](unsigned t) {
+            const size_t lo = n * t / pool.size(), hi = n * (t + 1) / pool.size();
+            float m = 0.0f;
+            for (size_t i = lo; i < hi; i++) {
+                m = std::max(m, std::fabs(v[i]));
+            }
+            s.partial[t] = m;
+        });
+        return *std::max_element(s.partial.begin(), s.partial.end());
+    };
+
+    const int32_t kx = pot_k(absmax(x, M * W));
+    const float sx = std::ldexp(1.0f, kx);
+    r.scaler_x = sx;
+    pool.parallel_for(M * W, [&](size_t lo, size_t hi) {
+        for (size_t i = lo; i < hi; i++) {
+            s.xu[i] = static_cast<uint8_t>(quant1(x[i], sx) + 128);
+        }
+    });
+
+    const size_t col_blocks = W / 16, row_blocks = M / kRows, tasks = col_blocks * row_blocks;
+    for (size_t l = 0; l < L; l++) {
+        const bool relu = l + 1 < L, last = l + 1 == L;
+        const float* w = ws[l].data();
+        const int32_t kw = pot_k(absmax(w, W * W));
+        const float sw = std::ldexp(1.0f, kw);
+        r.scaler_w[l] = sw;
+        // quantize and pack: wp[cb][k / 4][column in block][k % 4]
+        pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
+            for (size_t k4 = lo; k4 < hi; k4++) {
+                for (size_t n = 0; n < W; n++) {
+                    for (size_t kk = 0; kk < 4; kk++) {
+                        s.wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
+                    }
+                }
+            }
+        });
+        // corr[n] = 128 * sum_k w[k][n], with vpdpbusd against a vector of ones
+        pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
+            const __m512i ones = _mm512_set1_epi8(1);
+            for (size_t cb = lo; cb < hi; cb++) {
+                __m512i a = _mm512_setzero_si512();
+                for (size_t k4 = 0; k4 < W / 4; k4++) {
+                    a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&s.wp[cb * (W * 16) + k4 * 64]));
+                }
+                _mm512_storeu_si512(&s.corr[cb * 16], _mm512_slli_epi32(a, 7));
+            }
+        });
+
+        s.part_i.assign(pool.size(), 0);
+        pool.run([&](unsigned t) {
+            const size_t t_lo = tasks * t / pool.size(), t_hi = tasks * (t + 1) / pool.size();
+            __m512i vmax = _mm512_setzero_si512();
+            for (size_t task = t_lo; task < t_hi; task++) {
+                const size_t rb = task / col_blocks, cb = task % col_blocks;
+                const size_t m0 = rb * kRows;
+                const int8_t* wb = &s.wp[cb * (W * 16)];
+                __m512i acc[kRows];
+                for (size_t i = 0; i < kRows; i++) {
+                    acc[i] = _mm512_setzero_si512();
+                }
+                for (size_t k4 = 0; k4 < W / 4; k4++) {
+                    const __m512i wv = _mm512_loadu_si512(wb + k4 * 64);
+                    for (size_t i = 0; i < kRows; i++) {
+                        int32_t xb;
+                        std::memcpy(&xb, &s.xu[(m0 + i) * W + k4 * 4], 4);
+                        acc[i] = _mm512_dpbusd_epi32(acc[i], _mm512_set1_epi32(xb), wv);
+                    }
+                }
+                const __m512i corr = _mm512_loadu_si512(&s.corr[cb * 16]);
+                for (size_t i = 0; i < kRows; i++) {
+                    const __m512i v = _mm512_sub_epi32(acc[i], corr);
+                    _mm512_storeu_si512(&s.acc[(m0 + i) * W + cb * 16], v);
+                    vmax = _mm512_max_epi32(vmax, relu ? _mm512_max_epi32(v, _mm512_setzero_si512()) : _mm512_abs_epi32(v));
+                }
+            }
+            s.part_i[t] = _mm512_reduce_max_epi32(vmax);
+        });
+        const int32_t A = *std::max_element(s.part_i.begin(), s.part_i.end());
+        if (keep_acc) {
+            r.acc.push_back(s.acc);
+        }
+
+        int32_t ko = 127;
+        if (A != 0) {
+            int t = 0;
+            while ((static_cast<int64_t>(A) >> t) != 0) {
+                t++;
+            }
+            ko = 7 - t;
+            if (ko < 0 && static_cast<int64_t>(A) > (int64_t{127} << -ko)) {
+                ko--;
+            }
+        }
+        r.scaler_out[l] = std::ldexp(1.0f, ko);
+        pool.parallel_for(M * W, [&](size_t lo, size_t hi) {
+            for (size_t i = lo; i < hi; i++) {
+                const int32_t a = s.acc[i];
+                const int64_t mag = a < 0 ? -static_cast<int64_t>(a) : a;
+                int64_t q;
+                if (ko >= 0) {
+                    q = ko > 40 ? 0 : mag << ko;
+                } else {
+                    const int sh = -ko;
+                    q = (mag + (int64_t{1} << (sh - 1)) - 1 + ((mag >> sh) & 1)) >> sh;
+                }
+                if (relu && a < 0) {
+                    q = 0;
+                }
+                if (last) {
+                    r.out[i] = static_cast<uint8_t>((a < 0 && q != 0) ? (0x80 | q) : q);
+                } else {
+                    s.xu_next[i] = static_cast<uint8_t>((a < 0 ? -q : q) + 128);
+                }
+            }
+        });
+        if (!last) {
+            std::swap(s.xu, s.xu_next);
+        }
+    }
+}
+
+int run_cpu_vnni(unsigned threads, size_t M, size_t W, int L, int reps) {
+    Pool pool(threads);
+    const auto x = uniform(M * W, 7, -2.f, 2.f);
+    const auto ws = make_ws(W, L);
+    VnniScratch s;
+    NetResult r;
+    auto network = [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false); };
+    network();
+    network();
+    std::vector<double> runs;
+    for (int i = 0; i < reps; i++) {
+        const auto t0 = Clock::now();
+        network();
+        runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
+    }
+    report("cpu-vnni", "threads=" + std::to_string(threads) + " ", M, W, L, median(runs), reps);
+    return 0;
+}
+
+// The VNNI network against the scalar one: every output byte, accumulator and scaler.
+int run_vnni_check() {
+    int bad_total = 0;
+    for (auto [M, W, L] : std::vector<std::array<size_t, 3>>{{32, 64, 3}, {32, 128, 8}, {128, 256, 6}, {64, 512, 4}, {8, 32, 2}}) {
+        Pool pool(4);
+        Scratch a;
+        VnniScratch b;
+        NetResult ra, rb;
+        const auto x = uniform(M * W, 7, -2.f, 2.f);
+        const auto ws = make_ws(W, static_cast<int>(L));
+        run_network(pool, a, x.data(), ws, M, W, ra, true);
+        vnni_network(pool, b, x.data(), ws, M, W, rb, true);
+        size_t bad = ra.out != rb.out || ra.scaler_x != rb.scaler_x || ra.scaler_w != rb.scaler_w || ra.scaler_out != rb.scaler_out || ra.acc != rb.acc;
+        std::printf("vnnicheck M=%zu W=%zu L=%zu: %s\n", M, W, L, bad ? "DIFFERENT" : "identical (bytes, accumulators, scalers)");
+        bad_total += static_cast<int>(bad);
+    }
+    return bad_total ? 1 : 0;
+}
+#endif  // __AVX512VNNI__
+
 using tt::tt_metal::DataType;
 using ttnn::Tensor;
 
@@ -509,6 +720,14 @@ int main(int argc, char** argv) {
     if (cmd == "cpu" && argc >= 7) {
         return run_cpu(std::stoul(argv[2]), std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
     }
+#ifdef __AVX512VNNI__
+    if (cmd == "cpuvnni" && argc >= 7) {
+        return run_cpu_vnni(std::stoul(argv[2]), std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
+    }
+    if (cmd == "vnnicheck") {
+        return run_vnni_check();
+    }
+#endif
     if ((cmd == "device" || cmd == "layers") && argc >= 7) {
         return run_device(cmd == "device", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
     }

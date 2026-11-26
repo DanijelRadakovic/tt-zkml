@@ -30,6 +30,7 @@ struct NetworkPlan {
     uint32_t cap_w = 0;                     // tiles of the weight buffer (the largest layer)
     uint32_t cap_qw = 0;                    // tiles of the quantized-weight buffer
     uint32_t cap_acc = 0;                   // tiles of the accumulator buffer
+    uint32_t cap_act = 0;                   // tiles of each of the two activation buffers (the largest layer input)
     uint32_t out_ring_pages = 0;            // pages of the output ring
     std::vector<zkml::common::CbSpec> cbs;  // in the order the program creates them
 
@@ -112,6 +113,7 @@ struct NetworkPlan {
         for (uint32_t l = 0; l < p.layers; l++) {
             p.cap_w = std::max(p.cap_w, p.w_tiles(l));
             p.cap_acc = std::max(p.cap_acc, p.out_tiles(l));
+            p.cap_act = std::max(p.cap_act, p.Mt * p.Kt[l]);  // the input of layer l; the output of layer l is the input of l + 1
         }
         p.cap_qw = p.cap_w;
         p.out_ring_pages = 2 * n::dst_tiles;
@@ -124,9 +126,8 @@ struct NetworkPlan {
         p.cbs.push_back({n::c_w, p.cap_w, in_bytes});
         p.cbs.push_back({n::c_qw, p.cap_qw, u8_bytes});
         p.cbs.push_back({n::c_acc, p.cap_acc, i32_bytes});
-        for (uint32_t l = 0; l < p.layers; l++) {
-            p.cbs.push_back({n::act_cb(l), p.Mt * p.Kt[l], u8_bytes});
-        }
+        p.cbs.push_back({n::c_act_a, p.cap_act, u8_bytes});
+        p.cbs.push_back({n::c_act_b, p.cap_act, u8_bytes});
         p.cbs.push_back({n::c_out, p.out_ring_pages, u8_bytes});
         p.cbs.push_back({n::c_scale_x, n::scaler_pages, f32_bytes});
         p.cbs.push_back({n::c_scale_w, n::scaler_pages, f32_bytes});

@@ -1,0 +1,15 @@
+M=32 W=128 L=8: kernel 56.3 us for 4.2 M MACs (55 MACs/cycle)
+
+compute (TRISC_1), summed over the run
+  stage            us  % of kernel  us/layer  note
+  QUANT_X         1.6         2.9%      0.20  tiles of x - 551 cycles/tile
+  WAIT_W          0.1         0.2%      0.01  waiting for the first weight tile (reader behind) 
+  QUANT_W        27.3        48.5%      3.41  tiles of w (absmax pass + quantize pass) - 288 cycles/tile
+  WAIT_ACC        0.1         0.2%      0.02  waiting for the writer to free the accumulator 
+  MATMUL         10.5        18.6%      1.31  output tiles x Kt matmul_tiles - 110 cycles/tile
+  REQUANT        14.3        25.3%      1.78  tiles of acc (scaler + sweep) - 601 cycles/tile
+  (rest)          2.4         4.3%            start-up, kernel end, wait inside the stages not in a zone
+  matmul: 110 cycles per matmul_tiles call (one 32x32 x 32x32 tile product)
+
+reader (NCRISC): READ_W 44.7 us (includes waiting for compute to free c_1; 79% of the kernel)
+writer (BRISC):  WAIT_DONE 30.3 us, WRITE 4.3 us (8% of the kernel)

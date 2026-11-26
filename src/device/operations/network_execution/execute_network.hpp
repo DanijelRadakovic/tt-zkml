@@ -36,7 +36,7 @@ struct NetworkResult {
  * layer 0 and the weights are quantized (per tensor, to 8 bits, with a power-of-two scaler, `Q = 127`, round half to
  * even). The requantized output of layer l is the quantized input of layer l + 1: it stays in L1 as int8 between the
  * layers and is never dequantized. All layers run in one compute kernel; the weights are streamed one layer at a time,
- * so the next layer's weights are read while the previous layer computes.
+ * so the next layer's weights are read while the previous layer computes. The quantized activations ping-pong between two L1 buffers, so the L1 use does not grow with L.
  *
  * @param x `[M, K_0]`, FLOAT32 or BFLOAT16, TILE layout, interleaved, on device; `M`, `K_0` multiples of 32.
  * @param weights L tensors, `weights[l]` is `[K_l, N_l]` with `K_{l+1} == N_l`, same dtype as `x`, TILE layout,
