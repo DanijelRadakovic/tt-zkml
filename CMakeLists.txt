@@ -135,6 +135,12 @@ target_include_directories(zkml_fpu_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(zkml_fpu_probe PRIVATE TT::Metalium)
 target_compile_definitions(zkml_fpu_probe PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
+# int8 against bf16 matmul on the FPU (throughput and exactness); see benchmarks/fpu_int8_vs_bf16/README.md
+add_executable(zkml_fpu_int8_vs_bf16_bench benchmarks/fpu_int8_vs_bf16/bench.cpp)
+target_include_directories(zkml_fpu_int8_vs_bf16_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(zkml_fpu_int8_vs_bf16_bench PRIVATE TT::Metalium)
+target_compile_definitions(zkml_fpu_int8_vs_bf16_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
 # Graphviz (dot) adds include and call graphs when it is installed.
