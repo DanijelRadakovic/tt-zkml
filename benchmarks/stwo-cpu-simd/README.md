@@ -1,5 +1,8 @@
 # stwo-cpu-simd: CPU and SIMD reference of the quantization and its prover witness
 
+> **Note:** the device numbers in the comparison tables below were measured before the fused SFPU quantizer kernels and the batched readers and writers. The device side is now faster, for example quantize + M31 at 256 tiles: 0.166 ms (8 bits) against 0.247 ms in the table (`../quant_tensor_trace_bench/results/device.md`). The CPU numbers are unchanged.
+
+
 Rust crate that computes on the CPU what `pot_quantize_per_tensor` and `pot_quant_m31` produce on the device, and the
 rest of the witness a prover needs, which the **host** derives (the device does not):
 
