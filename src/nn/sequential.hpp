@@ -13,7 +13,6 @@
 #include <tt_stl/assert.hpp>
 
 #include "device/operations/network_execution/execute_network.hpp"
-#include "device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
 #include "nn/layers.hpp"
 #include "ttnn/tensor/tensor.hpp"
 
@@ -77,26 +76,20 @@ public:
                 linears_[l].in_features(),
                 linears_[l].out_features());
         }
-        q_weights_.clear();
-        weight_scalers_.clear();
-        for (const auto& w : weights) {
-            auto [q, scaler] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, tt::tt_metal::DataType::UINT8);
-            q_weights_.push_back(std::move(q));
-            weight_scalers_.push_back(std::move(scaler));
-        }
+        weights_ = weights;
     }
 
     /// Runs the network on `x` `[M, in_features]`. The result has the quantized output of the last layer and, for
     /// checking and proving, the accumulator and the scalers of every layer.
     zkml::prim::NetworkResult eval(const ttnn::Tensor& x) const {
-        TT_FATAL(!q_weights_.empty(), "eval: call load_parameters first");
+        TT_FATAL(!weights_.empty(), "eval: call load_parameters first");
         const auto shape = x.logical_shape();
         TT_FATAL(
             shape.rank() == 2 && shape[1] == linears_.front().in_features(),
             "eval: the input is {} but the first Linear takes {} features",
             shape,
             linears_.front().in_features());
-        return zkml::prim::execute_network_quantized(x, q_weights_, weight_scalers_, activations_);
+        return zkml::prim::execute_network(x, weights_, activations_);
     }
 
 private:
@@ -114,8 +107,7 @@ private:
     std::tuple<Layers...> layers_;
     std::vector<Linear> linears_;
     std::vector<zkml::prim::Activation> activations_;  // one per Linear
-    std::vector<ttnn::Tensor> q_weights_;        // the loaded weights, quantized once (UINT8, sign-magnitude bytes)
-    std::vector<ttnn::Tensor> weight_scalers_;  // 2^k of each weight tensor
+    std::vector<ttnn::Tensor> weights_;
 };
 
 template <typename... Layers>

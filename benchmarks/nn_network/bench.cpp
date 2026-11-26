@@ -13,7 +13,6 @@
 //   zkml_nn_network_bench cpuvnni <threads> <M> <width> <L> <reps>    the same network with the matmul in AVX-512 VNNI (vpdpbusd)
 //   zkml_nn_network_bench vnnicheck                                   the VNNI network against the scalar one (no device)
 //   zkml_nn_network_bench device  <fp32|bf16> <M> <width> <L> <reps>   one execute_network call (program cached)
-//   zkml_nn_network_bench deviceq <fp32|bf16> <M> <width> <L> <reps>  one execute_network_quantized call: the weights quantized beforehand
 //   zkml_nn_network_bench layers  <fp32|bf16> <M> <width> <L> <reps>   L execute_layer calls (not chained), for comparison
 //   zkml_nn_network_bench hostprof <fp32|bf16> <M> <width> <L> <reps>  where the HOST time of one call goes (no device time): the
 //                                                                    pieces of ttnn::device_operation::launch, for both ops
@@ -48,7 +47,6 @@
 #include "device/operations/layer_execution/device/execute_layer_device_operation.hpp"
 #include "device/operations/network_execution/device/execute_network_device_operation.hpp"
 #include "device/operations/network_execution/execute_network.hpp"
-#include "device/operations/pot_quantization/per_tensor/pot_quantize/pot_quantize_per_tensor.hpp"
 #include <ttnn/device_operation.hpp>
 #include <ttnn/mesh_device_operation_adapter.hpp>
 
@@ -179,32 +177,7 @@ inline void dot4(
     out[3] = s3;
 }
 
-// The weights of the network quantized beforehand (the CPU counterpart of the pre-quantized device weights): q_w transposed [W, W] per layer and
-// the scaler 2^kw.
-struct Prepared {
-    std::vector<std::vector<int8_t>> q;
-    std::vector<float> sw;
-};
-
-void prepare_scalar(Pool& pool, Scratch& s, const std::vector<std::vector<float>>& ws, size_t W, Prepared& pw) {
-    pw.q.assign(ws.size(), std::vector<int8_t>(W * W));
-    pw.sw.assign(ws.size(), 0.f);
-    for (size_t l = 0; l < ws.size(); l++) {
-        const float* w = ws[l].data();
-        const float sw = std::ldexp(1.0f, pot_k(absmax_parallel(pool, s, w, W * W)));
-        pw.sw[l] = sw;
-        int8_t* q = pw.q[l].data();
-        pool.parallel_for(W, [&](size_t lo, size_t hi) {
-            for (size_t k = lo; k < hi; k++) {
-                for (size_t n = 0; n < W; n++) {
-                    q[n * W + k] = quant1(w[k * W + n], sw);
-                }
-            }
-        });
-    }
-}
-
-// The whole network: x [M, W], L weights [W, W]; relu after every layer but the last. With `pw` the weights are not quantized here.
+// The whole network: x [M, W], L weights [W, W]; relu after every layer but the last.
 void run_network(
     Pool& pool,
     Scratch& s,
@@ -213,8 +186,7 @@ void run_network(
     size_t M,
     size_t W,
     NetResult& r,
-    bool keep_acc,
-    const Prepared* pw = nullptr) {
+    bool keep_acc) {
     const size_t L = ws.size();
     s.q_in.resize(M * W);
     s.q_next.resize(M * W);
@@ -237,24 +209,18 @@ void run_network(
 
     for (size_t l = 0; l < L; l++) {
         const bool relu = l + 1 < L, last = l + 1 == L;
-        const int8_t* qw;
-        if (pw) {
-            qw = pw->q[l].data();
-            r.scaler_w[l] = pw->sw[l];
-        } else {
-            const float* w = ws[l].data();
-            const int32_t kw = pot_k(absmax_parallel(pool, s, w, W * W));
-            const float sw = std::ldexp(1.0f, kw);
-            r.scaler_w[l] = sw;
-            pool.parallel_for(W, [&](size_t lo, size_t hi) {
-                for (size_t k = lo; k < hi; k++) {
-                    for (size_t n = 0; n < W; n++) {
-                        s.qwT[n * W + k] = quant1(w[k * W + n], sw);
-                    }
+        const float* w = ws[l].data();
+        const int32_t kw = pot_k(absmax_parallel(pool, s, w, W * W));
+        const float sw = std::ldexp(1.0f, kw);
+        r.scaler_w[l] = sw;
+        pool.parallel_for(W, [&](size_t lo, size_t hi) {
+            for (size_t k = lo; k < hi; k++) {
+                for (size_t n = 0; n < W; n++) {
+                    s.qwT[n * W + k] = quant1(w[k * W + n], sw);
                 }
-            });
-            qw = s.qwT.data();
-        }
+            }
+        });
+        const int8_t* qw = s.qwT.data();
 
         s.part_i.assign(pool.size(), 0);
         pool.run([&](unsigned t) {
@@ -364,20 +330,13 @@ double median_us(int reps, F&& f) {
     return median(runs);
 }
 
-// Three numbers: the whole forward pass with the weights quantized inside it (`cpu`), the quantization of the weights alone (`cpuload`, done once when the
-// model is loaded) and the forward pass with the weights quantized beforehand (`cpuq`).
 int run_cpu(unsigned threads, size_t M, size_t W, int L, int reps) {
     Pool pool(threads);
     const auto x = uniform(M * W, 7, -2.f, 2.f);
     const auto ws = make_ws(W, L);
     Scratch s;
     NetResult r;
-    Prepared pw;
-    const std::string cfg = "threads=" + std::to_string(threads) + " ";
-    report("cpu", cfg, M, W, L, median_us(reps, [&] { run_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
-    report("cpuload", cfg, M, W, L, median_us(reps, [&] { prepare_scalar(pool, s, ws, W, pw); }), reps);
-    prepare_scalar(pool, s, ws, W, pw);
-    report("cpuq", cfg, M, W, L, median_us(reps, [&] { run_network(pool, s, x.data(), ws, M, W, r, false, &pw); }), reps);
+    report("cpu", "threads=" + std::to_string(threads) + " ", M, W, L, median_us(reps, [&] { run_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
     return 0;
 }
 
@@ -404,54 +363,6 @@ struct VnniScratch {
     std::vector<int32_t> acc;          // [M, W]
 };
 
-struct VPrepared {
-    std::vector<std::vector<int8_t>> wp;
-    std::vector<std::vector<int32_t>> corr;
-    std::vector<float> sw;
-};
-
-void vnni_prepare(Pool& pool, VnniScratch& s, const std::vector<std::vector<float>>& ws, size_t W, VPrepared& pw) {
-    pw.wp.assign(ws.size(), std::vector<int8_t>(W * W));
-    pw.corr.assign(ws.size(), std::vector<int32_t>(W));
-    pw.sw.assign(ws.size(), 0.f);
-    const size_t col_blocks = W / 16;
-    for (size_t l = 0; l < ws.size(); l++) {
-        const float* w = ws[l].data();
-        s.partial.assign(pool.size(), 0.0f);
-        pool.run([&](unsigned t) {
-            const size_t n = W * W, lo = n * t / pool.size(), hi = n * (t + 1) / pool.size();
-            float m = 0.0f;
-            for (size_t i = lo; i < hi; i++) {
-                m = std::max(m, std::fabs(w[i]));
-            }
-            s.partial[t] = m;
-        });
-        const float sw = std::ldexp(1.0f, pot_k(*std::max_element(s.partial.begin(), s.partial.end())));
-        pw.sw[l] = sw;
-        int8_t* wp = pw.wp[l].data();
-        int32_t* corr = pw.corr[l].data();
-        pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
-            for (size_t k4 = lo; k4 < hi; k4++) {
-                for (size_t n = 0; n < W; n++) {
-                    for (size_t kk = 0; kk < 4; kk++) {
-                        wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
-                    }
-                }
-            }
-        });
-        pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
-            const __m512i ones = _mm512_set1_epi8(1);
-            for (size_t cb = lo; cb < hi; cb++) {
-                __m512i a = _mm512_setzero_si512();
-                for (size_t k4 = 0; k4 < W / 4; k4++) {
-                    a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&wp[cb * (W * 16) + k4 * 64]));
-                }
-                _mm512_storeu_si512(&corr[cb * 16], _mm512_slli_epi32(a, 7));
-            }
-        });
-    }
-}
-
 void vnni_network(
     Pool& pool,
     VnniScratch& s,
@@ -460,8 +371,7 @@ void vnni_network(
     size_t M,
     size_t W,
     NetResult& r,
-    bool keep_acc,
-    const VPrepared* pw = nullptr) {
+    bool keep_acc) {
     const size_t L = ws.size();
     s.xu.resize(M * W);
     s.xu_next.resize(M * W);
@@ -497,41 +407,33 @@ void vnni_network(
     const size_t col_blocks = W / 16, row_blocks = M / kRows, tasks = col_blocks * row_blocks;
     for (size_t l = 0; l < L; l++) {
         const bool relu = l + 1 < L, last = l + 1 == L;
-        const int8_t* wpd;
-        const int32_t* corrd;
-        if (pw) {
-            wpd = pw->wp[l].data();
-            corrd = pw->corr[l].data();
-            r.scaler_w[l] = pw->sw[l];
-        } else {
-            const float* w = ws[l].data();
-            const int32_t kw = pot_k(absmax(w, W * W));
-            const float sw = std::ldexp(1.0f, kw);
-            r.scaler_w[l] = sw;
-            // quantize and pack: wp[cb][k / 4][column in block][k % 4]
-            pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
-                for (size_t k4 = lo; k4 < hi; k4++) {
-                    for (size_t n = 0; n < W; n++) {
-                        for (size_t kk = 0; kk < 4; kk++) {
-                            s.wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
-                        }
+        const float* w = ws[l].data();
+        const int32_t kw = pot_k(absmax(w, W * W));
+        const float sw = std::ldexp(1.0f, kw);
+        r.scaler_w[l] = sw;
+        // quantize and pack: wp[cb][k / 4][column in block][k % 4]
+        pool.parallel_for(W / 4, [&](size_t lo, size_t hi) {
+            for (size_t k4 = lo; k4 < hi; k4++) {
+                for (size_t n = 0; n < W; n++) {
+                    for (size_t kk = 0; kk < 4; kk++) {
+                        s.wp[(n / 16) * (W * 16) + k4 * 64 + (n % 16) * 4 + kk] = quant1(w[(k4 * 4 + kk) * W + n], sw);
                     }
                 }
-            });
-            // corr[n] = 128 * sum_k w[k][n], with vpdpbusd against a vector of ones
-            pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
-                const __m512i ones = _mm512_set1_epi8(1);
-                for (size_t cb = lo; cb < hi; cb++) {
-                    __m512i a = _mm512_setzero_si512();
-                    for (size_t k4 = 0; k4 < W / 4; k4++) {
-                        a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&s.wp[cb * (W * 16) + k4 * 64]));
-                    }
-                    _mm512_storeu_si512(&s.corr[cb * 16], _mm512_slli_epi32(a, 7));
+            }
+        });
+        // corr[n] = 128 * sum_k w[k][n], with vpdpbusd against a vector of ones
+        pool.parallel_for(col_blocks, [&](size_t lo, size_t hi) {
+            const __m512i ones = _mm512_set1_epi8(1);
+            for (size_t cb = lo; cb < hi; cb++) {
+                __m512i a = _mm512_setzero_si512();
+                for (size_t k4 = 0; k4 < W / 4; k4++) {
+                    a = _mm512_dpbusd_epi32(a, ones, _mm512_loadu_si512(&s.wp[cb * (W * 16) + k4 * 64]));
                 }
-            });
-            wpd = s.wp.data();
-            corrd = s.corr.data();
-        }
+                _mm512_storeu_si512(&s.corr[cb * 16], _mm512_slli_epi32(a, 7));
+            }
+        });
+        const int8_t* wpd = s.wp.data();
+        const int32_t* corrd = s.corr.data();
 
         s.part_i.assign(pool.size(), 0);
         pool.run([&](unsigned t) {
@@ -612,12 +514,7 @@ int run_cpu_vnni(unsigned threads, size_t M, size_t W, int L, int reps) {
     const auto ws = make_ws(W, L);
     VnniScratch s;
     NetResult r;
-    VPrepared pw;
-    const std::string cfg = "threads=" + std::to_string(threads) + " ";
-    report("cpu-vnni", cfg, M, W, L, median_us(reps, [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
-    report("cpu-vnniload", cfg, M, W, L, median_us(reps, [&] { vnni_prepare(pool, s, ws, W, pw); }), reps);
-    vnni_prepare(pool, s, ws, W, pw);
-    report("cpu-vnniq", cfg, M, W, L, median_us(reps, [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false, &pw); }), reps);
+    report("cpu-vnni", "threads=" + std::to_string(threads) + " ", M, W, L, median_us(reps, [&] { vnni_network(pool, s, x.data(), ws, M, W, r, false); }), reps);
     return 0;
 }
 
@@ -634,16 +531,7 @@ int run_vnni_check() {
         run_network(pool, a, x.data(), ws, M, W, ra, true);
         vnni_network(pool, b, x.data(), ws, M, W, rb, true);
         size_t bad = ra.out != rb.out || ra.scaler_x != rb.scaler_x || ra.scaler_w != rb.scaler_w || ra.scaler_out != rb.scaler_out || ra.acc != rb.acc;
-        // the weights quantized beforehand give the same result, scalar and VNNI
-        Prepared pa;
-        VPrepared pb;
-        NetResult rc, rd;
-        prepare_scalar(pool, a, ws, W, pa);
-        vnni_prepare(pool, b, ws, W, pb);
-        run_network(pool, a, x.data(), ws, M, W, rc, true, &pa);
-        vnni_network(pool, b, x.data(), ws, M, W, rd, true, &pb);
-        bad += rc.out != ra.out || rc.scaler_w != ra.scaler_w || rc.acc != ra.acc || rd.out != ra.out || rd.scaler_w != ra.scaler_w || rd.acc != ra.acc;
-        std::printf("vnnicheck M=%zu W=%zu L=%zu: %s\n", M, W, L, bad ? "DIFFERENT" : "identical (bytes, accumulators, scalers; also with the weights quantized beforehand)");
+        std::printf("vnnicheck M=%zu W=%zu L=%zu: %s\n", M, W, L, bad ? "DIFFERENT" : "identical (bytes, accumulators, scalers)");
         bad_total += static_cast<int>(bad);
     }
     return bad_total ? 1 : 0;
@@ -677,39 +565,15 @@ DeviceCtx make_device(const std::string& dt, size_t M, size_t W, int L) {
     return c;
 }
 
-int run_device(bool chained, bool quantized, const std::string& dt, size_t M, size_t W, int L, int reps) {
+int run_device(bool chained, const std::string& dt, size_t M, size_t W, int L, int reps) {
     DeviceCtx c = make_device(dt, M, W, L);
     auto sync = [&] { tt::tt_metal::distributed::Finish(c.dev->mesh_command_queue()); };
     std::vector<zkml::prim::Activation> acts(L, zkml::prim::Activation::ReLU);
     acts.back() = zkml::prim::Activation::None;
-    std::vector<Tensor> qw, scalers;  // pre-quantized weights (`deviceq`)
-    if (quantized) {
-        // `load_parameters` of nn::Sequential: one pot_quantize_per_tensor per weight (UINT8 sign-magnitude bytes), then wait for the device
-        auto load = [&] {
-            qw.clear();
-            scalers.clear();
-            for (const auto& w : c.tw) {
-                auto [q, sc] = zkml::prim::pot_quantize_per_tensor(w, zkml::prim::BitWidth::Bits8, DataType::UINT8);
-                qw.push_back(q);
-                scalers.push_back(sc);
-            }
-            sync();
-        };
-        load();  // compile
-        std::vector<double> loads;
-        for (int i = 0; i < reps; i++) {
-            const auto t0 = Clock::now();
-            load();
-            loads.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
-        }
-        report("deviceload", dt + " ", M, W, L, median(loads), reps);
-    }
     double enqueue_us = 0;  // host time until the last call has returned (before the device is waited for)
     auto network = [&] {
         const auto t0 = Clock::now();
-        if (quantized) {
-            (void)zkml::prim::execute_network_quantized(c.tx, qw, scalers, acts);
-        } else if (chained) {
+        if (chained) {
             (void)zkml::prim::execute_network(c.tx, c.tw, acts);
         } else {
             for (int l = 0; l < L; l++) {
@@ -728,8 +592,8 @@ int run_device(bool chained, bool quantized, const std::string& dt, size_t M, si
         runs.push_back(std::chrono::duration<double, std::micro>(Clock::now() - t0).count());
         enqueues.push_back(enqueue_us);
     }
-    std::printf("net host-enqueue %s %s M=%zu W=%zu L=%d: enqueue_us=%.1f\n", quantized ? "deviceq" : (chained ? "device" : "layers"), dt.c_str(), M, W, L, median(enqueues));
-    report(quantized ? "deviceq" : (chained ? "device" : "layers"), dt + " ", M, W, L, median(runs), reps);
+    std::printf("net host-enqueue %s %s M=%zu W=%zu L=%d: enqueue_us=%.1f\n", chained ? "device" : "layers", dt.c_str(), M, W, L, median(enqueues));
+    report(chained ? "device" : "layers", dt + " ", M, W, L, median(runs), reps);
     tt::tt_metal::ReadMeshDeviceProfilerResults(*c.dev);  // with TT_METAL_DEVICE_PROFILER=1: writes profile_log_device.csv
     c.dev->close();
     return 0;
@@ -802,8 +666,7 @@ int run_hostprof(const std::string& dt, size_t M, size_t W, int L, int reps) {
     {
         using Op = zkml::operations::network_execution::ExecuteNetworkOperation;
         const Op::operation_attributes_t a{acts, c.tx.memory_config()};
-        const std::vector<Tensor> no_scalers;
-        const Op::tensor_args_t t{c.tx, c.tw, no_scalers};
+        const Op::tensor_args_t t{c.tx, c.tw};
         host_profile<Op>(
             ("execute_network L=" + std::to_string(L) + " (3 outputs)").c_str(),
             c.dev.get(), a, t, [&] { (void)zkml::prim::execute_network(c.tx, c.tw, acts); }, reps);
@@ -862,8 +725,8 @@ int main(int argc, char** argv) {
         return run_vnni_check();
     }
 #endif
-    if ((cmd == "device" || cmd == "deviceq" || cmd == "layers") && argc >= 7) {
-        return run_device(cmd != "layers", cmd == "deviceq", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
+    if ((cmd == "device" || cmd == "layers") && argc >= 7) {
+        return run_device(cmd != "layers", argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));
     }
     if (cmd == "hostprof" && argc >= 7) {
         return run_hostprof(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]));

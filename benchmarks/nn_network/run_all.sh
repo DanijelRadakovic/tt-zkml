@@ -5,7 +5,7 @@
 #
 # A chained network of L square layers (up to 32; the default sweep stops at 6) for several batch sizes M, widths W and depths L: CPU (plain
 # C++ and AVX-512 VNNI) with 1, 6 and 12 threads, the
-# device (one execute_network call, fp32 and bf16; and execute_network_quantized with the weights quantized beforehand, bf16) and, for
+# device (one execute_network call, fp32 and bf16) and, for
 # comparison, L separate execute_layer calls (bf16).
 # Run from the repo root, inside the IRD container:   TT_METAL_HOME=... benchmarks/nn_network/run_all.sh
 set -euo pipefail
@@ -38,11 +38,9 @@ for m in $BATCHES; do
       for dt in fp32 bf16; do
         "$BIN" device $dt "$m" "$w" "$l" "$REPS" 2>&1 | grep "^net " >> "$OUT/net.txt" || echo "net device $dt M=$m W=$w L=$l: does not fit in L1" >> "$OUT/net.txt"
       done
-      "$BIN" deviceq bf16 "$m" "$w" "$l" "$REPS" 2>&1 | grep "^net " >> "$OUT/net.txt" || echo "net deviceq bf16 M=$m W=$w L=$l: does not fit in L1" >> "$OUT/net.txt"
       "$BIN" layers bf16 "$m" "$w" "$l" "$REPS" 2>&1 | grep "^net " >> "$OUT/net.txt" || echo "net layers bf16 M=$m W=$w L=$l: does not fit in L1" >> "$OUT/net.txt"
     done
   done
 done
 python3 -I benchmarks/nn_network/summarize.py "$OUT/net.txt" | tee "$OUT/net.md"
-python3 -I benchmarks/nn_network/summarize_workflow.py "$OUT/net.txt" | tee "$OUT/workflow.md"
 cat "$OUT/check.txt"

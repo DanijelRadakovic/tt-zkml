@@ -65,7 +65,7 @@ def front_pages(key, v, frames, zones, mhz, tmax, czones, cmhz, d):
     if pre:
         blocks.append("This is the PRE-QUANTIZED version (execute_network_quantized): the weights were quantized once beforehand, so the reader delivers int8 tiles straight into c_2, there is no c_1 and no c_18, and compute has no weight quantization phase. Compare with 32x64l8.pdf.")
     else:
-        blocks.append("This version quantizes the weights inside the kernel on every call (execute_network). The pre-quantized version is in 32x64l8-pre-quant.pdf.")
+        blocks.append("The weights are quantized inside the kernel on every call (execute_network).")
     for b in blocks:
         y = para(g, 30, y + 26, b, 200, size=15) + 10
     y += 20

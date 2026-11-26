@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: © 2026 Danijel Radakovic
 #
 # SPDX-License-Identifier: MIT
-"""Builds docs/32x64l8.pdf and docs/32x64l8-pre-quant.pdf: one page per step of the execution of execute_network on one Tensix core.
+"""Builds docs/32x64l8.pdf: one page per step of the execution of execute_network on one Tensix core.
 
-usage: python3 build.py <out_dir_for_svg_and_typst> [nonq|q|both]
+usage: python3 build.py <out_dir_for_svg_and_typst>
 """
 import os, subprocess, sys
 sys.path.insert(0, os.path.dirname(__file__))
@@ -17,8 +17,6 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 VARIANTS = {
     "nonq": dict(pre=False, fine="device_32x64_L2_fine.csv", coarse="device_32x64_L8_coarse.csv", pdf="32x64l8.pdf",
                  name="execute_network: weights quantized inside the kernel", short="weights quantized in the kernel"),
-    "q": dict(pre=True, fine="deviceq_32x64_L2_fine.csv", coarse="deviceq_32x64_L8_coarse.csv", pdf="32x64l8-pre-quant.pdf",
-              name="execute_network_quantized: weights quantized beforehand", short="pre-quantized weights"),
 }
 
 
@@ -62,6 +60,5 @@ def build_variant(key, outdir):
 
 if __name__ == "__main__":
     out = sys.argv[1]
-    which = sys.argv[2] if len(sys.argv) > 2 else "both"
-    for k in (["nonq", "q"] if which == "both" else [which]):
+    for k in ["nonq"]:
         build_variant(k, out)

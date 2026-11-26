@@ -33,9 +33,7 @@ namespace zkml::prim {
  *        BFLOAT16, and contain only finite values.
  * @param bit_width Number of bits used for the scaler.
  * @param output_dtype Data type of the quantized output tensor. INT32 works for any width. INT8 works only for
- *        `BitWidth::Bits8`. UINT8 (also only `Bits8`) holds the *sign-magnitude* bytes (bit 7 = sign, bits 0..6 = magnitude): the
- *        format the FPU reads as Int8, so the tiles of such a tensor can go straight into the int8 matmul (see
- *        `execute_network_quantized`). Read it on the host as raw bytes, not as a number.
+ *        `BitWidth::Bits8`.
  * @param output_memory_config Memory config of both outputs. Defaults to the memory config of the input.
  * @param noc_read_tile_batch_size Number of tiles the reader reads in parallel (async_read) before it waits on
  *        one async_read_barrier.

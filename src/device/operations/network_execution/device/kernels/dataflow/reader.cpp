@@ -22,19 +22,15 @@
  * runs ahead: it waits (in `reserve_back`) only until compute has popped the previous layer's weights, which it does as soon as
  * the weights are quantized, so the next layer's weights are read while the previous layer's matmul and requantization run.
  *
- * With pre-quantized weights (INT8 tiles, already the bytes the FPU reads) the same loop reads them straight into the quantized-weight
- * buffer `c_2`; compute only waits for them (`W_CB`).
- *
- * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` number of layers, `[2]` `CAP_W` (tiles of the weight buffer), `[3]` its circular buffer,
- * then `TensorAccessorArgs` of x and one set for all the weight tensors (they have the same dtype and memory config).
+ * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` number of layers, `[2]` `CAP_W` (tiles of `c_1`), then `TensorAccessorArgs` of x and one set
+ * for all the weight tensors (they have the same dtype and memory config).
  * **Runtime args**: `[0]` x address, `[1]` tiles of x, then per layer `(weight address, tiles of the weight)`.
  */
 // clang-format on
 
 constexpr uint32_t BATCH_SIZE = get_compile_time_arg_val(0);
 constexpr uint32_t LAYERS = get_compile_time_arg_val(1);
-constexpr uint32_t CAP_W = get_compile_time_arg_val(2);  // tiles of the weight buffer (c_1, or c_2 with pre-quantized weights)
-constexpr uint32_t W_CB = get_compile_time_arg_val(3);
+constexpr uint32_t CAP_W = get_compile_time_arg_val(2);
 
 template <typename Accessor>
 void read_layer_weights(Noc& noc, CircularBuffer& cb_w, const Accessor& w, uint32_t w_tiles) {
@@ -58,11 +54,11 @@ void kernel_main() {
     const uint32_t x_addr = get_arg_val<uint32_t>(0);
     const uint32_t x_tiles = get_arg_val<uint32_t>(1);
 
-    constexpr auto x_args = TensorAccessorArgs<4>();
+    constexpr auto x_args = TensorAccessorArgs<3>();
     const auto x = TensorAccessor(x_args, x_addr);
 
     Noc noc;
-    CircularBuffer cb_x(zkml::network::c_x), cb_w(W_CB);
+    CircularBuffer cb_x(zkml::network::c_x), cb_w(zkml::network::c_w);
     const uint32_t x_bytes = cb_x.get_tile_size();
 
     for (uint32_t done = 0; done < x_tiles; done += BATCH_SIZE) {

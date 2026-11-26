@@ -21,8 +21,7 @@ void ExecuteNetworkOperation::validate_on_program_cache_miss(
     const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
     TT_FATAL(!attributes.output_memory_config.is_sharded(), "execute_network: sharded output is not supported");
     // Checks the tensors, the dimensions of the chain, the activations and the number of layers.
-    (void)NetworkPlan::make(
-        tensor_args.x, tensor_args.weights, attributes.activations, attributes.pre_quantized, tensor_args.weight_scalers);
+    (void)NetworkPlan::make(tensor_args.x, tensor_args.weights, attributes.activations);
 }
 
 ExecuteNetworkOperation::spec_return_value_t ExecuteNetworkOperation::compute_output_specs(
@@ -43,7 +42,7 @@ ExecuteNetworkOperation::spec_return_value_t ExecuteNetworkOperation::compute_ou
     specs.reserve(3);
     specs.push_back(spec(ttnn::Shape({m, weights.back().logical_shape()[1]}), DataType::UINT8));  // out
     specs.push_back(spec(
-        ttnn::Shape({tt::constants::TILE_HEIGHT * scaler_tiles(layers, attributes.pre_quantized), tt::constants::TILE_WIDTH}),
+        ttnn::Shape({tt::constants::TILE_HEIGHT * scaler_tiles(layers), tt::constants::TILE_WIDTH}),
         DataType::FLOAT32));                                                                       // scalers
     specs.push_back(spec(ttnn::Shape({m, total_n}), DataType::UINT32));                           // acc
     return specs;

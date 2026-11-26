@@ -189,8 +189,6 @@ noc.async_write(cb_so, scalers, tile_bytes, {}, {.page_id = scaler_out_page(l)})
 
 So the "address" of every layer's result is still a runtime argument, but it is now a base address (one per tensor) plus an offset the kernel adds. The allocation still has to finish before the command can be built, but there are three allocations, not `2 + 3L`. The host reads one value with a helper that indexes into the packed tensor (`result.scaler_out(l)`, `result.acc_raw(l)`).
 
-The same change removed another host cost: with pre-quantized weights (`execute_network_quantized`) there are no weight-scaler outputs at all, because the scalers are inputs.
-
 = Measurements after the fix
 
 *Host time of one `execute_network` call* (`zkml_nn_network_bench hostprof`, M = 32, width 128, bf16, median of 100, in us). Before the fix: 62.2 us at L = 4 (14 outputs) and 88.5 us at L = 6 (20 outputs), at M = 128, width 256 (section 5).
@@ -207,23 +205,23 @@ Creating the outputs is now a constant 11 us (three tensors) and the call is 18 
 
 *Wall time of the whole network* (us, bf16, median of 20; the layer loop is `L` calls of `execute_layer`):
 
-#tbl((auto, auto, auto, auto, auto),
-  [*M x W, 8 layers*], [*layer loop*], [*fused, weights quantized each call*], [*fused, weights pre-quantized*], [*best CPU (VNNI), weights quantized on every call*],
-  [32 x 64], [194], [58], [51], [58],
-  [32 x 128], [195], [73], [49], [92],
-  [128 x 128], [204], [130], [100], [125],
-  [128 x 256], [423], [315], [217], [252],
-  [128 x 512], [1198], [1021], [608], [685],
+#tbl((auto, auto, auto, auto),
+  [*M x W, 8 layers*], [*layer loop*], [*fused `execute_network`*], [*best CPU (VNNI)*],
+  [32 x 64], [194], [58], [58],
+  [32 x 128], [195], [73], [92],
+  [128 x 128], [204], [130], [125],
+  [128 x 256], [423], [315], [252],
+  [128 x 512], [1198], [1021], [685],
 )
 
-Before the fix the fused call lost to the loop for wide layers (for example 32 x 256, 8 layers: 262 us against 217 us). Now the fused call is faster than the loop in every configuration we ran (the non-quantized one too: 182 us against 217 us for 32 x 256): 1.9x to 4.0x at 8 layers, and 2.0x to 8.0x at 32 layers (pre-quantized weights). The device kernel itself also got faster in this work (float requantizer, no weight quantization), which is why these numbers are lower than the host cost alone would explain; the host cost is no longer what decides the wall time.
+All three quantize the weights on every call, so the comparison is like for like.
+
+Before the fix the fused call lost to the loop for wide layers (for example 32 x 256, 8 layers: 262 us against 217 us). Now the fused call is faster than the loop in every configuration we ran: 1.2x to 3.3x at 8 layers (3.3x at 32 x 64, 1.2x at 128 x 512) and 1.1x to 6.9x at 32 layers. The device kernel itself also got faster in this work (the float requantizer), which is part of why these numbers are lower than the host cost alone would explain; the host cost is no longer what decides the wall time.
 
 = Where this leaves the design
 
 - The host cost of an output tensor is the lever, and it is solved by packing: three allocations and three base addresses, offsets computed in the factory and the kernel.
 - Two further options remain, neither needed now: *reuse the outputs* (pass preallocated tensors in, so a call has no allocation) and *trace replay* (capture the enqueue once and replay it for a fixed network, which removes the per-call host work).
-- For a model that is run repeatedly with the same weights, quantize the weights once (`nn::Sequential::load_parameters` does this) and use `execute_network_quantized`: it removes 30% to 55% of the kernel time and needs no weight scaler outputs.
+- A variant that quantizes the weights once and reuses them (`execute_network_quantized`) was tried and removed: its forward pass was faster than the device forward pass with per-call quantization, but over a whole workflow the benefit was small against a CPU that also quantizes once, and the one-time load on the device is expensive (see `benchmarks/nn_network/README.md`).
 
-#good[With packed outputs the fused network is the faster choice at every size we measured, against the layer loop of `execute_layer` calls.]
-
-#warn[*Correction.* The CPU column above quantizes the weights inside every forward pass, while the "pre-quantized" device column does not, so that pair is not like for like. With the CPU weights also quantized beforehand (`benchmarks/nn_network/results/workflow/`), the CPU forward pass is 1.4x to 5x faster than the device forward pass at every size we ran, and over a whole workflow (load once, then N forward passes) the pre-quantized CPU wins for N of 10 or more. The device wins only per call at narrow, deep networks (for example 32 x 128, 8 layers: 74 us against 93 us), and for a single call.]
+#good[With packed outputs the fused network is the faster choice at every size we measured, against the layer loop of `execute_layer` calls. Against the best CPU baseline (AVX-512 VNNI, weights quantized on every call) it wins for narrow, deep networks (for example 32 x 64, 32 layers: 105 us against 195 us) and loses for wide ones (128 x 512, 32 layers: 3878 us against 2765 us).]

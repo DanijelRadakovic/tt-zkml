@@ -28,9 +28,7 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
     auto& [quantized, scaler] = outputs;
 
     const uint32_t num_tiles = input.physical_volume() / TILE_HW;
-    const bool is_output_int8 = attributes.output_dtype == DataType::INT8 || attributes.output_dtype == DataType::UINT8;
-    // 0: INT32, 1: INT8 (two's complement bytes), 2: UINT8 (sign-magnitude bytes: the format the FPU reads as Int8, see the kernel)
-    const uint32_t output_kind = attributes.output_dtype == DataType::INT32 ? 0u : (attributes.output_dtype == DataType::INT8 ? 1u : 2u);
+    const bool is_output_int8 = attributes.output_dtype == DataType::INT8;
 
     Program program{};
     const CoreCoord core{0, 0};
@@ -111,9 +109,9 @@ PotQuantizePerTensorOperation::SingleCore::cached_program_t PotQuantizePerTensor
             .fp32_dest_acc_en = true,
             .unpack_to_dest_mode = std::move(unpack_to_dest_mode),
             .math_approx_mode = false,
-            // output kind, bit_width, c_0 ring size in tiles, DST tiles per section, M31 range
+            // output_int8, bit_width, c_0 ring size in tiles, DST tiles per section, M31 range
             .compile_args =
-                {output_kind,
+                {is_output_int8 ? 1u : 0u,
                  attributes.bit_width.bits(),
                  in_cb_pages,
                  dst_tiles,

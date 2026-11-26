@@ -26,8 +26,8 @@
  * and pops `CAP_ACC` tiles. The output tiles of the last layer are streamed through the ring `c_16` in batches (see
  * pot_quantize's writer); the only full `async_write_barrier` is the last statement.
  *
- * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` `RING_PAGES`, `[2]` number of layers, `[3]` `CAP_ACC`, `[4]` 1 with pre-quantized
- * weights (no scaler_w), then `TensorAccessorArgs` of out, of the scalers and of the accumulators.
+ * **Compile-time args**: `[0]` `BATCH_SIZE`, `[1]` `RING_PAGES`, `[2]` number of layers, `[3]` `CAP_ACC`, then `TensorAccessorArgs` of out, of
+ * the scalers and of the accumulators.
  * **Runtime args**: `[0]` out address, `[1]` scalers address, `[2]` acc address, `[3]` tiles of out, `[4]` Mt, `[5]` column tiles of the packed
  * accumulators, then per layer `(Nt, first column tile of its accumulator)`.
  */
@@ -39,7 +39,6 @@ constexpr uint32_t BATCH_SIZE = get_compile_time_arg_val(0);
 constexpr uint32_t RING_PAGES = get_compile_time_arg_val(1);
 constexpr uint32_t LAYERS = get_compile_time_arg_val(2);
 constexpr uint32_t CAP_ACC = get_compile_time_arg_val(3);
-constexpr bool PRE_QUANTIZED = get_compile_time_arg_val(4) == 1;  // no scaler_w: compute did not quantize the weights
 static_assert(BATCH_SIZE >= 1 && BATCH_SIZE <= RING_PAGES / 2, "the batch must be at most half of the c_16 ring");
 
 // The scaler tile at the front of `cb` (already waited for) to tile `page` of the scalers tensor, then pop it.
@@ -64,7 +63,7 @@ void kernel_main() {
     const uint32_t Mt = get_arg_val<uint32_t>(4);
     const uint32_t total_nt = get_arg_val<uint32_t>(5);
 
-    constexpr auto out_args = TensorAccessorArgs<5>();
+    constexpr auto out_args = TensorAccessorArgs<4>();
     constexpr auto sc_args = TensorAccessorArgs<out_args.next_compile_time_args_offset()>();
     constexpr auto acc_args = TensorAccessorArgs<sc_args.next_compile_time_args_offset()>();
     const auto out = TensorAccessor(out_args, out_addr);
@@ -73,7 +72,7 @@ void kernel_main() {
 
     Noc noc;
     CircularBuffer cb_acc(net::c_acc), cb_sx(net::c_scale_x), cb_sw(net::c_scale_w), cb_so(net::c_scale_out), cb_out(net::c_out);
-    // tiles of the scalers tensor: scaler_x, then (not pre-quantized) scaler_w of every layer, then scaler_out of every layer
+    // tiles of the scalers tensor: scaler_x, then scaler_w of every layer, then scaler_out of every layer
     write_scaler(noc, cb_sx, scalers, 0);
 
     for (uint32_t l = 0; l < LAYERS; l++) {
@@ -81,9 +80,7 @@ void kernel_main() {
         const uint32_t nt_off = get_arg_val<uint32_t>(7 + 2 * l);
         const uint32_t acc_tiles = Mt * nt;
 
-        if constexpr (!PRE_QUANTIZED) {
-            write_scaler(noc, cb_sw, scalers, 1 + l);
-        }
+        write_scaler(noc, cb_sw, scalers, 1 + l);
 
         if (l + 1 == LAYERS) {
             // The output of the last layer, as the requantization sweep produces it.
@@ -129,7 +126,7 @@ void kernel_main() {
             noc.async_writes_flushed();
         }
         cb_acc.pop_front(CAP_ACC);
-        write_scaler_from(noc, cb_so, scalers, (PRE_QUANTIZED ? 1 : 1 + LAYERS) + l);
+        write_scaler_from(noc, cb_so, scalers, 1 + LAYERS + l);
     }
     noc.async_write_barrier();
 }

@@ -37,14 +37,12 @@ void PotQuantizePerTensorOperation::validate_on_program_cache_miss(
     TT_FATAL(
         width == 8 || width == 16 || width == 32, "pot_quantize: bit_width must be 8, 16 or 32 bits, got {}", width);
     TT_FATAL(
-        attributes.output_dtype == DataType::INT32 || attributes.output_dtype == DataType::INT8 ||
-            attributes.output_dtype == DataType::UINT8,
-        "pot_quantize: output dtype must be INT32, INT8 or UINT8, got {}",
+        attributes.output_dtype == DataType::INT32 || attributes.output_dtype == DataType::INT8,
+        "pot_quantize: output dtype must be INT32 or INT8, got {}",
         attributes.output_dtype);
     TT_FATAL(
-        (attributes.output_dtype != DataType::INT8 && attributes.output_dtype != DataType::UINT8) ||
-            attributes.bit_width == zkml::prim::BitWidth::Bits8,
-        "pot_quantize: INT8 and UINT8 output require bit_width 8, got {}",
+        attributes.output_dtype != DataType::INT8 || attributes.bit_width == zkml::prim::BitWidth::Bits8,
+        "pot_quantize: INT8 output requires bit_width 8, got {}",
         width);
     TT_FATAL(
         attributes.noc_read_tile_batch_size >= 1,

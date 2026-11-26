@@ -68,18 +68,17 @@ Cycles per tile: quantize weights 263 to 361, requantize 520 to 694, one matmul 
 
 ## After the optimizations (`results/optimized/`)
 
-`execute_network` got a pipelined float requantizer (`SFPLOADMACRO`, packer ReLU), packed outputs (3 tensors instead of `2 + 3L`) and a
-variant with pre-quantized weights, `execute_network_quantized` (no weight quantization in the kernel, int8 weight reads, no weight buffer).
-All of them are bit-exact with the host model. `dev bf16 q` in `results/optimized/net.md` is the quantized-weights call; `dev bf16 q vs best
-VNNI` is the time of the best CPU (plain or VNNI, 1 / 6 / 12 threads) divided by the device time (above 1: the device is faster).
-Kernel time (profiler): 128 x 256, 8 layers 342 -> 187 us; 32 x 128, 8 layers 56 -> 22 us. Wall time, 32 x 128, 8 layers: 98 -> 58 us before the
-packed outputs and 49 us with them (the host call costs about 20 us, of which 11 us are the three output tensors).
+`execute_network` got a pipelined float requantizer (`SFPLOADMACRO`, packer ReLU) and packed outputs (3 tensors instead of `2 + 3L`); both are bit-exact
+with the host model. Kernel time (profiler): 128 x 256, 8 layers 342 -> 187 us (the 187 us were measured with the weights quantized beforehand, see
+below; with the weights quantized in the kernel it is about 290 us); wall time with the packed outputs for 32 x 128, 8 layers: 98 -> 58 us.
 
-## Correction and the whole workflow (`results/workflow/`)
+## A variant with pre-quantized weights was tried and removed
 
-The "dev bf16 q vs best VNNI" column above compared a device whose weights were quantized beforehand with a CPU that quantizes the weights inside
-every forward pass. `results/workflow/` fixes this: the CPU also has `cpuq` / `cpu-vnniq` (forward pass with the weights quantized beforehand) and
-`cpuload` / `cpu-vnniload` (the one-time quantization), the device has `deviceload` (one `pot_quantize_per_tensor` per weight plus the wait for the
-device, which is what `nn::Sequential::load_parameters` does), and `workflow.md` gives the total time of load + N forward passes (N = 1, 10, 100) for
-device per call, device pre-quantized, CPU per call and CPU pre-quantized. With the like-for-like comparison the pre-quantized CPU forward pass is 1.4x to 5x
-faster than the device forward pass; the device wins only per call at narrow, deep networks.
+`execute_network_quantized` (weights quantized once beforehand by `pot_quantize_per_tensor`, int8 weight reads, no weight quantization in the
+kernel) was implemented and benchmarked (`results/optimized/` and `results/workflow/` still contain its columns `dev bf16 q`, `deviceq`, `deviceload`
+and the CPU `cpuq` / `cpu-vnniq` / `cpuload` / `cpu-vnniload` columns) and then removed because the benefit was small: against a CPU whose weights were also
+quantized beforehand, the device forward pass was 1.4x to 5x slower than the CPU's, the device load (one quantization program per weight) is
+expensive (about 13 us per weight at width 128 up to about 180 us at width 512), and over a whole workflow (load once, then N forward passes) the
+pre-quantized CPU wins for N of 10 or more. The code is in the git history (commit `f6ed178` and the benchmark commit after it).
+The comparison of the remaining `execute_network` (weights quantized on every call) with the CPU that also quantizes on every call is the like-for-like
+one in `results/optimized/net.md` (columns `dev bf16` against `CPU` / `VNNI`).

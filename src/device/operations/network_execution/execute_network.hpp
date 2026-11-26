@@ -18,7 +18,7 @@ namespace zkml::prim {
 struct NetworkResult {
     /// `[M, N_last]`, UINT8: the sign-magnitude int8 bytes of the last layer (bit 7 = sign, bits 0..6 = magnitude).
     ttnn::Tensor out;
-    /// FLOAT32 `[32 * S, 32]`, S tiles, tile i holding the scaler `2^k` in every element. Tile order: `scaler_x`, then (not pre-quantized)
+    /// FLOAT32 `[32 * S, 32]`, S = 1 + 2L tiles, tile i holding the scaler `2^k` in every element. Tile order: `scaler_x`, then
     /// `scaler_w` of layer 0 .. L-1, then `scaler_out` of layer 0 .. L-1.
     ttnn::Tensor scalers;
     /// UINT32 `[M, N_0 + ... + N_{L-1}]`: the raw *sign-magnitude* bits of the int32 accumulator of every layer, `q_x_l @ q_w_l`, before the
@@ -26,11 +26,8 @@ struct NetworkResult {
     ttnn::Tensor acc;
     /// `N_l`, the output features of every layer.
     std::vector<uint32_t> widths;
-    /// Only with `execute_network_quantized`: the given scaler tensors (FLOAT32 `[1, 1]`) of the weights.
-    std::vector<ttnn::Tensor> given_scaler_w;
 
     uint32_t layers() const { return static_cast<uint32_t>(widths.size()); }
-    bool pre_quantized() const { return !given_scaler_w.empty(); }
 
     /// `2^kx`, the quantization scaler of the input of layer 0 (reads the device).
     float scaler_x() const;
@@ -74,30 +71,6 @@ NetworkResult execute_network(
 NetworkResult execute_network(
     const ttnn::Tensor& x,
     const std::vector<ttnn::Tensor>& weights,
-    Activation activation = Activation::ReLU,
-    const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt);
-
-/**
- * @brief `execute_network` with weights quantized beforehand: `q_weights[l]` is the UINT8 tensor and `weight_scalers[l]` the FLOAT32
- *        `[1, 1]` scaler (`2^k`) that `pot_quantize_per_tensor(w, BitWidth::Bits8, DataType::UINT8)` returns for the weights of layer l.
- *
- * The weights are quantized once, not on every call: the layer loses its two quantization passes over the weights (30% to 55% of the
- * kernel time of `execute_network`), the weights are read as int8 (a quarter of the DRAM traffic of fp32), and there is no weight
- * buffer in L1. The results are bit for bit those of `execute_network` with the unquantized weights (same quantizer). `x` is FLOAT32 or
- * BFLOAT16; `NetworkResult::scaler_w` holds the given scalers.
- */
-NetworkResult execute_network_quantized(
-    const ttnn::Tensor& x,
-    const std::vector<ttnn::Tensor>& q_weights,
-    const std::vector<ttnn::Tensor>& weight_scalers,
-    const std::vector<Activation>& activations,
-    const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt);
-
-/// As above with one activation for the network (all layers but the last).
-NetworkResult execute_network_quantized(
-    const ttnn::Tensor& x,
-    const std::vector<ttnn::Tensor>& q_weights,
-    const std::vector<ttnn::Tensor>& weight_scalers,
     Activation activation = Activation::ReLU,
     const std::optional<tt::tt_metal::MemoryConfig>& output_memory_config = std::nullopt);
 
