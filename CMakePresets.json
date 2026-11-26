@@ -1,0 +1,11 @@
+{
+  "version": 6,
+  "configurePresets": [{
+    "name": "default",
+    "binaryDir": "build",
+    "toolchainFile": "$env{TT_METAL_HOME}/cmake/x86_64-linux-clang-20-libstdcpp-toolchain.cmake",
+    "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "Release"
+    }
+  }]
+}
