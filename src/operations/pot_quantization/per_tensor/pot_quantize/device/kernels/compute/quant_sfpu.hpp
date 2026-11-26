@@ -7,9 +7,11 @@
 // no scaler tile in DST, no pack of the scaler to L1 and no copy of it back into DST for every block. Each kernel makes
 // one sweep over a DST tile, in place: load x, multiply by 2^k, round half to even, convert to int32.
 //
-//   quant_small_init<INT8_OUT>(), quant_small_tile<INT8_OUT>(idst)    8 and 16 bits (|x * 2^k| < 2^22)
-//       n = RNE(x * 2^k). Int32 output: n as a two's complement int32. Int8 output: (n + 128) ^ 0x80, the two's complement
-//       byte of n in [0, 255], which the UInt8 packer writes unchanged (it saturates anything outside [0, 255]).
+//   quant_small_init<INT8_OUT, SIGN_MAG>(), quant_small_tile<INT8_OUT, SIGN_MAG>(idst)    8 and 16 bits (|x * 2^k| < 2^22)
+//       n = RNE(x * 2^k). Int32 output: n as a two's complement int32. Int8 output: a byte in [0, 255], which the UInt8 packer
+//       writes unchanged (it saturates anything outside [0, 255]): (n + 128) ^ 0x80, the two's complement byte of n, or with
+//       SIGN_MAG the sign-magnitude byte |n| | (sign << 7), the encoding of the FPU's Int8 format (see
+//       benchmarks/sign_mag_fpu_compatibillity). SIGN_MAG costs 3 more instructions per 4 rows x 8 lanes.
 //       Hand-written SFPU instructions: SFPLOAD, SFPMAD, SFPNOP, SFPIADD [, SFPXOR], SFPSTORE per 4 rows x 8 lanes.
 //       tt-metal's quant_tile / quant_int8_tile need 9 or 10 (a second SFPLOAD for the scale from DST, two SFPSWAPs for
 //       a clamp, the replay), and for 16 bits the composed multiply, round, clamp and typecast ops make four passes.
@@ -62,7 +64,7 @@ static_assert(static_cast<std::uint32_t>(SCALE_LREG) == 7, "SCALE_LREG must be L
 constexpr std::uint32_t RNE_MAGIC_BITS = 0x4b400000u;  // 1.5 * 2^23 = 12582912.0f
 constexpr std::uint32_t INT8_BYTE_SIGN = 0x80u;
 
-template <bool INT8_OUT>
+template <bool INT8_OUT, bool SIGN_MAG>
 inline void quant_small_constants() {
     // ADDR_MOD_6: dest += 2 after each SFPSTORE, so the next of the 8 iterations of a face works on the next 4 rows.
     addr_mod_t{
@@ -72,16 +74,17 @@ inline void quant_small_constants() {
     }
         .set(ADDR_MOD_6);
     ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG5, RNE_MAGIC_BITS);
-    // n = bits(m) - bits(magic), plus 128 for the byte.
-    ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG2, INT8_OUT ? (0u - RNE_MAGIC_BITS + 128u) : (0u - RNE_MAGIC_BITS));
-    if constexpr (INT8_OUT) {
+    // n = bits(m) - bits(magic); the two's complement byte adds 128 here and is XORed with 0x80 afterwards.
+    ckernel::sfpu::_sfpu_load_imm32_(
+        p_sfpu::LREG2, (INT8_OUT && !SIGN_MAG) ? (0u - RNE_MAGIC_BITS + 128u) : (0u - RNE_MAGIC_BITS));
+    if constexpr (INT8_OUT) {  // the XOR mask, or the sign bit of the byte
         ckernel::sfpu::_sfpu_load_imm32_(p_sfpu::LREG3, INT8_BYTE_SIGN);
     }
 }
 
 // One tile, 8 iterations of 4 rows x 8 lanes, in place. Called by the binary SFPU wrapper, which sets the DST base address
 // of the tile; the offsets are relative to it.
-template <bool INT8_OUT, int ITERATIONS = 8>
+template <bool INT8_OUT, bool SIGN_MAG, int ITERATIONS = 8>
 inline void quant_small_face(const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
     constexpr std::uint32_t dst_tile_size = 64;
     const std::uint32_t in_off = dst_index_in0 * dst_tile_size;
@@ -93,8 +96,14 @@ inline void quant_small_face(const uint dst_index_in0, const uint dst_index_in1,
         TTI_SFPMAD(p_sfpu::LREG0, SCALE_LREG_ID, p_sfpu::LREG5, p_sfpu::LREG0, 0);  // m = x * 2^k + magic
         TTI_SFPNOP;  // SFPIADD does not wait for the SFPMAD result (without it LREG0 is still x: tested)
         TTI_SFPIADD(0, p_sfpu::LREG2, p_sfpu::LREG0, sfpi::SFPIADD_MOD1_ARG_LREG_DST | sfpi::SFPIADD_MOD1_CC_NONE);
-        if constexpr (INT8_OUT) {
+        if constexpr (INT8_OUT && !SIGN_MAG) {
             TTI_SFPXOR(0, p_sfpu::LREG3, p_sfpu::LREG0, 0);  // (n + 128) ^ 0x80
+        } else if constexpr (INT8_OUT) {
+            // |n| | ((n >>> 24) & 0x80): n >>> 24 is 0xFF for a negative n and 0 otherwise.
+            TTI_SFPCAST(p_sfpu::LREG0, p_sfpu::LREG1, sfpi::SFPCAST_MOD1_INT32_ABS);  // LREG1 = |n|
+            TTI_SFPSHFT((-24) & 0xfff, p_sfpu::LREG0, p_sfpu::LREG0, 1);
+            TTI_SFPAND(0, p_sfpu::LREG3, p_sfpu::LREG0, 0);
+            TTI_SFPOR(0, p_sfpu::LREG1, p_sfpu::LREG0, 0);
         }
         TT_SFPSTORE(p_sfpu::LREG0, InstrModLoadStore::INT32_2S_COMP, ADDR_MOD_6, out_off);
     }
@@ -135,15 +144,15 @@ inline void quant32_face() {
 #ifdef TRISC_MATH
 
 // Once, after absmax_to_scaler() and before the first quant_small_tile().
-template <bool INT8_OUT>
+template <bool INT8_OUT, bool SIGN_MAG = false>
 inline void quant_small_init() {
-    ckernel::llk_math_eltwise_binary_sfpu_init<SfpuType::quant_int32>(quant_small_constants<INT8_OUT>);
+    ckernel::llk_math_eltwise_binary_sfpu_init<SfpuType::quant_int32>(quant_small_constants<INT8_OUT, SIGN_MAG>);
 }
 
-template <bool INT8_OUT>
+template <bool INT8_OUT, bool SIGN_MAG = false>
 inline void quant_small_tile(uint32_t idst) {
     ::ckernel::_sfpu_binary_check_<DST_SYNC_MODE>(idst, idst, idst, VectorMode::RC);
-    _llk_math_eltwise_binary_sfpu_params_(quant_small_face<INT8_OUT>, idst, idst, idst, VectorMode::RC);
+    _llk_math_eltwise_binary_sfpu_params_(quant_small_face<INT8_OUT, SIGN_MAG>, idst, idst, idst, VectorMode::RC);
 }
 
 // Once, after absmax_to_scaler() and before the first quant32_tile().

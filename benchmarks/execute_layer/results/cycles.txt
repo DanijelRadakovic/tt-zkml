@@ -1,0 +1,112 @@
+activation relu
+Mt 1 Kt 1 Nt 1: 1 tile matmuls (1 output tiles, 1 blocks of up to 4)
+  QUANT_X        1747 cycles      1.29 us
+  QUANT_W        1125 cycles      0.83 us
+  MATMUL          524 cycles      0.39 us
+  REQUANT         948 cycles      0.70 us
+  sum            4344 cycles      3.22 us
+  matmul: 523.5 cycles per 32x32x32 tile matmul
+activation relu
+Mt 2 Kt 4 Nt 2: 16 tile matmuls (4 output tiles, 1 blocks of up to 4)
+  QUANT_X        7538 cycles      5.58 us
+  QUANT_W        6510 cycles      4.82 us
+  MATMUL         2864 cycles      2.12 us
+  REQUANT        2643 cycles      1.96 us
+  sum           19554 cycles     14.48 us
+  matmul: 179.0 cycles per 32x32x32 tile matmul
+activation relu
+Mt 4 Kt 8 Nt 4: 128 tile matmuls (16 output tiles, 4 blocks of up to 4)
+  QUANT_X       26496 cycles     19.63 us
+  QUANT_W       24937 cycles     18.47 us
+  MATMUL        14950 cycles     11.07 us
+  REQUANT        8089 cycles      5.99 us
+  sum           74472 cycles     55.16 us
+  matmul: 116.8 cycles per 32x32x32 tile matmul
+activation relu
+Mt 4 Kt 16 Nt 4: 256 tile matmuls (16 output tiles, 4 blocks of up to 4)
+  QUANT_X       51130 cycles     37.87 us
+  QUANT_W       49454 cycles     36.63 us
+  MATMUL        23525 cycles     17.43 us
+  REQUANT        8081 cycles      5.99 us
+  sum          132189 cycles     97.92 us
+  matmul: 91.9 cycles per 32x32x32 tile matmul
+activation relu
+Mt 2 Kt 32 Nt 2: 128 tile matmuls (4 output tiles, 1 blocks of up to 4)
+  QUANT_X       51092 cycles     37.85 us
+  QUANT_W       49426 cycles     36.61 us
+  MATMUL        10362 cycles      7.68 us
+  REQUANT        2802 cycles      2.08 us
+  sum          113682 cycles     84.21 us
+  matmul: 81.0 cycles per 32x32x32 tile matmul
+activation relu
+Mt 1 Kt 8 Nt 8: 64 tile matmuls (8 output tiles, 2 blocks of up to 4)
+  QUANT_X        7536 cycles      5.58 us
+  QUANT_W       49432 cycles     36.62 us
+  MATMUL         7602 cycles      5.63 us
+  REQUANT        4570 cycles      3.39 us
+  sum           69141 cycles     51.22 us
+  matmul: 118.8 cycles per 32x32x32 tile matmul
+activation relu
+Mt 8 Kt 8 Nt 1: 64 tile matmuls (8 output tiles, 2 blocks of up to 4)
+  QUANT_X       50998 cycles     37.78 us
+  QUANT_W        6544 cycles      4.85 us
+  MATMUL         7600 cycles      5.63 us
+  REQUANT        4563 cycles      3.38 us
+  sum           69706 cycles     51.63 us
+  matmul: 118.8 cycles per 32x32x32 tile matmul
+activation none
+Mt 1 Kt 1 Nt 1: 1 tile matmuls (1 output tiles, 1 blocks of up to 4)
+  QUANT_X        1748 cycles      1.29 us
+  QUANT_W        1122 cycles      0.83 us
+  MATMUL          452 cycles      0.33 us
+  REQUANT         849 cycles      0.63 us
+  sum            4170 cycles      3.09 us
+  matmul: 451.5 cycles per 32x32x32 tile matmul
+activation none
+Mt 2 Kt 4 Nt 2: 16 tile matmuls (4 output tiles, 1 blocks of up to 4)
+  QUANT_X        7506 cycles      5.56 us
+  QUANT_W        6512 cycles      4.82 us
+  MATMUL         2487 cycles      1.84 us
+  REQUANT        2260 cycles      1.67 us
+  sum           18764 cycles     13.90 us
+  matmul: 155.4 cycles per 32x32x32 tile matmul
+activation none
+Mt 4 Kt 8 Nt 4: 128 tile matmuls (16 output tiles, 4 blocks of up to 4)
+  QUANT_X       26510 cycles     19.64 us
+  QUANT_W       24938 cycles     18.47 us
+  MATMUL        13413 cycles      9.94 us
+  REQUANT        7712 cycles      5.71 us
+  sum           72574 cycles     53.76 us
+  matmul: 104.8 cycles per 32x32x32 tile matmul
+activation none
+Mt 4 Kt 16 Nt 4: 256 tile matmuls (16 output tiles, 4 blocks of up to 4)
+  QUANT_X       51080 cycles     37.84 us
+  QUANT_W       49433 cycles     36.62 us
+  MATMUL        21989 cycles     16.29 us
+  REQUANT        7712 cycles      5.71 us
+  sum          130214 cycles     96.45 us
+  matmul: 85.9 cycles per 32x32x32 tile matmul
+activation none
+Mt 2 Kt 32 Nt 2: 128 tile matmuls (4 output tiles, 1 blocks of up to 4)
+  QUANT_X       51076 cycles     37.83 us
+  QUANT_W       49436 cycles     36.62 us
+  MATMUL         9976 cycles      7.39 us
+  REQUANT        2428 cycles      1.80 us
+  sum          112917 cycles     83.64 us
+  matmul: 77.9 cycles per 32x32x32 tile matmul
+activation none
+Mt 1 Kt 8 Nt 8: 64 tile matmuls (8 output tiles, 2 blocks of up to 4)
+  QUANT_X        7544 cycles      5.59 us
+  QUANT_W       49432 cycles     36.62 us
+  MATMUL         6832 cycles      5.06 us
+  REQUANT        4205 cycles      3.11 us
+  sum           68012 cycles     50.38 us
+  matmul: 106.8 cycles per 32x32x32 tile matmul
+activation none
+Mt 8 Kt 8 Nt 1: 64 tile matmuls (8 output tiles, 2 blocks of up to 4)
+  QUANT_X       51049 cycles     37.81 us
+  QUANT_W        6545 cycles      4.85 us
+  MATMUL         6836 cycles      5.06 us
+  REQUANT        4186 cycles      3.10 us
+  sum           68616 cycles     50.83 us
+  matmul: 106.8 cycles per 32x32x32 tile matmul

@@ -70,6 +70,16 @@ The host program runs it for the given bit widths (default: 8 16 32), with FLOAT
 faster (equal at 16 bits, 4 % slower at 32 bits). The absmax cannot run on the FPU anyway: it has no abs and no min.
 Measurements: `benchmarks/quant_tensor_fpu_vs_sfpu/` (`results/lreg7_scaler.md` for the current kernels).
 
+### `execute_layer`: one quantized layer
+
+`zkml::prim::execute_layer(x, w, Activation::ReLU)` (`src/operations/layer_execution/`) runs `out = quantize(relu(quantize(x) @ quantize(w)))`
+on one core: both inputs are quantized per tensor to 8-bit sign-magnitude bytes (the quantizer's two passes, the scaler in LReg7), the
+FPU multiplies them at HiFi4 into an exact int32 accumulator (the `Int8` circular buffer is a second view of the bytes the packer wrote
+through a `UInt8` one), the activation runs on the accumulator, and the accumulator is requantized per tensor. It returns the `UINT8`
+output (sign-magnitude bytes) and the three scalers. FLOAT32 inputs, `K <= 1024`, everything resident in L1. Tests:
+`test_execute_layer` (every byte against a host model); cycles: `benchmarks/execute_layer/README.md`, which also explains why the
+activation does not overlap the matmul yet.
+
 ### M31 and the witness for the stwo prover
 
 `zkml::prim::pot_quant_m31(q)` maps a quantized tensor into the field M31 (`p = 2^31 - 1`): INT32 or INT8 in, UINT32

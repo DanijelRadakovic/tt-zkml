@@ -52,6 +52,9 @@ add_library(
     src/operations/pot_quantization/per_tensor/pot_quantize_m31/pot_quant_m31.cpp
     src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_device_operation.cpp
     src/operations/pot_quantization/per_tensor/pot_quantize_m31/device/pot_quant_m31_program_factory.cpp
+    src/operations/layer_execution/execute_layer.cpp
+    src/operations/layer_execution/device/execute_layer_device_operation.cpp
+    src/operations/layer_execution/device/execute_layer_program_factory.cpp
 )
 target_include_directories(zkml_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_ops PUBLIC TTNN::TTNN)
@@ -104,6 +107,7 @@ endfunction()
 zkml_add_test(test_pot_quantize_per_tensor tests/cpp/operations/pot_quantization/test_pot_quantize_per_tensor.cpp zkml_ops)
 # check_if_cbs_can_fit_in_l1 on its own; deliberately not part of the op tests
 zkml_add_test(test_pot_quant_m31 tests/cpp/operations/pot_quantization/test_pot_quant_m31.cpp zkml_ops)
+zkml_add_test(test_execute_layer tests/cpp/operations/layer_execution/test_execute_layer.cpp zkml_ops)
 zkml_add_test(test_l1_check tests/cpp/common/test_l1_check.cpp TT::Metalium)
 
 # Does keeping the tensor in L1 between the two passes help? Profiler-based bench; see
@@ -147,6 +151,11 @@ add_executable(zkml_sign_mag_fpu_compat_bench benchmarks/sign_mag_fpu_compatibil
 target_include_directories(zkml_sign_mag_fpu_compat_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(zkml_sign_mag_fpu_compat_bench PRIVATE TT::Metalium)
 target_compile_definitions(zkml_sign_mag_fpu_compat_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
+
+# Cycles and wall time of execute_layer; see benchmarks/execute_layer/README.md
+add_executable(zkml_execute_layer_bench benchmarks/execute_layer/bench.cpp)
+target_link_libraries(zkml_execute_layer_bench PRIVATE zkml_ops)
+target_compile_definitions(zkml_execute_layer_bench PRIVATE ZKML_TT_METAL_HOME="${TT_METAL_HOME}")
 
 # API documentation from the Doxygen comments in src/: `cmake --build .build/default --target docs`,
 # output in <build dir>/docs/html/index.html. Optional: the target exists only if Doxygen is installed.
