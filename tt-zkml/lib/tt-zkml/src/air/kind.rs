@@ -127,8 +127,11 @@ pub fn layout(specs: &[LayerSpec]) -> Vec<Kind> {
 }
 
 /// The number of lookups into the range table of all components (each row of each component, padding included). LogUp proves equality of counts
-/// modulo p only: if the range table could be used p times or more, a value outside the table used exactly p times would cancel. Statements must stay
-/// below the modulus (checked by `check_lookup_budget`).
+/// modulo p only, per tuple: if one value outside the range table could be used p times, it would cancel. Statements must stay below the modulus
+/// (checked by `check_lookup_budget`). The other relations need no budget, for another reason than their total number of uses (the tensor relation
+/// is used more often than the range relation): the index part of each of their tuples is a preprocessed constant, so a wrong VALUE at one index can
+/// be used at most as often as that index occurs (n, m or once; the hit counters at most once per row), far below p. Power-of-two tuples are used once
+/// per tensor row, fewer than the range lookups.
 pub fn range_lookups(kinds: &[Kind]) -> u128 {
     kinds
         .iter()
@@ -137,7 +140,7 @@ pub fn range_lookups(kinds: &[Kind]) -> u128 {
         .sum()
 }
 
-/// Refuses statements whose range lookups (or any other relation's uses, which are fewer) could reach the field size.
+/// Refuses statements whose range lookups could reach the field size.
 pub fn check_lookup_budget(kinds: &[Kind]) -> Result<(), String> {
     let total = range_lookups(kinds);
     if total >= (1u128 << 31) - 1 {

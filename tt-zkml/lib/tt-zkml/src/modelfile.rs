@@ -83,6 +83,13 @@ pub fn load_model(dir: &Path) -> Result<ModelFile, String> {
     let mut layers = Vec::new();
     let mut weights = Vec::new();
     for (i, l) in m.layers.iter().enumerate() {
+        if l.in_features == 0 || l.out_features == 0 {
+            return Err(format!("layer {i}: a layer needs at least one input and one output feature"));
+        }
+        // the weights are a file of the model directory, not a path out of it
+        if l.weights.is_empty() || l.weights.contains(['/', '\\']) || l.weights == ".." {
+            return Err(format!("layer {i}: the weights must be a file name in the model directory, not '{}'", l.weights));
+        }
         let w = read_f32(&dir.join(&l.weights))?;
         let want = l.in_features as usize * l.out_features as usize;
         if w.len() != want {

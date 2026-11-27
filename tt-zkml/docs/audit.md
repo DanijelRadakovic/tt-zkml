@@ -5,15 +5,20 @@ framework, LogUp). Date: 2026-11-27. Two rounds:
 
 * **Round 1** audited the AIR as first written (the "v3" with float quantization binding): findings F1 to F12.
 * **Round 2** audited the code after the round-1 fixes, with a fresh independent reviewer: findings G1 to G6.
+* **Round 3** audited the code after the round-2 fixes, with separate reviewers for the constraint algebra and for the verifier, and with a new
+  exhaustive row-level check that uses the real constraint code as its oracle: no constraint finding; verifier findings H1 to H4 and low items.
 
-Every finding of both rounds is fixed and has a regression test that fails without its fix.
+Every finding of the three rounds is fixed and has a regression test, except the items listed as open in sections 3.2 and 3.3.
 
 **Bottom line.** The first version was not sound: 7 distinct ways for a malicious prover to make `proof::verify` accept a false statement were found
 (three of them critical) and all were confirmed by running forged proofs. The second round, on the fixed code, found two more critical ways (G1, G2), a
 verifier crash on malformed proofs (G3) and a counting limit of LogUp (G4); the author's own second pass had missed G1 and G2. All are fixed. After the
-fixes, neither round finds a further way to violate the statement, under the assumptions and limits listed in section 6. That each round found new critical
-issues is a reason for caution: this is manual review plus independent adversarial review plus mutation testing plus a randomized forgery test, **not** a
-machine-checked proof and not a third-party audit (section 7).
+fixes, neither round finds a further way to violate the statement, under the assumptions and limits listed in section 6. The third round found nothing in
+the constraints (two independent derivations and an exhaustive row-level check agree), but it found that the verifier trusted the ENCODING of the proof:
+field elements that are not reduced reach stwo's arithmetic, which is then not field arithmetic (H1, reported as a possible soundness break and fixed
+without building the attack), and several sizes were not checked (H2 to H4). That every round found something serious is a reason for caution: this is
+manual review plus independent adversarial review plus mutation testing plus randomized and exhaustive tests, **not** a machine-checked proof and not a
+third-party audit (section 7).
 
 ## 1. The statement
 
@@ -52,9 +57,22 @@ Not in the statement: zero knowledge (the float weights and input are public inp
    of the fuzzer itself showed what it can and cannot find: it catches a removed matmul constraint within seconds, but not the subtle local constraints
    (tie handling, the bound limbs, the hit gating, the ReLU gadget), which only the targeted tests of item 3 cover. A clean fuzz run is breadth, not proof.
 
+6. **Exhaustive row-level check** (`lib/tt-zkml/tests/row_exhaustive.rs`, added in round 3): the real `NetEval::evaluate` is run on single rows
+   through a small `EvalAtRow` implementation, for every flag pattern a prover could choose and for interface values beyond every bound (all outputs,
+   accumulators beyond the bound of each exponent, significands around every rounding boundary), and with single derived columns deviating from their
+   forced value. A row is accepted if the real constraints vanish and its lookups are table values or the expected interface tuples; every accepted row
+   must satisfy the row-level statement (rounding, bound on the raw value, "largest" flags only where true and never on padding rows), and every honest
+   row must be accepted. Full run: about 180 million candidate rows. Mutation testing: with any one of 19 constraints or lookups removed (including every
+   round-1 and round-2 fix that is a row-level property, and the ones the random fuzzer cannot find), a test fails. It does not cover properties of many
+   rows together (exactly-one counters, multiplicities), which are LogUp arguments.
+
 Round 1: both reviews found the same critical issues independently (F1 to F4); the independent reviewer found F5 to F7 and the transcript and robustness
 points as well. Round 2: a new reviewer, given only the code and the statement and asked not to read this report or the audit tests before finishing its
-own analysis, found G1 to G6; the author's parallel pass found none of them.
+own analysis, found G1 to G6; the author's parallel pass found none of them. Round 3: one reviewer for the constraint system (a hand derivation of
+what every component forces, an independent brute-force model of the rows, edge-case completeness runs and consistent forgeries: no finding) and one
+for the verifier. The first verifier reviewer was stopped by the platform's safeguards when it began to build a working forgery for H1, and its report
+arrived truncated (H1 and H2 only; a further item it had announced is lost); a second reviewer then redid the verifier review as a validation review
+(gaps shown by malformed inputs, no forgeries) and reported H3, H4 and the low items.
 
 ## 3. Findings
 
@@ -99,6 +117,30 @@ Not fixed (low, reported in round 2):
 * The CPU reference treats subnormal floats exactly. If the device flushes them to zero, the results differ only for scaler exponents near the
   upper limit (`k >= 126`). Not checked on hardware.
 
+### 3.3 Round 3
+
+Constraints (`air/kind.rs`, `air/trace.rs`, `air/spec.rs`): **no finding**. Checked by a reviewer's derivation and brute-force model, and by the
+exhaustive row-level check of section 2, item 6. Two low completeness items: the exponent range `[-100, 127]` was narrower than necessary (now
+`[-122, 127]`, which covers every finite f32), and a tensor of only tiny non-zero floats stays unprovable (known). One correction of this report: L1
+justified the lookup budget by "the other relations are used less", which is false for the tensor relation (see L1 below for the right reason).
+
+Verifier (`proof.rs`):
+
+| ID | Sev. | Problem | Fix | Test |
+|---|---|---|---|---|
+| H1 | high, possibly critical (not demonstrated) | stwo deserializes `M31` as a raw `u32` and its `+`, `-` assume reduced operands (`partial_reduce(a + b)`); nothing rejected values in `[p, 2^32)`. In a release build such values are processed silently with arithmetic that is not field arithmetic (a wrap modulo 2^32 is an error of 2 modulo p); a debug build panics. The out-of-domain check is computed from `sampled_values` after its challenges are fixed and before those values enter the transcript, so the prover can choose the encoding `v` or `v + p` of each value knowing the challenges. The reviewer traced a path from this to a subset-sum over the encodings that would let an invalid trace pass that check; it was stopped before building it, and no forged proof was produced. | Every field element of a proof (claimed sums, sampled values, queried values, FRI witnesses, last-layer coefficients) must be below p, checked before any arithmetic. | `h1_*` |
+| H2 | high (DoS) | `last_layer_poly.log_size` is read from the proof, is not covered by the transcript (only the coefficients are hashed), and is used by stwo as a loop bound and a shift amount: on an otherwise valid proof a large value makes the verifier allocate and loop. | `check_last_layer`: exactly `2^LOG_LAST_LAYER_DEGREE_BOUND` coefficients and the matching `log_size`. | `h2_*` |
+| H3 | high (crash under `panic=abort`) | G3's structure check compared the lengths of the queried columns only with each other; stwo asserts that each has one value per distinct query position, a number that only the transcript gives. The panic was contained only by `catch_unwind`. | `query_counts` replays stwo's transcript steps on a copy of the channel and the verifier refuses other lengths itself. `catch_unwind` stays as a backstop only. | `h3_*` |
+| H4 | high (DoS) / medium (malleability) | The verifier's memory followed the proof file, not the statement (an ignored JSON field of 46 MiB cost 780 MiB; larger files end in an out-of-memory abort); unknown fields, whitespace and other spellings were accepted; the `config` embedded in the proof was ignored (a proof "stating" 1 query verified). | A size limit derived from the statement before parsing; the bytes must be the canonical serialization (re-serialize and compare); the embedded parameters must equal the verifier's. | `h4_*` |
+
+Low, fixed: `Proof::dequantized_output` panicked on an unverified proof with no layers; the FRI parameters were not in the transcript (now mixed in with
+the statement, for version separation); the CLI divided by zero for a model with a zero-sized layer and joined an unchecked weights path (`load_model` now
+refuses both); the security comment in `proof.rs` overstated the proven bound (corrected, section 6).
+
+Open: the preprocessed root is recomputed for every proof (bounded by the verifier's own model; the limits allow large models); subnormal floats on the
+device (section 3.2); stwo itself should reject unreduced field elements at deserialization and return errors instead of asserting (to be reported
+upstream); building with `panic=abort` is not recommended, because stwo's remaining asserts are only caught, not excluded.
+
 ## 4. Why the fixed AIR is sound (the review)
 
 Notation: p = 2^31 - 1; "integer" means the canonical representative in `[0, p)` or `(-p/2, p/2)` as the context says. A *limb decomposition* of a
@@ -106,8 +148,10 @@ column `v` is `v = sum_{t<4} l_t * 128^t` with every `l_t` looked up in the rang
 
 **L1 (lookups are multiset equality).** A LogUp relation with random challenges `(z, alpha)` drawn after the base commitment makes `sum use_i / (z - h(t_i))
 = 0` over all components and the public part imply, except with probability about `N / 2^124` (QM31), that the multiset of used tuples equals the multiset of
-yielded tuples with the multiplicities as field elements; this is equality of counts because every relation is used fewer than p times in total
-(enforced for the range relation, which is the only one with many uses of one tuple, by `check_lookup_budget`: G4). Every component's claimed
+yielded tuples with the multiplicities as field elements; this is equality of counts because no single tuple can be used p times: for the range relation
+the total number of uses is below p (`check_lookup_budget`, G4); for the tensor, float and power-of-two relations the total can be larger (the tensor
+relation is used `2K + 1` times per matmul row), but the index part of every tuple is a preprocessed constant or a constant of the constraint, so a wrong
+value at one index can be used at most as often as that index occurs (`n`, `m`, or once; the hit counters at most once per row), far below p. Every component's claimed
 sum is bound by the framework's cumulative-sum constraint (`cumsum_shift = claimed_sum / 2^log_size`, cyclic `[-1, 0]` mask), and the verifier requires
 `sum(claimed) + public_sum = 0` for each relation (relations have separate challenges, and the check on the total forces per-relation cancellation).
 
@@ -161,6 +205,11 @@ the public output is the network's output.
 unconditional lookups (range checks, powers of two) are self-balancing (each use is counted in the table multiplicities). The hit counters are gated by
 `real` (F4). Padding-row columns are otherwise free but constrained like any row, and no constraint of a padding row feeds a real one.
 
+**L9a (the encoding of a proof).** A proof is accepted only in its canonical serialization, within a size bound that follows from the statement, with
+every field element reduced, with the parameters of the verifier, with the last FRI layer of the size of the parameters, and with exactly one queried
+value per query position (H1 to H4). stwo's arithmetic therefore only sees field elements, and its asserts on shapes are not reachable from a proof file
+as far as the review found (a panic would still be a rejection).
+
 **L9 (verifier).** The preprocessed root is recomputed from the verifier's statement (index columns, `real`, multiplicities, tables) and compared; the PCS
 and FRI parameters are the verifier's, not read from the proof; the full structure of the stwo proof (trees, sampled values per column, decommitments,
 queried values) is checked before stwo reads it, and a panic inside stwo is a rejection (G3); the statement and claimed sums are in the transcript before
@@ -187,11 +236,14 @@ finite before and after the dtype's rounding (G6). Constraint degrees are at mos
 
 ## 6. Assumptions and limits
 
-* stwo's DEEP-ALI + FRI soundness holds with the verifier-chosen parameters, and the lifted-Merkle PCS binds columns of mixed sizes. The bound claimed
-  (144 bits) is the conjectured one; the proven (Johnson bound) estimate is about 80 bits. The LogUp and DEEP errors over QM31 are
-  negligible.
+* stwo's DEEP-ALI + FRI soundness holds with the verifier-chosen parameters (blowup 4, 64 queries, 16 bits of proof of work for the queries and 16 for
+  the out-of-domain point), and the lifted-Merkle PCS binds columns of mixed sizes. Security estimates (round 3 corrected the earlier "about 80 bits
+  proven"): about 144 bits under the conjectured capacity-level soundness of FRI, which is disputed; under proven analyses about 66 bits with a concrete
+  proximity parameter (80 bits is the unattainable limit of the Johnson bound), about 59 bits in the unique-decoding regime, and a commit-phase term of
+  about 2^-58 at the largest supported domain, which proof of work does not improve. The LogUp error is at most about 2^-93 at the lookup budget and the
+  DEEP error about 2^-97. More queries or a larger blowup are needed for a proven level above 64 bits.
 * The Fiat-Shamir transcript is Blake2s with the statement mixed in first.
-* Supported ranges: `kx, kw in [-100, 127]`, a quantization shift of at least 1 for every non-zero float, `K <= 8192`, right shift of the requantization at most 20,
+* Supported ranges: `kx, kw in [-122, 127]` (every finite f32), a quantization shift of at least 1 for every non-zero float, `K <= 8192`, right shift of the requantization at most 20,
   at most 64 layers, every tensor at most `2^24` elements, fewer than p range lookups in total (G4), finite public floats before and after the dtype's
   rounding. Statements outside these are refused (by the prover and by the verifier), not unsound.
 * The proof is an integrity proof, not zero knowledge: the weights and the input are public inputs of the verifier. The output is public.
@@ -202,7 +254,9 @@ finite before and after the dtype's rounding (G6). Constraint degrees are at mos
 
 * Not a machine-checked proof: the arguments in section 4 are manual. The constraints were not modelled in a proof assistant or checked with a dedicated
   ZK-circuit analysis tool (for example an under-constraint solver).
-* Not an audit by a third party. Two rounds with independent reviewers plus a test suite is reasonable evidence, not a guarantee: the first version
+* Round 3's H1 was fixed defensively: the attack the reviewer described was not built, so whether it was exploitable in practice is not established.
+  The first verifier review of round 3 is incomplete (stopped, report truncated); the second covered the same scope as a validation review.
+* Not an audit by a third party. Three rounds with independent reviewers plus a test suite is reasonable evidence, not a guarantee: the first version
   contained seven findings that passed all of its original tests, and the round-1 fixes still contained two critical ones (G1, G2) that the author's own
   second pass missed.
 * stwo itself (the constraint framework, the prover and verifier, FRI and the PCS) was relied on, not audited.
@@ -217,7 +271,8 @@ every mode (with and without ReLU), and every number in a proof is attacker-cont
 ```bash
 cd tt-zkml
 cargo test --release -p tt-zkml --lib                 # the unit tests
-cargo test --release -p tt-zkml --test audit          # the forgeries of both rounds (f*, g*)
+cargo test --release -p tt-zkml --test audit          # the forgeries and malformed proofs of all rounds (f*, g*, h*)
+ROW_FULL=1 cargo test --release -p tt-zkml --test row_exhaustive   # the exhaustive row-level check, full domain (minutes)
 cargo test --release -p tt-zkml --test forgery_fuzz   # the randomized forgery test (FUZZ_ITERS, FUZZ_SEED for longer runs)
 cargo test --release -p tt-zkml --test proof          # the end-to-end test on a device
 ```

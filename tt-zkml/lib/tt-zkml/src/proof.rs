@@ -75,12 +75,20 @@ impl From<WitnessError> for ProveError {
 }
 
 const LOG_BLOWUP_FACTOR: u32 = 2;
+/// log2 of the number of coefficients of the last FRI layer.
+const LOG_LAST_LAYER_DEGREE_BOUND: u32 = 0;
 
-/// The commitment parameters for traces of at most `2^max_log_size` rows: blowup 4, 64 queries and 16 bits of proof of work, which is about
-/// 64 * 2 + 16 = 144 bits under the conjectured FRI soundness and about 80 bits under the proven (Johnson bound) analysis (see docs/audit.md).
+const POW_BITS: u32 = 16;
+const N_QUERIES: usize = 64;
+const FOLD_STEP: u32 = 1;
+
+/// The commitment parameters for traces of at most `2^max_log_size` rows: blowup 4, 64 queries and 16 bits of proof of work. Security: about
+/// 64 * 2 + 16 = 144 bits under the conjectured (capacity-level) FRI soundness, which is disputed; under proven analyses it is far lower: 80 bits is the
+/// limit of the Johnson bound that no concrete parameter reaches, about 66 bits with a concrete proximity parameter, about 59 bits in the
+/// unique-decoding regime, and the commit-phase term at the largest supported domain is about 2^-58 (see docs/audit.md).
 fn pcs_config(max_log_size: u32) -> PcsConfig {
     PcsConfig {
-        fri_params: FriParams::new(16, 0, LOG_BLOWUP_FACTOR, 64, 1),
+        fri_params: FriParams::new(POW_BITS, LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES, FOLD_STEP),
         trace_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
         preprocessed_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
     }
@@ -104,7 +112,9 @@ fn components(kinds: &[Kind], lookups: &Lookups, claimed_sums: &[SecureField]) -
 /// Binds the whole public statement to the Fiat-Shamir transcript before anything else: the layers (shapes, activation, all exponents), the output
 /// and the float input and weights as the device sees them. The preprocessed root alone would not bind the exponents or the activations.
 fn mix_statement(channel: &mut Blake2sChannel, specs: &[LayerSpec], output: &[i32], input: &[f32], weights: &[Vec<f32>]) {
-    let mut words: Vec<u32> = b"tt-zkml proof v2".chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let mut words: Vec<u32> = b"tt-zkml proof v3".chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    // the parameters of the proof system are part of what is proven with
+    words.extend([POW_BITS, LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES as u32, FOLD_STEP]);
     words.push(specs.len() as u32);
     for s in specs {
         words.extend([s.m as u32, s.k as u32, s.n as u32, s.relu as u32, s.ko as u32, s.kw as u32, s.kx as u32]);
@@ -136,9 +146,13 @@ fn preprocessed_evals(kinds: &[Kind]) -> Vec<stwo::prover::poly::circle::CircleE
 impl Proof {
     /// The output as floats, approximately what the unquantized network computes: the public int8 output divided by `2^(kx + sum(kw + ko))`, the exponents
     /// of the statement. Anyone can compute it from the proof alone; it is the same as [`crate::Trace::dequantized_output`] of the execution.
+    ///
+    /// Meaningful only for a proof that [`verify`] accepted: the exponents of an unverified proof are whatever its author wrote.
     pub fn dequantized_output(&self) -> Vec<f32> {
-        let exponent: i64 = self.specs[0].kx as i64 + self.specs.iter().map(|s| s.kw as i64 + s.ko as i64).sum::<i64>();
-        self.output.iter().map(|&v| (v as f64 / 2f64.powi(exponent as i32)) as f32).collect()
+        let Some(first) = self.specs.first() else { return Vec::new() };
+        let exponent: i64 = first.kx as i64 + self.specs.iter().map(|s| s.kw as i64 + s.ko as i64).sum::<i64>();
+        let scale = 2f64.powi(exponent.clamp(-2000, 2000) as i32);
+        self.output.iter().map(|&v| (v as f64 / scale) as f32).collect()
     }
 
     /// The proof and its statement as one JSON document.
@@ -243,13 +257,30 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     if proof.claimed_sums.len() != kinds.len() {
         return Err(ProveError::Decode("one claimed sum per component is expected".into()));
     }
-    let stark: StarkProof<Blake2sMerkleHasher> = serde_json::from_slice(&proof.bytes).map_err(|e| ProveError::Decode(e.to_string()))?;
+    if !proof.claimed_sums.iter().all(canonical) {
+        return Err(ProveError::Decode("a claimed sum is a field element that is not reduced (not below the modulus)".into()));
+    }
     let max_log = max_log_size(&kinds);
     let config = pcs_config(max_log);
-
-    // ---- the structure of the stwo proof, so that stwo never meets a shape it would assert on ----
     let shape_comps = components(&kinds, &Lookups::dummy(), &proof.claimed_sums);
     let sizes = TreeVec::concat_cols(shape_comps.iter().map(|c| c.trace_log_degree_bounds()));
+    // The size of a proof is bounded by its statement: nothing larger is parsed (the verifier's memory must not depend on the proof file).
+    let limit = max_proof_bytes(sizes.iter().map(|t| t.len()).sum(), max_log);
+    if proof.bytes.len() > limit {
+        return Err(ProveError::Decode(format!("the proof has {} bytes, more than a proof of this statement can have ({limit})", proof.bytes.len())));
+    }
+    let stark: StarkProof<Blake2sMerkleHasher> = serde_json::from_slice(&proof.bytes).map_err(|e| ProveError::Decode(e.to_string()))?;
+    // One encoding per proof: no unknown fields, no other spelling of the same values (the bytes are exactly what the prover's serializer writes).
+    if serde_json::to_vec(&stark).map_err(|e| ProveError::Decode(e.to_string()))? != proof.bytes {
+        return Err(ProveError::Decode("the proof is not in its canonical encoding".into()));
+    }
+    // The parameters written into the proof are not used (the verifier's own are), but a proof that states others is refused rather than misread.
+    if stark.config != config {
+        return Err(ProveError::Decode("the proof states other commitment parameters than the verifier's".into()));
+    }
+    check_last_layer(&proof.bytes).map_err(ProveError::Decode)?;
+
+    // ---- the structure of the stwo proof, so that stwo never meets a shape it would assert on ----
     check_structure(&stark, &shape_comps, &sizes, kinds.iter().map(|k| k.pre_ids().len()).sum(), max_log).map_err(ProveError::Verification)?;
 
     // ---- the preprocessed commitment must be the one of the statement's constants (index columns, multiplicities, the tables) ----
@@ -280,11 +311,80 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
 
     let comps = components(&kinds, &lookups, &proof.claimed_sums);
     let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
+    // The number of values per queried column must be the number of distinct query positions, which only the transcript gives: replay it on a copy.
+    let (pre_queries, queries) = query_counts(&stark, &sizes, config, max_log, channel.clone()).map_err(ProveError::Verification)?;
+    for (tree, columns) in stark.queried_values.iter().enumerate() {
+        let expected = if tree == 0 { pre_queries } else { queries };
+        if columns.iter().any(|c| c.len() != expected) {
+            return fail("the proof does not have one queried value per query position");
+        }
+    }
     // Defense in depth: the structure was checked above, but a panic inside stwo on attacker data must be a rejection, not a crash.
     match catch_unwind(AssertUnwindSafe(|| stwo_verify(&refs, channel, scheme, stark))) {
         Ok(result) => result.map_err(|e| ProveError::Verification(format!("{e:?}"))),
         Err(_) => fail("the proof is malformed (the stwo verifier rejected its structure)"),
     }
+}
+
+/// A field element of a proof must be given by its canonical representative: stwo deserializes M31 as a raw `u32` and its arithmetic assumes values below
+/// the modulus (an addition of two raw values would otherwise wrap modulo 2^32, which is not field arithmetic). Every field element of an untrusted proof is
+/// therefore checked before anything is computed with it.
+fn canonical(v: &SecureField) -> bool {
+    v.to_m31_array().iter().all(|c| c.0 < stwo::core::fields::m31::P)
+}
+
+/// The last FRI layer's polynomial: its `log_size` is a field of the proof that the transcript does not cover (only the coefficients are hashed) and that
+/// stwo uses as a loop bound and a shift amount. Its fields are private, so it is checked on the JSON: exactly `2^LOG_LAST_LAYER_DEGREE_BOUND` coefficients
+/// and the matching `log_size`.
+fn check_last_layer(bytes: &[u8]) -> Result<(), String> {
+    let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let poly = &json["fri_proof"]["last_layer_poly"];
+    let coeffs = poly["coeffs"].as_array().map(|c| c.len());
+    if coeffs != Some(1 << LOG_LAST_LAYER_DEGREE_BOUND) || poly["log_size"].as_u64() != Some(LOG_LAST_LAYER_DEGREE_BOUND as u64) {
+        return Err("the last FRI layer of the proof does not have the size of the parameters".into());
+    }
+    Ok(())
+}
+
+/// An upper bound of the size of the serialized stwo proof of a statement with `columns` committed columns and traces of at most `2^max_log` rows:
+/// every number is counted with its longest decimal form and separator.
+fn max_proof_bytes(columns: usize, max_log: u32) -> usize {
+    let height = (max_log + LOG_BLOWUP_FACTOR + 2) as usize;
+    let columns = columns + 8; // + the composition polynomial
+    let field_elements = columns * 2 * 4 + columns * N_QUERIES + (height + 2) * N_QUERIES * 2 * 4 + 16;
+    let hashes = (4 + height + 2) * N_QUERIES * (height + 1) + 64;
+    field_elements * 14 + hashes * 32 * 4 + 16 * 1024
+}
+
+/// The number of distinct query positions of the preprocessed tree and of the other trees. They follow from the transcript only after stwo has absorbed
+/// the composition commitment, the sampled values and the FRI layers, so this replays those steps of stwo's verifier (`verify_ex`, `verify_values`) on a
+/// copy of the channel, with a second commitment-scheme verifier that only carries the trees' sizes. stwo then does the real work on the original.
+fn query_counts(stark: &StarkProof<Blake2sMerkleHasher>, sizes: &TreeVec<Vec<u32>>, config: PcsConfig, max_log: u32, mut channel: Blake2sChannel) -> Result<(usize, usize), String> {
+    use stwo::core::circle::CirclePoint;
+    use stwo::core::fri::{CirclePolyDegreeBound, FriVerifier};
+    use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
+    use stwo::core::proof_of_work::OODS_POW_BITS;
+    let mut scheme = CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+    let scratch = &mut Blake2sChannel::default();
+    for tree in 0..3 {
+        scheme.commit(stark.commitments[tree], &sizes[tree], scratch);
+    }
+    let _random_coeff = channel.draw_secure_felt();
+    scheme.commit(stark.commitments[3], &[max_log; 8], &mut channel);
+    if !channel.verify_pow_nonce(OODS_POW_BITS, stark.oods_proof_of_work) {
+        return Err("the proof of work before the out-of-domain point is wrong".into());
+    }
+    channel.mix_u64(stark.oods_proof_of_work);
+    let _oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+    channel.mix_felts(&stark.sampled_values.clone().flatten_cols());
+    let _random_coeff = channel.draw_secure_felt();
+    let lifting_log_size = scheme.trees.last().unwrap().height;
+    let bound = CirclePolyDegreeBound::new(lifting_log_size - config.fri_params.log_blowup_factor);
+    let mut fri = FriVerifier::<Blake2sMerkleChannel>::commit(&mut channel, config.fri_params, stark.fri_proof.clone(), bound).map_err(|e| format!("{e:?}"))?;
+    fri.verify_proof_of_work(&mut channel).map_err(|e| format!("{e:?}"))?;
+    let positions = fri.sample_query_positions(&mut channel);
+    let pre_positions = prepare_preprocessed_query_positions(&positions, lifting_log_size, scheme.trees[0].height);
+    Ok((pre_positions.len(), positions.len()))
 }
 
 /// Checks the shapes of a stwo proof against the statement before stwo reads it: the number of trees, the sampled values per column (the number of
@@ -295,6 +395,21 @@ fn check_structure(stark: &StarkProof<Blake2sMerkleHasher>, comps: &[NetComponen
     use stwo::core::circle::CirclePoint;
     const COMPOSITION_COLUMNS: usize = 8; // 2 * SECURE_EXTENSION_DEGREE
     let p = &stark.0;
+    // every field element is canonical (see `canonical`)
+    let base_ok = p.queried_values.iter().flatten().flatten().all(|v| v.0 < stwo::core::fields::m31::P);
+    let fri = &p.fri_proof;
+    let secure_ok = p
+        .sampled_values
+        .iter()
+        .flatten()
+        .flatten()
+        .chain(&fri.first_layer.fri_witness)
+        .chain(fri.inner_layers.iter().flat_map(|l| &l.fri_witness))
+        .chain(fri.last_layer_poly.clone().into_ordered_coefficients().iter())
+        .all(canonical);
+    if !base_ok || !secure_ok {
+        return Err("the proof contains a field element that is not reduced (not below the modulus)".into());
+    }
     if p.commitments.len() != 4 || p.sampled_values.len() != 4 || p.decommitments.len() != 4 || p.queried_values.len() != 4 {
         return Err("the proof does not have the four trees of this statement".into());
     }

@@ -23,6 +23,8 @@ forgery = []
 [dev-dependencies]
 # so that `cargo test` always has the `forgery` feature
 tt-zkml = { path = ".", features = ["forgery"] }
+# the tests edit proofs as JSON values and must write the fields back in their original order (a proof has one canonical encoding)
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 [[test]]
 name = "abi"

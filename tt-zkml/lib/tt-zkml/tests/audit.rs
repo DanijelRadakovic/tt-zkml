@@ -525,3 +525,158 @@ fn g6_non_finite_public_floats_are_refused_before_rounding() {
     public.input = x;
     assert!(proof::verify(&proof, &public).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// Third audit round.
+
+fn with_json(proof: &Proof, edit: impl Fn(&mut serde_json::Value)) -> Proof {
+    let mut json: serde_json::Value = serde_json::from_slice(&proof.bytes).unwrap();
+    edit(&mut json);
+    let mut forged = proof.clone();
+    forged.bytes = serde_json::to_vec(&json).unwrap();
+    forged
+}
+
+/// H1 (round 3): stwo deserializes a field element as a raw `u32` and computes with it as if it were below the modulus. A proof that encodes a value `v`
+/// as `v + p` is "the same" value for the hashes of the transcript's inputs it is not part of, but not for the arithmetic: every field element of a proof
+/// must be canonical, and the verifier says so (rather than failing later for another reason, or not at all).
+#[test]
+fn h1_non_canonical_field_elements_are_refused() {
+    const P: u64 = (1 << 31) - 1;
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[true], &floats(8, 1, -2.0, 2.0), &[floats(12, 2, -1.0, 1.0)], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &public).unwrap();
+    let bump = |v: &mut serde_json::Value| *v = serde_json::json!(v.as_u64().unwrap() + P);
+    let edits: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+        ("a sampled base-trace value", Box::new(move |j| bump(&mut j["sampled_values"][1][0][0][0][0]))),
+        ("a sampled interaction value", Box::new(move |j| bump(&mut j["sampled_values"][2][0][0][1][1]))),
+        ("a sampled composition value", Box::new(move |j| bump(&mut j["sampled_values"][3][0][0][0][0]))),
+        ("a queried value", Box::new(move |j| bump(&mut j["queried_values"][1][0][0]))),
+        ("a FRI witness value", Box::new(move |j| bump(&mut j["fri_proof"]["first_layer"]["fri_witness"][0][0][0]))),
+        ("an inner FRI witness value", Box::new(move |j| bump(&mut j["fri_proof"]["inner_layers"][0]["fri_witness"][0][1][0]))),
+        ("the last layer's coefficient", Box::new(move |j| bump(&mut j["fri_proof"]["last_layer_poly"]["coeffs"][0][0][0]))),
+        ("a value of 2^32 - 1", Box::new(|j| j["sampled_values"][1][0][0][0][0] = serde_json::json!(u32::MAX))),
+    ];
+    for (what, edit) in edits {
+        let forged = with_json(&proof, edit);
+        match proof::verify(&forged, &public) {
+            Err(e) => assert!(e.to_string().contains("not reduced"), "{what}: rejected, but not as a non-canonical element: {e}"),
+            Ok(()) => panic!("the verifier accepted {what} that is not canonical"),
+        }
+    }
+    // the claimed sums are field elements of the proof as well
+    let mut forged = proof.clone();
+    let a = forged.claimed_sums[0].to_m31_array();
+    forged.claimed_sums[0] = stwo::core::fields::qm31::SecureField::from_m31_array([BaseField::from_u32_unchecked(a[0].0 + P as u32), a[1], a[2], a[3]]);
+    assert!(proof::verify(&forged, &public).unwrap_err().to_string().contains("not reduced"));
+}
+
+/// H2 (round 3): the `log_size` of the last FRI layer's polynomial is not covered by the transcript and stwo uses it as a loop bound and a shift amount:
+/// a huge value made the verifier allocate and loop without end on an otherwise valid proof.
+#[test]
+fn h2_the_last_fri_layer_has_the_size_of_the_parameters() {
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[false], &floats(8, 3, -2.0, 2.0), &[floats(12, 4, -1.0, 1.0)], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    for log_size in [1u64, 64, 128, 1 << 20, (1 << 32) - 1] {
+        let forged = with_json(&proof, |j| j["fri_proof"]["last_layer_poly"]["log_size"] = serde_json::json!(log_size));
+        let started = std::time::Instant::now();
+        let e = proof::verify(&forged, &public).expect_err("a wrong log_size must be refused");
+        assert!(e.to_string().contains("last FRI layer"), "log_size {log_size}: {e}");
+        assert!(started.elapsed().as_secs() < 5, "log_size {log_size}: the verifier worked for {:?}", started.elapsed());
+    }
+    let forged = with_json(&proof, |j| {
+        let c = j["fri_proof"]["last_layer_poly"]["coeffs"][0].clone();
+        j["fri_proof"]["last_layer_poly"]["coeffs"].as_array_mut().unwrap().push(c);
+    });
+    assert!(proof::verify(&forged, &public).is_err());
+}
+
+fn small_proof() -> (Proof, PublicInputs) {
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[true], &floats(8, 5, -2.0, 2.0), &[floats(12, 6, -1.0, 1.0)], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &public).unwrap();
+    (proof, public)
+}
+
+fn rejected_with(proof: &Proof, public: &PublicInputs, expected: &str, what: &str) {
+    match proof::verify(proof, public) {
+        Ok(()) => panic!("the verifier accepted {what}"),
+        Err(e) => assert!(e.to_string().contains(expected), "{what}: expected an error about '{expected}', got: {e}"),
+    }
+}
+
+/// H3 (round 3): the number of values of a queried column must be the number of distinct query positions; stwo asserts it. The verifier now derives that
+/// number from the transcript and refuses the proof itself (before, only the `catch_unwind` backstop turned stwo's panic into a rejection).
+#[test]
+fn h3_queried_columns_have_one_value_per_query_position() {
+    let (proof, public) = small_proof();
+    for tree in 0..4 {
+        for longer in [false, true] {
+            let forged = with_json(&proof, |j| {
+                for column in j["queried_values"][tree].as_array_mut().unwrap() {
+                    let column = column.as_array_mut().unwrap();
+                    if longer {
+                        column.push(serde_json::json!(1));
+                    } else {
+                        column.pop();
+                    }
+                }
+            });
+            rejected_with(&forged, &public, "one queried value per query position", &format!("tree {tree} with every column one value {}", if longer { "longer" } else { "shorter" }));
+        }
+    }
+    let forged = with_json(&proof, |j| j["queried_values"][1] = serde_json::json!(vec![Vec::<u32>::new(); j["queried_values"][1].as_array().unwrap().len()]));
+    rejected_with(&forged, &public, "one queried value per query position", "empty queried columns");
+}
+
+/// H4 (round 3): the verifier's memory must not depend on the proof file, and a proof has exactly one encoding: no ignored fields, no other spelling,
+/// no parameters other than the verifier's.
+#[test]
+fn h4_proofs_are_bounded_and_canonical() {
+    let (proof, public) = small_proof();
+    // a field the deserializer would ignore
+    let forged = with_json(&proof, |j| j["junk"] = serde_json::json!([0, 0, 0]));
+    rejected_with(&forged, &public, "canonical encoding", "an unknown field");
+    // megabytes of it: refused by its size, before anything is parsed
+    let forged = with_json(&proof, |j| j["junk"] = serde_json::json!(vec![0u8; 4 << 20]));
+    rejected_with(&forged, &public, "more than a proof of this statement can have", "a proof padded with megabytes");
+    // other spellings of the same proof
+    let mut forged = proof.clone();
+    forged.bytes.insert(0, b' ');
+    rejected_with(&forged, &public, "canonical encoding", "leading whitespace");
+    let mut forged = proof.clone();
+    forged.bytes.push(b'\n');
+    rejected_with(&forged, &public, "canonical encoding", "trailing whitespace");
+    // parameters written into the proof that are not the verifier's
+    for (field, value) in [("n_queries", 1), ("pow_bits", 0), ("log_blowup_factor", 1)] {
+        let forged = with_json(&proof, |j| j["config"]["fri_params"][field] = serde_json::json!(value));
+        rejected_with(&forged, &public, "other commitment parameters", &format!("a proof stating {field} = {value}"));
+    }
+    let forged = with_json(&proof, |j| j["config"]["trace_lifting_log_size"] = serde_json::json!(40));
+    rejected_with(&forged, &public, "other commitment parameters", "a proof stating another lifting size");
+}
+
+/// Round 3, low: helpers on an unverified proof do not panic, and the float range of the scalers covers every finite f32.
+#[test]
+fn round3_low_items() {
+    let (proof, _) = small_proof();
+    let mut empty = proof.clone();
+    empty.specs.clear();
+    assert!(empty.dequantized_output().is_empty());
+    let mut absurd = proof.clone();
+    absurd.specs[0].ko = i32::MAX;
+    absurd.specs[0].kw = i32::MIN;
+    let _ = absurd.dequantized_output(); // no panic
+
+    // tensors with huge floats (the largest finite f32 needs the exponent -122) next to zeros, subnormals and ordinary values
+    let x = vec![f32::MAX, 0.0, f32::from_bits(1), 1.0, -1e35, 3.0, 0.5, -f32::MAX];
+    let w = vec![1e35, -1.0, 0.0, f32::MAX, 2.5, -1e30, 7.0, f32::from_bits(3), 1.0, -0.0, 1e20, 4.0];
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[false], &x, &[w], Dtype::F32).unwrap();
+    honest.check().unwrap();
+    assert_eq!((honest.specs[0].kx, honest.specs[0].kw), (-122, -122));
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &honest.public_inputs()).unwrap();
+}

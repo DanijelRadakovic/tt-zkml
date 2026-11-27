@@ -43,7 +43,7 @@ output, converts everything to M31 columns (`air/trace.rs`) and proves the const
 
 Soundness: the constraints were audited (a manual review, an independent adversarial review, regression tests for every finding and mutation testing of
 those tests); see `docs/audit.md` for the findings (3 critical in the first version, all fixed), the argument for each component and the limits.
-Supported ranges: scaler exponents in [-100, 127], `K <= 8192`, at most 64 layers; the verifier takes the layers and activations from its own model.
+Supported ranges: scaler exponents in [-122, 127] (every finite f32), `K <= 8192`, at most 64 layers; the verifier takes the layers and activations from its own model.
 
 The circuits are documented in full (every column, constraint and lookup, with worked examples) in `lib/tt-zkml/docs/zk-circuits.pdf`
 (source `zk-circuits.typ`, build `typst compile docs/zk-circuits.typ docs/zk-circuits.pdf` from `lib/tt-zkml/`; the numbers of the examples come from
@@ -54,4 +54,6 @@ network, runs it on the device, rebuilds the witness from the trace, proves and 
 refused; `tests/abi.rs` tests the device API; `tests/audit.rs` has a regression test for every finding of the soundness audit, written as a malicious
 prover that rewrites the columns of a component; `tests/forgery_fuzz.rs` is a randomized forgery test: random networks, random forged witnesses and columns,
 and it fails if the verifier ever accepts a statement other than the true one; `FUZZ_ITERS=2000 FUZZ_SEED=7 cargo test --release --test forgery_fuzz` runs it longer).
-The `forgery` cargo feature (enabled by `cargo test`) only exposes the internals those two tests need. Needs nightly Rust (`rust-toolchain.toml`).
+`tests/row_exhaustive.rs` runs the real constraint code on single rows for every choice a malicious prover has, over small domains, and requires that
+every accepted row is a true one (`ROW_FULL=1 cargo test --release --test row_exhaustive` for the full domain).
+The `forgery` cargo feature (enabled by `cargo test`) only exposes the internals these tests need. Needs nightly Rust (`rust-toolchain.toml`).

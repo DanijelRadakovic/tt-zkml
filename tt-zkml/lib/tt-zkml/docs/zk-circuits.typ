@@ -322,9 +322,12 @@ public side yields it (so a quantized tensor is the quantization of exactly the 
 + the statement is the verifier's: the layers, activations and shapes ($m, k, n$, relu) equal the verifier's model (only the exponents $k_x, k_w, k_o$ come from the proof);
   the floats are finite as given and after the dtype's rounding (a NaN would round to $-0$ in bf16); the public output is in $[-127, 127]$ (checked without
   integer overflow: $-2^(31)$ is $-1$ in $FF_p$); the total number of range lookups of the statement is below $p$ (LogUp only proves counts modulo $p$);
-+ the shape of the stwo proof is that of the statement (trees, sampled values per column, decommitments, queried values per column), so that malformed
-  data is a rejection; any panic inside the stwo verifier is turned into a rejection as well;
-+ the statement (layers, output, floats) is mixed into the Fiat-Shamir transcript first, then the preprocessed root is recomputed from the statement and compared with the proof's;
++ the proof file is well formed before anything is computed with it: its size is within the bound of the statement, its bytes are the canonical
+  serialization (no unknown fields, no other spelling), the parameters it states are the verifier's, every field element is reduced (below $p$: stwo's
+  arithmetic assumes it), the last FRI layer has the size of the parameters, and its shape is that of the statement (trees, sampled values per column,
+  decommitments, one queried value per query position, which the verifier derives by replaying the transcript); any panic inside the stwo verifier is
+  turned into a rejection as well;
++ the statement (the parameters of the proof system, layers, output, floats) is mixed into the Fiat-Shamir transcript first, then the preprocessed root is recomputed from the statement and compared with the proof's;
 + the number of commitments and sampled columns is that of the statement; the lookup elements are drawn after the base trace and the claimed sums are mixed into the transcript
   before the interaction trace is committed;
 + $sum_c "claimed"_c + P = 0$ (it is bound to the per-row LogUp constraints by the framework, and must vanish for each relation: they have independent random elements);
@@ -333,7 +336,7 @@ public side yields it (so a quantized tensor is the quantization of exactly the 
 = Supported ranges and the integer bounds that prevent wrap-around
 
 Statements outside these ranges are refused by prover and verifier (never unsound):
-$k_x, k_w in [-100, 127]$ with a quantization shift of at least 1 for every non-zero float; $K <= 8192$; right shift $s <= 20$; at most 64 layers; every tensor at most $2^(24)$ elements;
+$k_x, k_w in [-122, 127]$ (every finite f32) with a quantization shift of at least 1 for every non-zero float; $K <= 8192$; right shift $s <= 20$; at most 64 layers; every tensor at most $2^(24)$ elements;
 a tensor of only tiny non-zero floats (scaler capped at 127) is not supported; the total number of range lookups of all components (rows times
 range lookups per row, padding included) must be below $p$.
 

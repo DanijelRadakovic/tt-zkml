@@ -105,7 +105,9 @@ impl LayerSpec {
             return Err(SpecError::TooLarge { layer, k: self.k });
         }
         for (what, k) in [("kw", self.kw), ("kx", self.kx)] {
-            if !(-100..=127).contains(&k) {
+            // -122 is the exponent of the largest finite f32 (127 * 2^-122 < f32::MAX < 127 * 2^-121); the shift of every float then stays in the range the
+            // constraints check (`diff = raw - 25 <= 254`)
+            if !(-122..=127).contains(&k) {
                 return Err(SpecError::Shape(format!("layer {layer}: the quantization exponent {what} = {k} is not supported")));
             }
         }
