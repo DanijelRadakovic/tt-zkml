@@ -32,7 +32,7 @@ cargo run --release --bin tt-zkml -- run --model /tmp/demo --input /tmp/demo/inp
 
 # 3. commit to the model: done once, by whoever holds the weights. The commitment (the architecture and a 32-byte root) is all a verifier needs
 cargo run --release --bin tt-zkml -- commit --model /tmp/demo --out /tmp/demo/model.commitment
-#   model commitment c09860c4...494eaa (2 layers, bf16) written to /tmp/demo/model.commitment
+#   model commitment (id 5d4a91cc...1f9a3a97; 2 layers, bf16) written to /tmp/demo/model.commitment
 
 # 4. run it, generate the proof of the execution and verify it
 cargo run --release --bin tt-zkml -- prove --model /tmp/demo --input /tmp/demo/input.f32 --proof /tmp/demo/proof.bin

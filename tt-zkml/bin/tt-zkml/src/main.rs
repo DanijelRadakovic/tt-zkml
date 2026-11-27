@@ -250,7 +250,7 @@ fn prove(a: ProveArgs) -> Result<ExitCode, String> {
     println!("proof written to {}", a.proof.display());
     // what a verifier would hold: the commitment of the model (not the weights) and the input
     let commitment = ModelCommitment::new(&model).map_err(|e| e.to_string())?;
-    println!("model commitment: {}", hex(&commitment.root));
+    println!("model commitment id: {}", hex(&commitment.id()));
     let t = Instant::now();
     proof::verify(&proof, &PublicInputs { model: commitment, input: x }).map_err(|e| e.to_string())?;
     println!("proof verified in {:.2} s", t.elapsed().as_secs_f64());
@@ -266,7 +266,7 @@ fn commit(a: CommitArgs) -> Result<(), String> {
     let t = Instant::now();
     let commitment = ModelCommitment::new(&model).map_err(|e| e.to_string())?;
     fs::write(&a.out, commitment.to_json()).map_err(|e| format!("{}: {e}", a.out.display()))?;
-    println!("model commitment {} ({} layers, {}) written to {} in {:.2} s", hex(&commitment.root), commitment.layers.len(), modelfile::dtype_name(commitment.dtype), a.out.display(), t.elapsed().as_secs_f64());
+    println!("model commitment (id {}; {} layers, {}) written to {} in {:.2} s", hex(&commitment.id()), commitment.layers.len(), modelfile::dtype_name(commitment.dtype), a.out.display(), t.elapsed().as_secs_f64());
     Ok(())
 }
 

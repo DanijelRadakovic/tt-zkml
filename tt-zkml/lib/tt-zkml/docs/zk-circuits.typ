@@ -44,8 +44,8 @@ weights $W_l$), the float input $X$ (rounded first for a bf16 model), and for th
 + $Y = o_(L-1)$.
 
 The verifier is not given the weights: it holds the commitment $C$, computed once by whoever holds the model, and the proof shows that the committed
-weights were used (section 3). This is not zero knowledge: each proof opens a few values of the committed columns, so enough proofs of one model reveal
-it. The input and the output are public. The device and its trace are not trusted: only the proof matters. The soundness of the first version of these circuits was audited (see docs/audit.md); every constraint below is the fixed one.
+weights were used (sections 3 and 4). This is not zero knowledge: each proof opens a few values of the committed columns, so enough proofs of one model reveal
+it. The input and the output are public. The device and its trace are not trusted: only the proof matters. The circuits were audited in four rounds (see docs/audit.md, the last one on the commitment design); every constraint below is the fixed one.
 
 == The pieces and how they are linked
 
@@ -54,15 +54,15 @@ it. The input and the output are public. The device and its trace are not truste
     let b(t, w: 70pt) = rect(width: w, inset: 5pt, radius: 2pt, stroke: 0.6pt, fill: luma(245), align(center, text(size: 8pt, t)))
     let a = text(size: 11pt, $arrow.r$)
     align(center, grid(columns: 7, column-gutter: 4pt, align: horizon + center,
-      b[public floats\ $X$, $W_l$], a, b[*Tensor*\ quantize], a, b[*Matmul*\ $a = x w$], a, b[*Requant*\ ReLU, round]))
+      b[public input $X$\ committed $W_l$], a, b[*Tensor*\ quantize], a, b[*Matmul*\ $a = x w$], a, b[*Requant*\ ReLU, round]))
   },
-  caption: [Data flow of one layer. The arrows are LogUp lookups on tuples. The output $o_l$ of `Requant` is the input $q^x_(l+1)$ read by the next layer's `Matmul`; the
+  caption: [Data flow of one layer. The input floats reach `Tensor` by a lookup of public values, the weights as columns of the committed model; the other arrows are LogUp lookups on tuples. The output $o_l$ of `Requant` is the input $q^x_(l+1)$ read by the next layer's `Matmul`; the
     last output is public.],
 )
 
 #ctable((auto, 1fr, auto),
   [Component], [One row per], [Role],
-  [`Tensor` ($X_0$, $W_l$)], [element of the tensor], [consumes the public float, proves $q = op("rne")("float" dot 2^k)$, range checks $q$, yields it to the matmul],
+  [`Tensor` ($X_0$, $W_l$)], [element of the tensor], [takes the float (public input, or committed weight), proves $q = op("rne")("float" dot 2^k)$, range checks $q$, yields it to the matmul],
   [`Matmul`($l$)], [output element $(m, n)$], [proves $a = sum_k x_k w_k$ and reads $x_k, w_k$ from the tensors, yields $a$],
   [`Requant`($l$)], [output element $(m, n)$], [consumes $a$, applies ReLU and the rounding, yields $o$ as the next layer's $x$],
   [`Table`], [value $0 dots 254$], [the range table (multiplicities)],
@@ -121,10 +121,80 @@ $"fhit"_t = 2^(20) + t$ for the "largest float" counter of the float tensor $t$.
   [is-zero ($z, g, g^(-1)$)], [$z (z - 1) = 0$, $z g = 0$, $(1 - z)(g dot g^(-1) - 1) = 0$ force $z = 1 <=> g = 0$.],
 )
 
-= Component `Tensor`: quantizing a public float
+= The model commitment
+
+== What is committed and who holds what
+
+The model is committed *once*, by whoever holds the weights, independently of any proof. For every layer $l$, each weight (as the device sees it: rounded to
+bf16 for a bf16 model) is written as the triple $(S, M, E)$ with value $(-1)^S dot M dot 2^(E - 150)$: the sign, the 24-bit significand and the biased
+exponent (at least 1; zero is $(0, 0, 1)$). The three columns of a layer have one row per weight, in row-major order of the $[k, n]$ tensor, padded to a
+power of two (at least 16 rows) with $(0, 0, 1)$. The columns of all layers, in layer order, are committed as one Merkle tree with the commitment scheme of
+the proofs; its root $C$ is the commitment.
+
+#ctable((auto, 1fr),
+  [Object], [Contents and use],
+  [`ModelCommitment`], [the dtype, the layers (sizes, ReLU flags) and the root $C$ (32 bytes). Computed by `tt-zkml commit` / `ModelCommitment::new`. This is all the
+    verifier holds of the model. *The whole object is the commitment*: $C$ alone binds the numbers, not what they mean (16 numbers fit a $4 times 4$, a $2 times 8$ or an $8 times 2$ layer, with or
+    without ReLU), so the architecture and the dtype must come from the same trusted source as $C$. `id()`, a hash of the parameters, the dtype, the layers and
+    $C$, names a model by one value.],
+  [`VerifyingKey`], [the commitment, a batch size, and the root of the tree of constants for these shapes. Built by the verifier itself (`VerifyingKey::new`), cached in
+    memory and reused for every proof of that model and batch size; it is trusted like the verifier and is never loaded from a file.],
+  [the proof], [contains the model tree again (tree 0); its root must equal $C$. So every proof against one commitment is about the same committed columns.],
+)
+
+#figure(
+  {
+    let b(t, w: 92pt) = rect(width: w, inset: 5pt, radius: 2pt, stroke: 0.6pt, fill: luma(245), align(center, text(size: 8pt, t)))
+    let a = text(size: 11pt, $arrow.r$)
+    align(center, grid(columns: 7, column-gutter: 4pt, align: horizon + center,
+      b[*commit* (once)\ weights $arrow.r$ $C$], a, b[*prove* (per input)\ weights, input, device trace $arrow.r$ proof], a, b[*key* (once per batch size)\ shapes $arrow.r$ constants root], a, b[*verify*\ $C$, key, input, proof]))
+  },
+  caption: [Who needs what. Only `commit` and `prove` touch the weights. The verifier's work per proof is proportional to the input and the output, not to the model.],
+)
+
+*The commitment depends only on the model.* The model tree is "lifted" (its columns are repeated) only to the size of the largest weight tensor, not to the size of
+the trace, so $C$ is the same for every batch size and input. (stwo gives the first tree of a proof its own size; this is why the model is tree 0.)
+
+== How a proof is tied to the commitment
+
++ Tree 0 of the proof must have the root $C$ (the verifier compares 32 bytes).
++ In the `Tensor` component of the weights of layer $l$, row $r$ reads the committed triple of its element and must repeat it in its own columns:
+  $s = S$, $m = M$, $e' = E$ (constraint T0a of the next section). The quantization constraints then work on $(s, m, e')$ exactly as for the public input.
++ Nobody but the committer knows $(S, M, E)$, and the committer may be the cheating prover. The circuit therefore checks the triple itself: $s$ is a bit (T0b),
+  $m$ is limb checked to $0 <= m < 2^(29)$ (T0c), and $e'$ is confined to one small integer range by the range checks of the quantization shift. So every
+  committed triple that has a proof at all is one well-defined number, and its quantization $q$ and the exponent $k_w$ are unique. A committer who writes values
+  that are not proper floats has still committed to one fixed quantized model (or to one for which no proof exists).
+
+== Example: the model tree of $W = [127.0, 2.5, -3.5, 0.0]$
+
+A single layer with $k dot n = 4$ weights gives three columns of 16 rows (the first four are the weights, the other twelve are padding):
+
+#ctable((auto,) * 5,
+  [row], [weight], [$S$], [$M$], [$E$],
+  [0], [127.0], [0], [16646144], [133],
+  [1], [2.5], [0], [10485760], [128],
+  [2], [-3.5], [1], [14680064], [128],
+  [3], [0.0], [0], [0], [1],
+  [4 ... 15], [(padding)], [0], [0], [1],
+)
+
+($127.0 = 16646144 dot 2^(133 - 150)$, $2.5 = 10485760 dot 2^(-22)$, $-3.5 = -14680064 dot 2^(-22)$.) The commitment is the Merkle root of these three columns. The `Tensor`
+rows of the example in the next section start from exactly these values; changing any weight by one bit of its significand changes $C$, and a proof made with the
+changed weight is rejected with "the proof is not about the committed model".
+
+== What the commitment does not give
+
+- *It does not hide the weights.* The proof system is not zero knowledge. Every proof opens each model column at 64 points of the extended domain and at one random
+  point, about 68 linear equations in the column's values. A tensor of $2^a$ rows is determined after about $2^a slash 68$ proofs of the model (any tensor of at most 64
+  rows after a single proof), and fewer in practice, because the trace repeats the same values. The commitment means "the verifier does not need the weights".
+- *It commits to the quantized model.* stwo enforces that a small column is the periodic repetition of its rows only for columns read at two points (the LogUp sum). A
+  cheating committer could commit a small tensor that is not periodic, i.e. several triples per element. By the argument of the audit (not demonstrated) the LogUp sum,
+  which is periodic, forces all of them to the same $q$ and $k_w$, so the quantized weights and the output are still unique.
+
+= Component `Tensor`: quantizing a float
 
 One component for the input $X$ (layer 0) and one for every weight matrix $W_l$. For the tensor $t$ with scaler exponent $k$, row $r$ is element $(i, j)$ with
-the *public* float $v = (-1)^s dot m dot 2^(e' - 150)$ ($m$ the 24-bit significand, $e'$ the biased exponent, at least 1; subnormals and zero use $e' = 1$, zero has
+the float $v = (-1)^s dot m dot 2^(e' - 150)$ (public for the input, committed for the weights) ($m$ the 24-bit significand, $e'$ the biased exponent, at least 1; subnormals and zero use $e' = 1$, zero has
 $m = 0$). The quantization is $q = (-1)^s dot op("rne")(m dot 2^(-"sh"))$ with the shift $"raw" = 150 - e' - k$ (because $v dot 2^k = m dot 2^(-"raw")$).
 
 *Preprocessed*: `i`, `j`, `mult` ($n$ for $X$, $m$ for $W$: how often the matmul reads each element), `real`.
@@ -185,7 +255,7 @@ model.
 *Why this is the quantization.* T3-T7 fix the shift: for a float with $"raw" <= 24$ it is $"raw"$ itself, for a tiny one it is 25 and the result is forced to 0 (the true
 value is $m slash 2^("raw") < 2^(24) slash 2^(25) = 1 slash 2$, which rounds to 0). T8-T13 make $q_a$ the nearest integer to $m slash 2^("sh")$ with ties to even.
 The bound $q_a p_2 <= 127 dot 2^(24) < p$ (T14 and $"sh" <= 24$ when $c = 0$; $q_a = 0$ when $c = 1$) means $q_a p_2$ never wraps modulo $p$, so $r$ is the true
-integer remainder. T18 makes $127$ an exact upper bound; T19-T22 together with the verifier's "exactly one" (section 8) make $k$ the *largest* exponent: some real
+integer remainder. T18 makes $127$ an exact upper bound; T19-T22 together with the verifier's "exactly one" (section 9) make $k$ the *largest* exponent: some real
 element exceeds $127 slash 2$ after scaling by $2^k$.
 
 == Example: the weights $W = [127.0, 2.5, -3.5, 0.0]$, $k_w = 0$
@@ -344,14 +414,15 @@ public side yields it (so the quantized input is the quantization of exactly the
 The verifier's work is proportional to the input and the output, not to the model. `verify` returns `Ok` only if:
 
 + the statement is the verifier's: the layers, activations and shapes ($m, k, n$, relu) equal those of the model commitment and the batch size of the key (only the exponents $k_x, k_w, k_o$ come from the proof);
-  the root of tree 0 is the model commitment $C$ and the root of tree 3 is the one the verifier computed for these shapes;
+  the root of tree 0 is the model commitment $C$ and the root of tree 3 is the one the verifier computed for these shapes (the verifying key; it is
+  built only after the cheaper checks have passed, or taken from the verifier's own cache);
   the floats are finite as given and after the dtype's rounding (a NaN would round to $-0$ in bf16); the public output is in $[-127, 127]$ (checked without
   integer overflow: $-2^(31)$ is $-1$ in $FF_p$); the total number of range lookups of the statement is below $p$ (LogUp only proves counts modulo $p$);
 + the proof file is well formed before anything is computed with it: its size is within the bound of the statement, its bytes are the canonical
   binary serialization (no trailing data, no other spelling), the parameters it states are the verifier's, every field element is reduced (below $p$: stwo's
   arithmetic assumes it), the last FRI layer has the size of the parameters, and its shape is that of the statement (trees, sampled values per column,
-  decommitments, one queried value per query position, which the verifier derives by replaying the transcript); any panic inside the stwo verifier is
-  turned into a rejection as well;
+  decommitments, one queried value per query position, which the verifier derives by replaying the transcript, and equal rows where several queries
+  fall on one leaf of the smaller model tree); any panic inside the stwo verifier is turned into a rejection as well;
 + the statement (the parameters of the proof system, layers, output, input floats) is mixed into the Fiat-Shamir transcript first; the model root follows as the first commitment;
 + the number of commitments and sampled columns is that of the statement; the lookup elements are drawn after the base trace and the claimed sums are mixed into the transcript
   before the interaction trace is committed;

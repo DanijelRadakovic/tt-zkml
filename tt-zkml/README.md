@@ -29,7 +29,9 @@ tt-zkml verify --proof proof.bin --commitment model.commitment --input input.f32
 
 **What the verifier holds.** Not the model: a `ModelCommitment` (the architecture: layer sizes, ReLU flags, dtype; and a 32-byte Merkle root of the
 weights' floats), the float input, and the proof with its public statement (the output and the scaler exponents). The commitment is computed once from
-the weights and depends on nothing else (not on the batch size or the input). The proof contains five commitment trees: the model (its root must be the
+the weights and depends on nothing else (not on the batch size or the input). The whole commitment (architecture, dtype and root) is what identifies the
+model: the root alone fits other shapes of the same numbers, so models are named by `ModelCommitment::id()`, a hash of all of it. A `VerifyingKey` is
+built by the verifier itself and is never loaded from a file. The proof contains five commitment trees: the model (its root must be the
 commitment), the trace, the lookup trace, the constants of the statement (index columns, flags, multiplicities, tables: the verifier knows their root
 from the shapes alone; a `VerifyingKey` caches it per model and batch size) and the composition polynomial. Verification then costs nothing proportional
 to the model: about 0.04 s for a 256-512-256-64 network at batch 64, with a 2.2 MB proof and a 591-byte commitment.

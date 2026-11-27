@@ -274,7 +274,11 @@ struct Stats {
 /// `verify` must reject, or accept only the true statement.
 fn judge(proof: &Proof, honest: &Proof, public: &PublicInputs, stats: &mut Stats, context: &str) {
     match proof::verify(proof, public) {
-        Err(_) => stats.rejected += 1,
+        Err(e) => {
+            // the verifier turns a panic inside stwo into this rejection; reaching it means a malformed proof got past the verifier's own checks
+            assert!(!e.to_string().contains("rejected its structure"), "a forged proof reached a panic inside stwo. {context}");
+            stats.rejected += 1
+        }
         Ok(()) => {
             assert!(
                 proof.specs == honest.specs && proof.output == honest.output,

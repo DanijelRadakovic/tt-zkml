@@ -733,3 +733,31 @@ fn m1_the_trace_must_use_the_committed_weights() {
     assert!(proof::verify(&proof, &public).unwrap_err().to_string().contains("committed model"));
     proof::verify(&proof, &other.public_inputs()).unwrap();
 }
+
+/// The model tree is smaller than the other trees, so several query positions fall on the same leaf and its row is sent once per query. stwo asserts that
+/// the copies agree; the verifier must find a disagreement itself. No tampering of a single queried value may reach the panic backstop.
+#[test]
+fn m3_tampered_queried_values_are_rejected_by_the_verifier_itself() {
+    // a small model with a large batch: the model tree is much smaller than the trace, so duplicates are certain
+    let honest = NetworkWitness::simulate(64, &[4, 2], &[false], &floats(64 * 4, 61, -2.0, 2.0), &[floats(8, 62, -1.0, 1.0)], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &public).unwrap();
+    let mut saw_duplicate_rejection = false;
+    for tree in 0..5usize {
+        let queries = {
+            let stark: Stark = bincode::deserialize(&proof.bytes).unwrap();
+            stark.queried_values[tree][0].len()
+        };
+        for q in 0..queries {
+            let forged = with_json(&proof, |j| {
+                let v = &mut j["queried_values"][tree][0][q];
+                *v = serde_json::json!((v.as_u64().unwrap() + 1) % 2147483647);
+            });
+            let e = proof::verify(&forged, &public).expect_err("a tampered queried value must be rejected").to_string();
+            assert!(!e.contains("rejected its structure"), "tree {tree}, query {q}: a panic inside stwo was reached");
+            saw_duplicate_rejection |= e.contains("two different rows");
+        }
+    }
+    assert!(saw_duplicate_rejection, "the test did not exercise a repeated query position");
+}

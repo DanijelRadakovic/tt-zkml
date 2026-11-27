@@ -118,8 +118,12 @@ fn model_log_size(layers: &[Layer]) -> u32 {
 /// scheme of the proofs. It depends on the weights, the architecture and the parameters of the proof system, and on nothing else (not on the batch size
 /// or the input), so it is computed once, by whoever holds the weights, and published.
 ///
-/// A commitment made from other values than proper floats is still a commitment to one fixed model: the constraints make every committed triple a
-/// well-formed number themselves.
+/// A commitment made from other values than proper floats is still a commitment to one fixed quantized model: the constraints make every committed
+/// triple a well-formed number themselves.
+///
+/// **The whole struct is the commitment, not `root` alone.** The Merkle root binds the values of the columns, not what they mean: the same root fits
+/// other shapes, activations, layer orders and dtypes (16 weights can be a 4x4, a 2x8 or an 8x2 layer). A verifier must take `dtype` and `layers` from
+/// the same trusted source as `root`. To name or compare models use [`ModelCommitment::id`], which hashes all of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelCommitment {
     /// How the device treats floats: decides the rounding of the input.
@@ -133,6 +137,23 @@ impl ModelCommitment {
     pub fn new(model: &ModelFile) -> Result<Self, ProveError> {
         let weights: Vec<Vec<f32>> = model.weights.iter().map(|w| effective(w, model.dtype)).collect();
         Self::from_floats(model.dtype, model.layers.clone(), &weights)
+    }
+
+    /// One 32-byte identifier of the model: a hash of the proof-system parameters, the dtype, the architecture and the root. Two commitments are the
+    /// same model exactly if their ids are equal; this, not `root`, is what to publish or compare when a single value is wanted.
+    pub fn id(&self) -> [u8; 32] {
+        let mut hasher = stwo::core::vcs::blake2_hash::Blake2sHasher::default();
+        hasher.update(b"tt-zkml model commitment v1");
+        for v in [POW_BITS, LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES as u32, FOLD_STEP, self.dtype as u32, self.layers.len() as u32] {
+            hasher.update(&v.to_le_bytes());
+        }
+        for l in &self.layers {
+            for v in [l.in_features, l.out_features, l.relu as u32] {
+                hasher.update(&v.to_le_bytes());
+            }
+        }
+        hasher.update(&self.root);
+        hasher.finalize().0
     }
 
     /// The commitment as a small JSON document (the architecture and the root).
@@ -156,6 +177,19 @@ impl ModelCommitment {
         if weights.iter().flatten().any(|v| !v.is_finite()) {
             return bad("the weights must be finite");
         }
+        // A model that no proof can exist for is refused here, not at the first proof: the layers must chain and respect the limits, and every weight
+        // tensor must be quantizable (not made of only tiny non-zero values, and with a quantization shift of at least 1 for every element).
+        spec::validate(&shape_specs(&layers, 1)).map_err(|e| ProveError::Witness(e.to_string()))?;
+        for (l, w) in weights.iter().enumerate() {
+            let k = spec::pot_exponent(w.iter().fold(0.0f32, |a, v| a.max(v.abs())));
+            let unquantizable = w.iter().any(|&v| {
+                let (_, m, ep) = crate::witness::float_parts(v);
+                m != 0 && (k >= 127 || crate::witness::shift_of(ep, k) < 1)
+            });
+            if unquantizable || !(-122..=127).contains(&k) {
+                return Err(ProveError::Witness(format!("the weights of layer {l} cannot be quantized by the circuit (only tiny non-zero values, or a range of values that is too wide)")));
+            }
+        }
         let model_log = model_log_size(&layers);
         let twiddles = twiddles(model_log);
         let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(pcs_config(model_log, model_log), &twiddles);
@@ -172,7 +206,10 @@ impl ModelCommitment {
 
 /// What a verifier can prepare once per model and batch size: the root of the tree of constants (index columns, flags, multiplicities, the tables),
 /// which follows from the shapes alone. Building it costs a commitment of those columns; verifying with it costs nothing proportional to the model.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// A key is trusted as much as the verifier itself: whoever chooses `constants_root` chooses the constants of the circuit. It is therefore built here,
+/// by [`VerifyingKey::new`], and deliberately cannot be deserialized: cache it in memory, or rebuild it from the commitment.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyingKey {
     pub model: ModelCommitment,
     pub batch: usize,
@@ -349,28 +386,33 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     if in0 == 0 || inputs.input.is_empty() || inputs.input.len() % in0 != 0 {
         return Err(ProveError::Verification("the input is not a whole number of rows of the model's input size".into()));
     }
-    let key = VerifyingKey::new(&inputs.model, inputs.input.len() / in0)?;
-    verify_with_key(proof, &key, &inputs.input)
+    let batch = inputs.input.len() / in0;
+    // the key (a commitment of all the constants) is built only once the proof has passed every check that does not need it
+    verify_inner(proof, &inputs.model, batch, &inputs.input, &mut || Ok(VerifyingKey::new(&inputs.model, batch)?.constants_root))
 }
 
 /// Verifies a proof against a prepared key (the model commitment and the batch size) and the float input.
 pub fn verify_with_key(proof: &Proof, key: &VerifyingKey, input: &[f32]) -> Result<(), ProveError> {
+    verify_inner(proof, &key.model, key.batch, input, &mut || Ok(key.constants_root))
+}
+
+fn verify_inner(proof: &Proof, model: &ModelCommitment, batch: usize, input: &[f32], constants_root: &mut dyn FnMut() -> Result<[u8; 32], ProveError>) -> Result<(), ProveError> {
     let fail = |s: &str| Err(ProveError::Verification(s.to_string()));
     // ---- cheap checks first: the statement against the verifier's model ----
     spec::validate(&proof.specs).map_err(|e| ProveError::Verification(e.to_string()))?;
     // The statement is about the verifier's model, not the proof's claim: layers, activations and shapes come from the commitment and the key; only
     // the exponents (which the constraints prove to be the largest ones) are taken from the proof.
     let first = &proof.specs[0];
-    let layers = &key.model.layers;
+    let layers = &model.layers;
     if layers.len() != proof.specs.len()
-        || first.m != key.batch
+        || first.m != batch
         || input.len() != first.m * first.k
         || layers.iter().zip(&proof.specs).any(|(l, s)| l.in_features as usize != s.k || l.out_features as usize != s.n || l.relu != s.relu)
     {
         return fail("the statement is not about this model: the layers, their activations, the batch size or the shapes differ");
     }
     // finite as given (a NaN would round to zero in bf16) and after the dtype's rounding (a large f32 rounds to infinity in bf16)
-    let eff_input = effective(input, key.model.dtype);
+    let eff_input = effective(input, model.dtype);
     if input.iter().chain(eff_input.iter()).any(|v| !v.is_finite()) {
         return fail("the public input must be finite");
     }
@@ -411,10 +453,10 @@ pub fn verify_with_key(proof: &Proof, key: &VerifyingKey, input: &[f32]) -> Resu
     check_structure(&stark, &shape_comps, &sizes, sizes[0].len(), max_log).map_err(ProveError::Verification)?;
 
     // ---- the two trees the verifier knows: the model (its commitment) and the constants of the statement (from the key) ----
-    if stark.commitments[0].0 != key.model.root {
+    if stark.commitments[0].0 != model.root {
         return fail("the proof is not about the committed model");
     }
-    if stark.commitments[CONSTANTS_TREE].0 != key.constants_root {
+    if stark.commitments[CONSTANTS_TREE].0 != constants_root()? {
         return fail("the commitment of the constants is not the one of this statement");
     }
 
@@ -436,11 +478,20 @@ pub fn verify_with_key(proof: &Proof, key: &VerifyingKey, input: &[f32]) -> Resu
     let comps = components(&kinds, &lookups, &proof.claimed_sums);
     let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
     // The number of values per queried column must be the number of distinct query positions, which only the transcript gives: replay it on a copy.
-    let (pre_queries, queries) = query_counts(&stark, &sizes, config, max_log, channel.clone()).map_err(ProveError::Verification)?;
+    let (pre_positions, positions) = query_positions(&stark, &sizes, config, max_log, channel.clone()).map_err(ProveError::Verification)?;
     for (tree, columns) in stark.queried_values.iter().enumerate() {
-        let expected = if tree == 0 { pre_queries } else { queries };
-        if columns.iter().any(|c| c.len() != expected) {
+        let tree_positions = if tree == 0 { &pre_positions } else { &positions };
+        if columns.iter().any(|c| c.len() != tree_positions.len()) {
             return fail("the proof does not have one queried value per query position");
+        }
+        // The model tree is smaller than the others, so several queries can fall on one of its leaves: the row is then sent once per query, and
+        // the copies must agree (stwo asserts it).
+        let mut first: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for (idx, &pos) in tree_positions.iter().enumerate() {
+            let seen = *first.entry(pos).or_insert(idx);
+            if seen != idx && columns.iter().any(|c| c[seen] != c[idx]) {
+                return fail("the proof gives two different rows for one query position");
+            }
         }
     }
     // Defense in depth: the structure was checked above, but a panic inside stwo on attacker data must be a rejection, not a crash.
@@ -479,10 +530,10 @@ fn max_proof_bytes(columns: usize, max_log: u32) -> usize {
     field_elements * 16 + hashes * 32 + (columns * 4 + height * 8 + 64) * 8 + 4096
 }
 
-/// The number of distinct query positions of the preprocessed tree and of the other trees. They follow from the transcript only after stwo has absorbed
+/// The query positions of the model tree (tree 0, which has its own size) and of the other trees. They follow from the transcript only after stwo has absorbed
 /// the composition commitment, the sampled values and the FRI layers, so this replays those steps of stwo's verifier (`verify_ex`, `verify_values`) on a
 /// copy of the channel, with a second commitment-scheme verifier that only carries the trees' sizes. stwo then does the real work on the original.
-fn query_counts(stark: &StarkProof<Blake2sMerkleHasher>, sizes: &TreeVec<Vec<u32>>, config: PcsConfig, max_log: u32, mut channel: Blake2sChannel) -> Result<(usize, usize), String> {
+fn query_positions(stark: &StarkProof<Blake2sMerkleHasher>, sizes: &TreeVec<Vec<u32>>, config: PcsConfig, max_log: u32, mut channel: Blake2sChannel) -> Result<(Vec<usize>, Vec<usize>), String> {
     use stwo::core::circle::CirclePoint;
     use stwo::core::fri::{CirclePolyDegreeBound, FriVerifier};
     use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
@@ -507,7 +558,7 @@ fn query_counts(stark: &StarkProof<Blake2sMerkleHasher>, sizes: &TreeVec<Vec<u32
     fri.verify_proof_of_work(&mut channel).map_err(|e| format!("{e:?}"))?;
     let positions = fri.sample_query_positions(&mut channel);
     let pre_positions = prepare_preprocessed_query_positions(&positions, lifting_log_size, scheme.trees[0].height);
-    Ok((pre_positions.len(), positions.len()))
+    Ok((pre_positions, positions))
 }
 
 /// Checks the shapes of a stwo proof against the statement before stwo reads it: the number of trees, the sampled values per column (the number of
@@ -749,10 +800,25 @@ mod tests {
             verify_with_key(&prove_witness(witness).unwrap(), &key, &witness.x0_float).unwrap();
         }
         assert!(verify_with_key(&prove_witness(&large).unwrap(), &key, &large.x0_float).is_err());
-        // the commitment and the key are small and serializable
-        let json = serde_json::to_string(&key).unwrap();
-        assert_eq!(serde_json::from_str::<VerifyingKey>(&json).unwrap(), key);
+        // the commitment is small and serializable (the key is not: it is rebuilt from the commitment, never loaded)
+        let json = commitment.to_json();
+        assert_eq!(ModelCommitment::from_json(&json).unwrap(), commitment);
         assert!(json.len() < 1000);
+        // the id names the whole commitment: the architecture and the dtype change it, not only the root
+        let mut other = commitment.clone();
+        other.layers[0].relu = !other.layers[0].relu;
+        assert_ne!(other.id(), commitment.id());
+        let mut other = commitment.clone();
+        other.dtype = Dtype::Bf16;
+        assert_ne!(other.id(), commitment.id());
+        let mut other = commitment.clone();
+        (other.layers[0].in_features, other.layers[0].out_features) = (16, 8);
+        (other.layers[1].in_features, other.layers[1].out_features) = (8, 16);
+        assert_ne!(other.id(), commitment.id());
+        // models no proof can exist for are refused when they are committed
+        let layers = commitment.layers.clone();
+        assert!(ModelCommitment::from_floats(Dtype::F32, layers.clone(), &[vec![1e-40; 8 * 16], w[1].clone()]).is_err());
+        assert!(ModelCommitment::from_floats(Dtype::F32, vec![layers[0], layers[0]], &[w[0].clone(), w[0].clone()]).is_err());
     }
 
     /// A forged witness is refused by the consistency checks, and if it is forced past them stwo's prover refuses it or the verifier rejects it.

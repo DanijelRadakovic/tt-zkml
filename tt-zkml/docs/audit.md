@@ -20,14 +20,12 @@ without building the attack), and several sizes were not checked (H2 to H4). Tha
 manual review plus independent adversarial review plus mutation testing plus randomized and exhaustive tests, **not** a machine-checked proof and not a
 third-party audit (section 7).
 
-> **After round 3 the statement changed (model commitment), and that change has not been reviewed independently.** The verifier no longer takes the
-> weights; the model is a commitment (tree 0 of the proof, its root compared with the verifier's `ModelCommitment`), the constants of the statement moved
-> to their own tree (tree 3, root recomputed by the verifier from the shapes and cached in a `VerifyingKey`), and the weight rows are pinned to the model
-> tree by equality constraints instead of a lookup of public floats; the constraints now also check that a committed triple is well formed (sign bit,
-> significand limbs). The proof encoding became binary (bincode). Sections 1 to 8 describe the code as audited (public weights). The new parts are covered
-> by the author's tests only: unit tests of the commitment, `m1_*` in `tests/audit.rs`, the deviation and malformed-float checks of
-> `tests/row_exhaustive.rs` (with their mutation check: removing the equality constraints, the sign-bit constraint or the significand limbs makes a test
-> fail), the forgery fuzz and the device test. They should get a round of their own.
+> **After round 3 the statement changed: the model is a commitment.** The verifier no longer takes the weights; the model is a commitment (tree 0 of
+> the proof, its root compared with the verifier's `ModelCommitment`), the constants of the statement moved to their own tree (tree 3, root recomputed by
+> the verifier from the shapes and cached in a `VerifyingKey`), and the weight rows are pinned to the model tree by equality constraints instead of a
+> lookup of public floats; the constraints also check that a committed triple is well formed (sign bit, significand limbs). The proof encoding became
+> binary (bincode). Sections 1 to 8 describe the code as audited in rounds 1 to 3 (public weights); **section 9 is the audit of the commitment design
+> (round 4).**
 
 ## 1. The statement
 
@@ -293,3 +291,44 @@ the left-shift branch of `uses()` (`f3`), `eval.add_constraint(cl * qa.clone());
 Round 2: delete the `Use::Range` on `sa` and the `left_scaled` constraint (`g1`); use `v.abs() > spec::QMAX` for the output check in `proof.rs` (`g2`); remove
 the `check_structure` call and the `catch_unwind` around `stwo_verify` (`g3`, the abort ends the test process); use `(-ko) as u32` in `LayerSpec::mode` and run
 in a debug build (`g5`); check finiteness only after the rounding (`g6`).
+
+## 9. Round 4: the model commitment
+
+Scope: the commitment design described in the notice at the top (`proof.rs`: `ModelCommitment`, `VerifyingKey`, `verify` / `verify_with_key`, the five
+trees; `air/kind.rs`: the constants tree, the equality and well-formedness constraints of `Tensor(W)`). Statement: `Ok` implies that there is one fixed
+quantized model determined by the commitment (the committed triples read as `(-1)^s * m * 2^(e'-150)`, with the verifier's architecture) and that the
+output is the quantized network of that model on the verifier's input, with the largest exponents.
+
+Method: an independent reviewer (code and statement only; cheating prover and cheating committer played by editing prover-side code of a copy), the
+author's pass, the exhaustive row-level check extended with rows that differ from the model and with malformed committed values (full domain: about 200
+million candidate rows; mutation: removing the equality constraints, the sign-bit constraint or the significand limbs makes a test fail), and the
+forgery fuzz (1,000 iterations on the final code, now failing also if any forged proof reaches the panic backstop).
+
+**Result: no way was found to make an honest verifier (authentic commitment, self-built key) accept a false statement.**
+
+| ID | Sev. | Problem | Fix | Test |
+|---|---|---|---|---|
+| C1 | medium | A `VerifyingKey` could be deserialized, and `verify_with_key` does not re-derive its `constants_root`: whoever supplies the key chooses the constants of the circuit. Confirmed by the reviewer: with a key whose root was replaced, a proof with two swapped index constants verified for an output the committed model does not give. | The key cannot be deserialized any more: it is built by `VerifyingKey::new` from the commitment (documented as trusted like the verifier itself). | (by construction) |
+| C2 | medium | The Merkle `root` alone binds the values of the columns, not their meaning: the reviewer proved and verified different networks under one root (4x4, 2x8, 8x2, with and without ReLU; two layers swapped). Not a break while the verifier takes `layers` and `dtype` from the same trusted source as `root`; it is one if a model is identified by the root. | `ModelCommitment::id()`: a hash of the parameters, the dtype, the layers and the root; the CLI prints and names models by the id; the documentation says the whole struct is the commitment. | `a_model_commitment_depends_on_the_model_only` |
+| C3 | low (a caught panic) | The model tree is smaller than the other trees, so several query positions fall on one leaf; stwo asserts that the repeated rows agree, and a tampered proof reached that assert (rejected only by `catch_unwind`). Found by the fuzzer and by the reviewer. | The verifier compares the repeated rows itself (`query_positions`). | `m3_*`; the fuzz fails on any backstop rejection |
+| C4 | low | `verify` built the whole key before any cheap check of the proof. | The key is built only after every check that does not need it. | |
+| C5 | low | `ModelCommitment::from_floats` accepted models for which no proof can exist (layers that do not chain, tensors of only tiny non-zero values). | Refused at commitment time. | `a_model_commitment_depends_on_the_model_only` |
+
+Open, by reasoning only (the reviewer did not build it because it needs changes inside stwo's prover): in stwo's lifted commitment a column of a small
+component is committed as its periodic repetition, but periodicity is enforced only for columns with two mask points (the LogUp cumulative sum). A
+cheating committer could commit a small weight tensor as a non-periodic column, which amounts to several different float triples per element. The LogUp
+cumulative sum is periodic and forces every such copy to the same quantized value, exponent and lookups, so the QUANTIZED model and the output stay
+unique; the claim "one float model per commitment" then holds for the quantized weights, which is what the network computes with. The same property of
+stwo applies to every small component's trace columns, with the same argument.
+
+Verified by the reviewer: the root is the one of tree 0 of real proofs and is independent of batch size and input (1x1 tensors at batch 1, a model much
+smaller and much larger than the trace, 64 layers); the committed triples are well-defined numbers with a unique quantization (`m <= 2^29 - 2`,
+`qa * p2 < p`, the clamped branch forces `m < 2^24` so `q = 0` is the correct rounding, `e'` is confined to one integer range by the range checks of the
+shift, non-normalized significands are accepted only with the right `q`); padding rows of the model tree cannot influence a real row or serve as the
+"largest" element; the constants depend only on the shapes and their root does not depend on the tree's index; committing the constants after the lookup
+challenges is sound because their root is pinned; the statement, the model root and the trace root precede the challenges; hostile commitments, keys
+and proof files are errors, not panics.
+
+Not hidden: each proof opens every model column at 64 points of the extended domain and one out-of-domain point (about 68 linear equations per column),
+so a weight tensor of `2^a` rows is determined after about `2^a / 68` proofs of that model (any tensor of at most 64 rows after one proof), and fewer in
+practice, because the trace repeats the same values. The commitment means "the verifier does not need the weights", not "the weights are secret".

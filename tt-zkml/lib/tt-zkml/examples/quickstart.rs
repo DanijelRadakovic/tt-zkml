@@ -29,7 +29,7 @@ fn main() {
     // 3. Verify it: no device and no weights needed. The verifier holds the model's COMMITMENT (the architecture and a 32-byte root, computed once
     //    by whoever holds the weights) and the float input; the output is part of the proof.
     let commitment = ModelCommitment::new(&model_file).unwrap();
-    println!("model commitment: {}", commitment.root.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("model commitment id: {}", commitment.id().iter().map(|b| format!("{b:02x}")).collect::<String>());
     proof::verify(&proof, &PublicInputs { model: commitment.clone(), input: input.clone() }).unwrap();
     println!("proof verified: the committed model on this input gives this output");
     assert_eq!(proof.dequantized_output(), trace.dequantized_output()); // computable from the proof alone
