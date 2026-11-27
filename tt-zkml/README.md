@@ -2,7 +2,7 @@
 
 ```
 lib/tt-zkml-sys/   raw bindings to the C ABI (abi/include/tt_zkml/tt_zkml.h); links libtt_zkml_abi.so
-lib/tt-zkml/       library: device (safe Device / Model / Trace), modelfile (model directory format), air (constraints), prover (stwo)
+lib/tt-zkml/       library: device (safe Device / Model / Trace), modelfile (model directory format), air (constraints), witness, proof (prove / verify with stwo)
 bin/tt-zkml/       the CLI (package tt-zkml-cli, binary tt-zkml)
 ```
 
@@ -19,10 +19,28 @@ Model format: a directory with `model.json` (`{"dtype": "bf16", "layers": [{"in"
 weights as little-endian f32, `[in, out]` row-major. Input: little-endian f32, `[batch, in]` row-major. The trace directory has `output.u8`,
 `acc_<layer>.u32` (little-endian raw sign-magnitude int32 bits) and `trace.json` (scalers and file names).
 
-## Proof status
+## Proof
 
-`air.rs`: the constraint of the int8 matmul of a layer (`acc = sum_k x_k * w_k`, one row per output element, `2K + 1` columns), checked against the
-device's accumulator on the host before proving, plus the range check of `x` and `w` (LogUp lookup of `value + 127` into a preprocessed 256-row table, the
-verifier recomputes the table's commitment). `prover.rs`: `prove_layers` / `verify` over stwo (Blake2s, ~80 bit), one component per layer and one for
-the table in one proof. Tests: `cargo test -p tt-zkml --lib`. Not done: the requantization + ReLU, the link between layers, the public inputs,
-and `prove(&Trace)` (the device trace has to carry `q_x`/`q_w`, or the host re-derives them). Needs nightly Rust (`rust-toolchain.toml`).
+```bash
+tt-zkml prove  --model model/ --input model/input.f32 [--proof proof.bin]                 # device forward pass, then the proof (and its verification)
+tt-zkml verify --proof proof.bin --model model/ --input model/input.f32                   # needs no device; the verifier knows the float model and input
+```
+
+The device returns, per layer, the int32 accumulator and the power-of-two scalers. The CPU (`witness.rs`) rebuilds `q_x0` and `q_w` from the float
+input / weights and `scaler_x` / `scaler_w`, and every next `q_x` from the previous accumulator, checks that they reproduce the device's accumulators and
+output, converts everything to M31 columns (`air/trace.rs`) and proves the constraints of `air/`:
+
+- `Tensor` (input `X_0` and weights `W_l`): every element consumes its public float `(sign, m, e')` and proves `q = round_half_even(float * 2^k)`
+  (variable shift from the power-of-two table, ties to even), that no scaled float exceeds 127 and that `k` is the largest exponent that fits; `q` is range
+  checked to [-127, 127] and yielded once per use by the matmul. bf16 models: the floats are the bf16-rounded values.
+- `Matmul(l)`: `acc = sum_k x_k * w_k`, one row per output element; `x_k`, `w_k` and `acc` are tied by LogUp lookups to the tensors.
+- `Requant(l)`: ReLU, then `out = round_half_even(acc / 2^s)` (`acc = out * 2^s + rem`, `|rem| <= 2^(s-1)`, ties to even) or `acc * 2^ko`, and that the
+  exponent is the largest one (one row has `|acc| * 2^(ko+1) > 127`); its output is the next layer's `X`, so the layers are linked.
+- Tables: the range table `0 ..= 254` (values and 7-bit limbs) and the powers of two.
+- Public statement: the layer shapes, ReLU flags and exponents, the network output, and (known to the verifier, not in the proof) the float input and
+  weights: the verifier adds them to the LogUp sum, so a proof is about exactly that model on that input. The weights and the input are therefore not
+  hidden: this is an integrity proof, not a zero-knowledge one for them.
+
+Tests: `cargo test` (the library tests need no device and include forged witnesses and proofs; `tests/proof.rs` is the end-to-end test: it builds a
+network, runs it on the device, rebuilds the witness from the trace, proves and verifies, then checks that forged traces, inputs, proofs and statements are
+refused; `tests/abi.rs` tests the device API). Needs nightly Rust (`rust-toolchain.toml`).

@@ -4,6 +4,7 @@
 //! tt-zkml example --out model/ --dims 64,128,32          write a random model and an input
 //! tt-zkml run     --model model/ --input model/input.f32  run the forward pass, write the trace
 //! tt-zkml prove   --model model/ --input model/input.f32  run the forward pass and generate the proof
+//! tt-zkml verify  --proof proof.bin --model model/ --input model/input.f32  check a proof of this model on this input
 //! ```
 
 use std::fs;
@@ -13,7 +14,8 @@ use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use tt_zkml::modelfile::{self, ModelFile};
-use tt_zkml::{device, prover, Device, Dtype, Layer, Model, Trace};
+use tt_zkml::witness::PublicInputs;
+use tt_zkml::{device, proof, Device, Dtype, Layer, Model, Trace};
 
 #[derive(Parser)]
 #[command(name = "tt-zkml", version, about = "zkML on Tenstorrent: run a quantized network on the device and prove its execution")]
@@ -30,6 +32,21 @@ enum Command {
     Run(RunArgs),
     /// Run the forward pass and generate the proof of the execution
     Prove(ProveArgs),
+    /// Verify a proof (needs no device)
+    Verify(VerifyArgs),
+}
+
+#[derive(Args)]
+struct VerifyArgs {
+    /// The proof written by `prove`
+    #[arg(long, default_value = "proof.bin")]
+    proof: PathBuf,
+    /// The model the proof is about (model.json and the weights): the verifier knows the float weights
+    #[arg(long)]
+    model: PathBuf,
+    /// The input the proof is about: little-endian f32
+    #[arg(long)]
+    input: PathBuf,
 }
 
 #[derive(Args)]
@@ -97,6 +114,7 @@ fn real_main() -> Result<ExitCode, String> {
         Command::Example(a) => example(a).map(|_| ExitCode::SUCCESS),
         Command::Run(a) => forward(&a.fwd).map(|_| ExitCode::SUCCESS),
         Command::Prove(a) => prove(a),
+        Command::Verify(a) => verify(a),
     }
 }
 
@@ -137,7 +155,7 @@ fn example(a: ExampleArgs) -> Result<(), String> {
 }
 
 /// Loads the model, runs the forward pass on the device and returns the trace (and prints what happened).
-fn forward(a: &ForwardArgs) -> Result<Trace, String> {
+fn forward(a: &ForwardArgs) -> Result<(ModelFile, Vec<f32>, Trace), String> {
     let model_file = modelfile::load_model(&a.model)?;
     let x = modelfile::read_f32(&a.input)?;
     let in0 = model_file.layers[0].in_features as usize;
@@ -169,7 +187,7 @@ fn forward(a: &ForwardArgs) -> Result<Trace, String> {
         write_trace(dir, &trace)?;
         println!("trace written to {}", dir.display());
     }
-    Ok(trace)
+    Ok((model_file, x, trace))
 }
 
 fn print_trace(t: &Trace) {
@@ -205,17 +223,33 @@ fn write_trace(dir: &Path, t: &Trace) -> Result<(), String> {
 }
 
 fn prove(a: ProveArgs) -> Result<ExitCode, String> {
-    let trace = forward(&a.fwd)?;
-    match prover::prove(&trace) {
-        Ok(proof) => {
-            fs::write(&a.proof, &proof.bytes).map_err(|e| format!("{}: {e}", a.proof.display()))?;
-            println!("proof written to {}", a.proof.display());
+    let (model, x, trace) = forward(&a.fwd)?;
+    // The CPU rebuilds q_x / q_w from the trace, converts everything to M31 and proves the constraints.
+    let t = Instant::now();
+    let proof = proof::prove(&model, &x, &trace).map_err(|e| e.to_string())?;
+    println!("proof generated in {:.2} s ({} KiB)", t.elapsed().as_secs_f64(), proof.bytes.len() / 1024);
+    fs::write(&a.proof, proof.to_bytes()).map_err(|e| format!("{}: {e}", a.proof.display()))?;
+    println!("proof written to {}", a.proof.display());
+    let t = Instant::now();
+    proof::verify(&proof, &PublicInputs::new(&model, &x)).map_err(|e| e.to_string())?;
+    println!("proof verified in {:.2} s", t.elapsed().as_secs_f64());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn verify(a: VerifyArgs) -> Result<ExitCode, String> {
+    let bytes = fs::read(&a.proof).map_err(|e| format!("{}: {e}", a.proof.display()))?;
+    let proof = proof::Proof::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    let model = modelfile::load_model(&a.model)?;
+    let input = modelfile::read_f32(&a.input)?;
+    let t = Instant::now();
+    match proof::verify(&proof, &PublicInputs::new(&model, &input)) {
+        Ok(()) => {
+            println!("proof valid ({} layers, output {} values), verified in {:.2} s", proof.specs.len(), proof.output.len(), t.elapsed().as_secs_f64());
             Ok(ExitCode::SUCCESS)
         }
         Err(e) => {
-            // The forward pass worked (the trace above is real); the proof is the part that does not exist yet.
             eprintln!("{e}");
-            Ok(ExitCode::from(2))
+            Ok(ExitCode::from(1))
         }
     }
 }

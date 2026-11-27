@@ -19,3 +19,8 @@ itertools.workspace = true
 name = "abi"
 path = "tests/abi.rs"
 harness = false
+
+[[test]]
+name = "proof"
+path = "tests/proof.rs"
+harness = false

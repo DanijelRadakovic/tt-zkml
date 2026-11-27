@@ -65,4 +65,5 @@ fn forward_on_the_device() {
     assert!(t.output_values().iter().all(|v| v.abs() <= 127));
     // deterministic
     assert_eq!(model.forward(&x, 64).unwrap(), t);
+
 }

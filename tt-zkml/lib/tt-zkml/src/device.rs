@@ -211,6 +211,13 @@ impl Trace {
     pub fn output_values(&self) -> Vec<i32> {
         self.output.iter().map(|&b| if b & 0x80 != 0 { -((b & 0x7F) as i32) } else { b as i32 }).collect()
     }
+
+    /// The output as floats, approximately what the unquantized network computes: the int8 output divided by the product of all the scalers
+    /// (`scaler_x`, and `scaler_w` and `scaler_out` of every layer; all powers of two, so the scaling is exact). The quantization error stays in it.
+    pub fn dequantized_output(&self) -> Vec<f32> {
+        let scale: f64 = self.layers.iter().fold(self.scaler_x as f64, |s, l| s * l.scaler_w as f64 * l.scaler_out as f64);
+        self.output_values().iter().map(|&v| (v as f64 / scale) as f32).collect()
+    }
 }
 
 fn read_trace(t: *const sys::ttzk_trace) -> Result<Trace> {
