@@ -24,7 +24,15 @@
 //! and that input. What is not hidden: the weights and the input are public inputs here (the proof is an integrity proof, not a zero-knowledge one for them).
 
 pub mod spec;
+#[cfg(feature = "forgery")]
+#[doc(hidden)]
+pub mod kind;
+#[cfg(not(feature = "forgery"))]
 mod kind;
+#[cfg(feature = "forgery")]
+#[doc(hidden)]
+pub mod trace;
+#[cfg(not(feature = "forgery"))]
 mod trace;
 
 pub use kind::{Kind, Lookups, NetEval, PreCol, Which, layout, public_sum, table_pre_id, TABLE_LOG_SIZE};

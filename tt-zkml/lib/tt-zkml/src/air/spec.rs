@@ -14,9 +14,13 @@ pub const LIMB_BASE: u32 = 1 << LIMB_BITS;
 /// Limbs of a non-negative accumulator-sized value (`< 2^28`).
 pub const ACC_LIMBS: usize = 4;
 /// `127 * 127 * K < 2^28` keeps every accumulator-sized value inside the limbs (and far below the M31 modulus).
-pub const MAX_K: usize = (1 << 28) / (127 * 127);
-/// Largest right shift of the requantization: `127 * 2^shift` stays far below the M31 modulus.
-pub const MAX_SHIFT: u32 = 22;
+pub const MAX_K: usize = 8192;
+/// Largest right shift of the requantization. `max|acc| <= 127 * 127 * MAX_K < 127 * 2^20`, so no honest layer needs more, and `254 * 2^20` fits the
+/// four limbs of the bound check (`< 2^29`) with no wrap-around in M31.
+pub const MAX_SHIFT: u32 = 20;
+/// Limits that keep a verifier's work and memory bounded by the statement it is given.
+pub const MAX_LAYERS: usize = 64;
+pub const MAX_TENSOR_ELEMENTS: usize = 1 << 24;
 
 /// A layer of the statement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +93,14 @@ impl LayerSpec {
         if self.m == 0 || self.k == 0 || self.n == 0 {
             return Err(SpecError::Shape(format!("layer {layer}: empty shape")));
         }
+        for (a, b) in [(self.m, self.k), (self.k, self.n), (self.m, self.n)] {
+            if a.checked_mul(b).is_none_or(|e| e > MAX_TENSOR_ELEMENTS) {
+                return Err(SpecError::Shape(format!("layer {layer}: a tensor has more than {MAX_TENSOR_ELEMENTS} elements")));
+            }
+        }
+        if self.ko >= 41 && self.ko != 127 {
+            return Err(SpecError::Ko { layer, ko: self.ko }); // "all zero" has one spelling
+        }
         if self.k > MAX_K {
             return Err(SpecError::TooLarge { layer, k: self.k });
         }
@@ -107,8 +119,8 @@ impl LayerSpec {
 
 /// Checks every layer and that the layers chain.
 pub fn validate(specs: &[LayerSpec]) -> Result<(), SpecError> {
-    if specs.is_empty() {
-        return Err(SpecError::Shape("no layers".into()));
+    if specs.is_empty() || specs.len() > MAX_LAYERS {
+        return Err(SpecError::Shape(format!("the number of layers must be in 1..={MAX_LAYERS}")));
     }
     for (l, s) in specs.iter().enumerate() {
         s.validate(l)?;

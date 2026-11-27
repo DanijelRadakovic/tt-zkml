@@ -9,7 +9,7 @@
 //! ([`PublicInputs`]): the verifier supplies them, and the constraints tie every quantized value to its float.
 
 use crate::air::spec::{self, LayerSpec, QMAX, SpecError, activate, choose_ko, exponent_of, pot_exponent};
-use crate::device::{Dtype, Trace};
+use crate::device::{Dtype, Layer, Trace};
 use crate::modelfile::ModelFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +91,7 @@ pub fn matmul(m: usize, k: usize, n: usize, x: &[i32], w: &[i32]) -> Vec<i32> {
         for kk in 0..k {
             let xv = x[i * k + kk];
             for j in 0..n {
-                acc[i * n + j] += xv * w[kk * n + j];
+                acc[i * n + j] = acc[i * n + j].wrapping_add(xv.wrapping_mul(w[kk * n + j])); // exact for int8 inputs; wraps (never panics) for forged values
             }
         }
     }
@@ -129,17 +129,19 @@ pub fn shift_of(ep: u32, k: i32) -> i32 {
     150 - ep as i32 - k
 }
 
-/// What a verifier knows: the model's float weights and the float input (and the dtype, which decides the bf16 rounding).
+/// What a verifier knows: the model (its layers, with their activations, and the float weights), the float input, and the dtype, which decides the
+/// bf16 rounding. The proof is about exactly this model on exactly this input; nothing about the network's structure is taken from the proof.
 #[derive(Debug, Clone)]
 pub struct PublicInputs {
     pub dtype: Dtype,
+    pub layers: Vec<Layer>,
     pub input: Vec<f32>,
     pub weights: Vec<Vec<f32>>,
 }
 
 impl PublicInputs {
     pub fn new(model: &ModelFile, input: &[f32]) -> Self {
-        Self { dtype: model.dtype, input: input.to_vec(), weights: model.weights.clone() }
+        Self { dtype: model.dtype, layers: model.layers.clone(), input: input.to_vec(), weights: model.weights.clone() }
     }
 }
 
@@ -155,7 +157,8 @@ impl NetworkWitness {
 
     /// The public inputs of this witness: the floats the device saw (already rounded to the dtype, so the dtype is irrelevant here).
     pub fn public_inputs(&self) -> PublicInputs {
-        PublicInputs { dtype: Dtype::F32, input: self.x0_float.clone(), weights: self.w_float.clone() }
+        let layers = self.specs.iter().map(|s| Layer { in_features: s.k as u32, out_features: s.n as u32, relu: s.relu }).collect();
+        PublicInputs { dtype: Dtype::F32, layers, input: self.x0_float.clone(), weights: self.w_float.clone() }
     }
 
     /// The output of the network (public).
@@ -232,6 +235,11 @@ impl NetworkWitness {
             return Err(WitnessError::Float { what: what.into(), index });
         }
         let expected = pot_exponent(absmax(floats));
+        if expected >= 127 && floats.iter().any(|&v| v != 0.0) {
+            // the exponent is capped at 127, which the constraints reserve for "all zero": a tensor of only tiny non-zero floats is not supported
+            let index = floats.iter().position(|&v| v != 0.0).unwrap();
+            return Err(WitnessError::Float { what: what.into(), index });
+        }
         if expected != k {
             return Err(WitnessError::ScalerExponent { what: what.into(), expected, found: k });
         }

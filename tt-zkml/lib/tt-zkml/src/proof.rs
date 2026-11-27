@@ -6,7 +6,7 @@
 use itertools::Itertools;
 use num_traits::Zero;
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sChannel;
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::fri::FriParams;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
@@ -24,7 +24,7 @@ use crate::air::spec::{self, LayerSpec};
 use crate::air::{Kind, Lookups, NetEval, build, interaction_traces, layout, public_sum};
 use crate::device::Trace;
 use crate::modelfile::ModelFile;
-use crate::witness::{NetworkWitness, PublicInputs, WitnessError};
+use crate::witness::{NetworkWitness, PublicInputs, WitnessError, effective};
 
 type NetComponent = stwo_constraint_framework::FrameworkComponent<NetEval>;
 
@@ -72,12 +72,13 @@ impl From<WitnessError> for ProveError {
     }
 }
 
-const LOG_BLOWUP_FACTOR: u32 = 1;
+const LOG_BLOWUP_FACTOR: u32 = 2;
 
-/// The commitment parameters for traces of at most `2^max_log_size` rows. 70 queries at blowup 2 plus 10 bits of proof of work: about 80 bits.
+/// The commitment parameters for traces of at most `2^max_log_size` rows: blowup 4, 64 queries and 16 bits of proof of work, which is about
+/// 64 * 2 + 16 = 144 bits under the conjectured FRI soundness and about 80 bits under the proven (Johnson bound) analysis (see docs/audit.md).
 fn pcs_config(max_log_size: u32) -> PcsConfig {
     PcsConfig {
-        fri_params: FriParams::new(10, 0, LOG_BLOWUP_FACTOR, 70, 1),
+        fri_params: FriParams::new(16, 0, LOG_BLOWUP_FACTOR, 64, 1),
         trace_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
         preprocessed_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
     }
@@ -96,6 +97,25 @@ fn components(kinds: &[Kind], lookups: &Lookups, claimed_sums: &[SecureField]) -
     let ids = kinds.iter().flat_map(|k| k.pre_ids()).map(|id| PreProcessedColumnId { id }).collect_vec();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     kinds.iter().zip(claimed_sums).map(|(k, &sum)| NetComponent::new(&mut allocator, NetEval { kind: k.clone(), lookups: lookups.clone() }, sum)).collect()
+}
+
+/// Binds the whole public statement to the Fiat-Shamir transcript before anything else: the layers (shapes, activation, all exponents), the output
+/// and the float input and weights as the device sees them. The preprocessed root alone would not bind the exponents or the activations.
+fn mix_statement(channel: &mut Blake2sChannel, specs: &[LayerSpec], output: &[i32], input: &[f32], weights: &[Vec<f32>]) {
+    let mut words: Vec<u32> = b"tt-zkml proof v2".chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    words.push(specs.len() as u32);
+    for s in specs {
+        words.extend([s.m as u32, s.k as u32, s.n as u32, s.relu as u32, s.ko as u32, s.kw as u32, s.kx as u32]);
+    }
+    words.push(output.len() as u32);
+    words.extend(output.iter().map(|&v| v as u32));
+    words.push(input.len() as u32);
+    words.extend(input.iter().map(|v| v.to_bits()));
+    for w in weights {
+        words.push(w.len() as u32);
+        words.extend(w.iter().map(|v| v.to_bits()));
+    }
+    channel.mix_u32s(&words);
 }
 
 /// The preprocessed tree (constants of the statement) of `kinds`.
@@ -140,6 +160,13 @@ pub fn prove_witness(witness: &NetworkWitness) -> Result<Proof, ProveError> {
     prove_impl(witness, true)
 }
 
+/// A proof of a witness that is not checked for consistency: for the tests of a malicious prover (feature `forgery`).
+#[cfg(feature = "forgery")]
+#[doc(hidden)]
+pub fn prove_unchecked(witness: &NetworkWitness) -> Result<Proof, ProveError> {
+    prove_impl(witness, false)
+}
+
 /// `checked = false` skips the consistency checks of the witness: for the tests that a forged witness cannot be proven or verified.
 pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proof, ProveError> {
     let trace = build(witness, checked)?;
@@ -149,6 +176,7 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
     let twiddles = twiddles(max_log);
 
     let channel = &mut Blake2sChannel::default();
+    mix_statement(channel, &witness.specs, witness.output(), &witness.x0_float, &witness.w_float);
     let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
     let mut tree = scheme.tree_builder();
@@ -161,6 +189,7 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
 
     let lookups = Lookups::draw(channel);
     let (interaction, claimed_sums) = interaction_traces(&trace, &lookups);
+    channel.mix_felts(&claimed_sums);
     let mut tree = scheme.tree_builder();
     tree.extend_evals(interaction);
     tree.commit(channel);
@@ -177,13 +206,27 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
 pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     let fail = |s: &str| Err(ProveError::Verification(s.to_string()));
     spec::validate(&proof.specs).map_err(|e| ProveError::Verification(e.to_string()))?;
+    // The statement is the verifier's model, not the proof's claim: layers, activations and shapes come from `inputs`; only the exponents (which the
+    // constraints prove to be the largest ones) are taken from the proof.
     let first = &proof.specs[0];
-    if inputs.input.len() != first.m * first.k
-        || inputs.weights.len() != proof.specs.len()
+    let layers = &inputs.layers;
+    let in0 = layers.first().map_or(0, |l| l.in_features as usize);
+    if layers.len() != proof.specs.len()
+        || in0 == 0
+        || inputs.input.is_empty()
+        || inputs.input.len() % in0 != 0
+        || first.m != inputs.input.len() / in0
+        || inputs.weights.len() != layers.len()
+        || layers.iter().zip(&proof.specs).any(|(l, s)| l.in_features as usize != s.k || l.out_features as usize != s.n || l.relu != s.relu)
         || inputs.weights.iter().zip(&proof.specs).any(|(w, s)| w.len() != s.k * s.n)
-        || inputs.input.iter().chain(inputs.weights.iter().flatten()).any(|v| !v.is_finite())
     {
-        return fail("the public input and weights do not have the shapes of the statement");
+        return fail("the statement is not about this model: the layers, their activations or the shapes differ");
+    }
+    // finite after the dtype's rounding too (a large f32 rounds to infinity in bf16)
+    let eff_input = effective(&inputs.input, inputs.dtype);
+    let eff_weights: Vec<Vec<f32>> = inputs.weights.iter().map(|w| effective(w, inputs.dtype)).collect();
+    if eff_input.iter().chain(eff_weights.iter().flatten()).any(|v| !v.is_finite()) {
+        return fail("the public input and weights must be finite");
     }
     let last = proof.specs.last().unwrap();
     if proof.output.len() != last.m * last.n || proof.output.iter().any(|v| v.abs() > spec::QMAX) {
@@ -210,6 +253,7 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     }
 
     let channel = &mut Blake2sChannel::default();
+    mix_statement(channel, &proof.specs, &proof.output, &eff_input, &eff_weights);
     let scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
     let sizes = TreeVec::concat_cols(components(&kinds, &Lookups::dummy(), &proof.claimed_sums).iter().map(|c| c.trace_log_degree_bounds()));
     // Refuse a proof with other column counts: stwo would panic on it.
@@ -227,6 +271,7 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     if total != SecureField::zero() {
         return fail("the lookups do not cancel: the tensors do not match the matmuls, the requantizations, the quantization of the public floats or the public output");
     }
+    channel.mix_felts(&proof.claimed_sums);
     scheme.commit(stark.commitments[2], &sizes[2], channel);
 
     let comps = components(&kinds, &lookups, &proof.claimed_sums);

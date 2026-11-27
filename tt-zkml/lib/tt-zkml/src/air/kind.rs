@@ -13,10 +13,10 @@ use crate::witness::{PublicInputs, effective, float_parts};
 
 relation!(RangeLookup, 1);
 relation!(TensorLookup, 4);
-relation!(FloatLookup, 5);
+relation!(FloatLookup, 6);
 relation!(Pow2Lookup, 2);
 
-/// The LogUp relations: the range table, the quantized tensors `(tag, i, j, value)`, the public float tensors `(tag, i, j, 2m + s, e')` and the table of
+/// The LogUp relations: the range table, the quantized tensors `(tag, i, j, value)`, the public float tensors `(tag, i, j, s, m, e')` and the table of
 /// powers of two `(shift, 2^shift)`.
 #[derive(Clone)]
 pub struct Lookups {
@@ -39,7 +39,7 @@ impl Lookups {
         &self.tensor.0
     }
 
-    pub(super) fn float_elements(&self) -> &stwo_constraint_framework::logup::LookupElements<5> {
+    pub(super) fn float_elements(&self) -> &stwo_constraint_framework::logup::LookupElements<6> {
         &self.float.0
     }
 
@@ -169,7 +169,7 @@ pub(super) enum Use {
     /// A tuple of the tensor relation.
     Tensor { tag: u32, i: Src, j: Src, value: Src, num: Num },
     /// A tuple of the public float relation.
-    Float { tag: u32, i: Src, j: Src, sm: Src, ep: Src, num: Num },
+    Float { tag: u32, i: Src, j: Src, s: Src, m: Src, ep: Src, num: Num },
     /// `(shift, 2^shift)` is a row of the power-of-two table.
     Pow2 { sh: Src, p2: Src },
     /// The power-of-two table's own row.
@@ -178,7 +178,7 @@ pub(super) enum Use {
 
 /// Column indices of a requantization component.
 #[derive(Debug, Clone)]
-pub(super) struct RqCols {
+pub struct RqCols {
     pub acc: usize,
     pub out: usize,
     pub relu: Option<RqRelu>,
@@ -188,7 +188,7 @@ pub(super) struct RqCols {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RqRelu {
+pub struct RqRelu {
     pub p: usize,
     pub ap: usize,
     pub ap_limbs: Vec<usize>,
@@ -196,16 +196,19 @@ pub(super) struct RqRelu {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RqRight {
+pub struct RqRight {
     pub shift: u32,
     pub e: usize,
     pub half: usize,
     pub v1_limbs: Vec<usize>,
     pub v2_limbs: Vec<usize>,
+    /// `127 * 2^shift -+ acc >= 0`: no accumulator exceeds what the exponent allows.
+    pub u1_limbs: Vec<usize>,
+    pub u2_limbs: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RqHit {
+pub struct RqHit {
     pub hp: usize,
     pub hn: usize,
     pub limbs: Vec<usize>,
@@ -218,11 +221,10 @@ fn limbs_for(bits: u32) -> usize {
 
 /// Column indices of a float tensor component (the quantization of `q` from the public float `(s, m, e')`).
 #[derive(Debug, Clone)]
-pub(super) struct QCols {
+pub struct QCols {
     pub q: usize,
     pub s: usize,
     pub m: usize,
-    pub sm: usize,
     pub ep: usize,
     /// `None` for an all-zero tensor.
     pub nz: Option<QNonZero>,
@@ -230,7 +232,7 @@ pub(super) struct QCols {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct QNonZero {
+pub struct QNonZero {
     pub qa: usize,
     pub p2: usize,
     pub sh: usize,
@@ -253,9 +255,9 @@ pub(super) struct QNonZero {
 impl QCols {
     pub fn new(kexp: i32) -> Self {
         if kexp >= 127 {
-            return Self { q: 0, s: 1, m: 2, sm: 3, ep: 4, nz: None, total: 5 };
+            return Self { q: 0, s: 1, m: 2, ep: 3, nz: None, total: 4 };
         }
-        let mut next = 5;
+        let mut next = 4;
         let mut take = |n: usize| -> Vec<usize> {
             let v = (next..next + n).collect_vec();
             next += n;
@@ -269,7 +271,7 @@ impl QCols {
         let [h] = take(1)[..] else { unreachable!() };
         let hv = take(ACC_LIMBS);
         let [hs] = take(1)[..] else { unreachable!() };
-        Self { q: 0, s: 1, m: 2, sm: 3, ep: 4, nz: Some(QNonZero { qa, p2, sh, c, diff, r, e, half, v1, v2, z, g, ginv, rn, h, hv, hs }), total: next }
+        Self { q: 0, s: 1, m: 2, ep: 3, nz: Some(QNonZero { qa, p2, sh, c, diff, r, e, half, v1, v2, z, g, ginv, rn, h, hv, hs }), total: next }
     }
 }
 
@@ -293,7 +295,7 @@ impl RqCols {
             Mode::Right(shift) => {
                 let [e, half] = take(2)[..] else { unreachable!() };
                 let n = limbs_for(shift);
-                Some(RqRight { shift, e, half, v1_limbs: take(n), v2_limbs: take(n) })
+                Some(RqRight { shift, e, half, v1_limbs: take(n), v2_limbs: take(n), u1_limbs: take(ACC_LIMBS), u2_limbs: take(ACC_LIMBS) })
             }
             _ => None,
         };
@@ -405,7 +407,7 @@ impl Kind {
                 };
                 let c = QCols::new(*kexp);
                 let mut uses = vec![
-                    Use::Float { tag: *tid, i: Src::Pre(0), j: Src::Pre(1), sm: Src::Col(c.sm), ep: Src::Col(c.ep), num: Num::Pre(3) },
+                    Use::Float { tag: *tid, i: Src::Pre(0), j: Src::Pre(1), s: Src::Col(c.s), m: Src::Col(c.m), ep: Src::Col(c.ep), num: Num::Pre(3) },
                     Use::Tensor { tag, i: Src::Pre(0), j: Src::Pre(1), value: Src::Col(c.q), num: Num::NegPre(2) },
                     Use::Range { value: Src::Col(c.q), offset: OFFSET },
                 ];
@@ -435,6 +437,11 @@ impl Kind {
                     uses.push(Use::Range { value: Src::Col(r.half), offset: OFFSET });
                     uses.extend(limbs(&r.v1_limbs));
                     uses.extend(limbs(&r.v2_limbs));
+                    uses.extend(limbs(&r.u1_limbs));
+                    uses.extend(limbs(&r.u2_limbs));
+                } else if matches!(spec.mode(), Mode::Left(_)) {
+                    // the raw accumulator is at most 127 in magnitude: `acc * 2^ko` cannot wrap
+                    uses.push(Use::Range { value: Src::Col(c.acc), offset: OFFSET });
                 }
                 if let Some(h) = &c.hit {
                     uses.extend(limbs(&h.limbs));
@@ -469,9 +476,9 @@ impl Kind {
             Kind::Tensor { kexp, .. } => {
                 let qc = QCols::new(*kexp);
                 let one = E::F::one();
-                let (q, sgn, m, sm, ep) = (cols[qc.q].clone(), cols[qc.s].clone(), cols[qc.m].clone(), cols[qc.sm].clone(), cols[qc.ep].clone());
-                eval.add_constraint(sgn.clone() * (sgn.clone() - one.clone()));
-                eval.add_constraint(sm - (m.clone() * c(2) + sgn.clone()));
+                // s, m and e' are pinned to the public float by the lookup (as field elements: m < 2^24, s a bit, e' in 1..=254)
+                let (q, sgn, m, ep) = (cols[qc.q].clone(), cols[qc.s].clone(), cols[qc.m].clone(), cols[qc.ep].clone());
+                let real = pre[3].clone();
                 let Some(n) = &qc.nz else {
                     // an all-zero tensor
                     eval.add_constraint(q);
@@ -482,12 +489,15 @@ impl Kind {
                 let (qa, p2, sh, cl, diff, r) = (cols[n.qa].clone(), cols[n.p2].clone(), cols[n.sh].clone(), cols[n.c].clone(), cols[n.diff].clone(), cols[n.r].clone());
                 // q = (-1)^s * qa, qa >= 0 (range checked)
                 eval.add_constraint(q - qa.clone() * (one.clone() - sgn * c(2)));
-                // the shift: sh = 150 - e' - kexp, or (a tiny value, clamped) sh = 25 and the real shift is at least 25
+                // the shift: raw = 150 - e' - kexp. Normally sh = raw <= 24 (diff = 24 - raw >= 0). A tiny float (raw >= 25) quantizes to 0: then
+                // c = 1, qa = 0, sh = 25 (so that |r| = m < 2^24 fits) and diff = raw - 25 >= 0. Either way qa * 2^sh stays below the modulus.
                 let raw = signed(150 - *kexp as i64) - ep;
                 eval.add_constraint(cl.clone() * (cl.clone() - one.clone()));
                 eval.add_constraint((one.clone() - cl.clone()) * (sh.clone() - raw.clone()));
+                eval.add_constraint((one.clone() - cl.clone()) * (diff.clone() - (c(24) - raw.clone())));
                 eval.add_constraint(cl.clone() * (sh.clone() - c(POW2_MAX_SHIFT as u64)));
-                eval.add_constraint(cl * (diff - (raw - c(POW2_MAX_SHIFT as u64))));
+                eval.add_constraint(cl.clone() * (diff - (raw - c(POW2_MAX_SHIFT as u64))));
+                eval.add_constraint(cl * qa.clone());
                 // m = qa * 2^sh + r, round half to even: |r| <= 2^(sh-1), a tie has an even qa
                 eval.add_constraint(r.clone() - (m.clone() - qa.clone() * p2.clone()));
                 let half_p2 = p2.clone() * c(1 << 30); // 2^(sh-1): the inverse of 2 is 2^30 in M31
@@ -508,6 +518,7 @@ impl Kind {
                 // the scaler is the largest: one element has 2m > 127 * 2^sh (at a shift of at most 20, so that nothing wraps)
                 let (h, hs) = (cols[n.h].clone(), cols[n.hs].clone());
                 eval.add_constraint(h.clone() * (h.clone() - one.clone()));
+                eval.add_constraint(h.clone() * (one.clone() - real)); // only a real element can be the largest (padding rows are free)
                 eval.add_constraint(hs - h.clone() * (c(HIT_MAX_SHIFT as u64) - sh));
                 eval.add_constraint(h * (limb_sum(&n.hv) - (m * c(2) - p2 * c(127) - one)));
             }
@@ -549,6 +560,10 @@ impl Kind {
                         let not_e = one.clone() - e;
                         eval.add_constraint(not_e.clone() * (limb_sum(&r.v1_limbs) - (half_range.clone() - one.clone() + rem.clone())));
                         eval.add_constraint(not_e * (limb_sum(&r.v2_limbs) - (half_range - one.clone() - rem)));
+                        // no accumulator exceeds the exponent: -127 * 2^s <= acc <= 127 * 2^s (the raw accumulator, also under a ReLU)
+                        let bound = c(127u64 << sh);
+                        eval.add_constraint(limb_sum(&r.u1_limbs) - (bound.clone() - acc.clone()));
+                        eval.add_constraint(limb_sum(&r.u2_limbs) - (bound + acc.clone()));
                     }
                     Mode::Zero => unreachable!(),
                 }
@@ -557,7 +572,9 @@ impl Kind {
                 let (hp, hn) = (cols[h.hp].clone(), cols[h.hn].clone());
                 let t = c(spec.hit_threshold() as u64);
                 eval.add_constraint(hp.clone() * (hp.clone() - one.clone()));
-                eval.add_constraint(hn.clone() * (hn.clone() - one));
+                eval.add_constraint(hn.clone() * (hn.clone() - one.clone()));
+                let real = pre[2].clone();
+                eval.add_constraint((hp.clone() + hn.clone()) * (one - real)); // only a real row can be the largest (padding rows are free)
                 eval.add_constraint(hp * (acc.clone() - t.clone()) + hn * (-acc - t) - limb_sum(&h.limbs));
             }
         }
@@ -614,8 +631,8 @@ impl FrameworkEval for NetEval {
                 Use::Tensor { tag, i, j, value: v, num: n } => {
                     eval.add_to_relation(RelationEntry::new(&self.lookups.tensor, num(n), &[E::F::from(BaseField::from(tag)), value(i), value(j), value(v)]));
                 }
-                Use::Float { tag, i, j, sm, ep, num: n } => {
-                    eval.add_to_relation(RelationEntry::new(&self.lookups.float, num(n), &[E::F::from(BaseField::from(tag)), value(i), value(j), value(sm), value(ep)]));
+                Use::Float { tag, i, j, s, m, ep, num: n } => {
+                    eval.add_to_relation(RelationEntry::new(&self.lookups.float, num(n), &[E::F::from(BaseField::from(tag)), value(i), value(j), value(s), value(m), value(ep)]));
                 }
                 Use::Pow2 { sh, p2 } => {
                     eval.add_to_relation(RelationEntry::new(&self.lookups.pow2, E::EF::one(), &[value(sh), value(p2)]));
@@ -645,7 +662,7 @@ pub fn public_sum(specs: &[LayerSpec], output: &[i32], inputs: &PublicInputs, lo
         let (s, m, ep) = float_parts(v);
         lookups
             .float_elements()
-            .combine::<BaseField, SecureField>(&[BaseField::from(tag), BaseField::from(i as u32), BaseField::from(j as u32), BaseField::from(2 * m + s), BaseField::from(ep)])
+            .combine::<BaseField, SecureField>(&[BaseField::from(tag), BaseField::from(i as u32), BaseField::from(j as u32), BaseField::from(s), BaseField::from(m), BaseField::from(ep)])
             .inverse()
     };
     let last = specs.len() - 1;

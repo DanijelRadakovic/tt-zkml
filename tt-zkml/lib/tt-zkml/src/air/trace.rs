@@ -18,6 +18,12 @@ use super::kind::{HIT_MAX_SHIFT, Kind, Lookups, Num, POW2_MAX_SHIFT, POW2_ROWS, 
 use super::spec::{LIMB_BASE, LayerSpec, Mode};
 use crate::witness::{NetworkWitness, WitnessError, float_parts, shift_of};
 
+#[cfg(any(test, feature = "forgery"))]
+thread_local! {
+    /// Test hook: a malicious prover rewrites the columns of a component before the multiplicities of the range tables are counted.
+    pub static HOOK: std::cell::RefCell<Option<Box<dyn Fn(&Kind, &mut Vec<BaseColumn>)>>> = const { std::cell::RefCell::new(None) };
+}
+
 type Eval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
 
 /// One component with its columns materialized.
@@ -50,7 +56,17 @@ fn limbs(mut v: u32, n: usize) -> Option<Vec<u32>> {
 }
 
 /// The columns of the requantization component of one layer: `acc` and `out` are its row values (padding rows are `0, 0`).
-fn requant_row(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit: i32) -> Result<Vec<BaseField>, WitnessError> {
+pub fn requant_row(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit: i32) -> Result<Vec<BaseField>, WitnessError> {
+    requant_row_inner(spec, c, row, acc, out, hit, true)
+}
+
+/// The row of a malicious prover that does not bother about the bound `|acc| <= 127 * 2^s` (its limbs stay zero): for the audit regression tests.
+#[cfg(any(test, feature = "forgery"))]
+pub fn requant_row_unbounded(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit: i32) -> Result<Vec<BaseField>, WitnessError> {
+    requant_row_inner(spec, c, row, acc, out, hit, false)
+}
+
+fn requant_row_inner(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit: i32, enforce_bound: bool) -> Result<Vec<BaseField>, WitnessError> {
     let bad = |what: &str| WitnessError::Requant { row, what: what.to_string() };
     let mut cols = vec![BaseField::from(0u32); c.total];
     cols[c.acc] = BaseField::from(acc);
@@ -78,6 +94,9 @@ fn requant_row(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit
     };
     match spec.mode() {
         Mode::Left(ko) => {
+            if acc.abs() > 127 {
+                return Err(bad("|acc| > 127 with a left shift"));
+            }
             if (a as i64) << ko != out as i64 {
                 return Err(bad("out != acc * 2^ko"));
             }
@@ -88,6 +107,11 @@ fn requant_row(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit
             let rem = a as i64 - ((out as i64) << sh);
             if rem.abs() > h {
                 return Err(bad("the output is not the rounded quotient"));
+            }
+            let bound = 127i64 << sh;
+            if enforce_bound {
+            put(&mut cols, &r.u1_limbs, u32::try_from(bound - acc as i64).map_err(|_| bad("an accumulator exceeds 127 * 2^s"))?)?;
+            put(&mut cols, &r.u2_limbs, u32::try_from(bound + acc as i64).map_err(|_| bad("an accumulator exceeds 127 * 2^s"))?)?;
             }
             if rem.abs() == h {
                 if out % 2 != 0 {
@@ -117,14 +141,13 @@ fn requant_row(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i32, hit
 
 /// The columns of one element of a float tensor: the float `(s, m, e')` (public), its quantization `q` and the witness of the rounding.
 /// `hit`: this element is the one that justifies the scaler (`2m > 127 * 2^sh`).
-fn quant_row(kexp: i32, c: &QCols, row: usize, parts: (u32, u32, u32), q: i32, hit: bool) -> Result<Vec<BaseField>, WitnessError> {
+pub fn quant_row(kexp: i32, c: &QCols, row: usize, parts: (u32, u32, u32), q: i32, hit: bool) -> Result<Vec<BaseField>, WitnessError> {
     let bad = |what: &str| WitnessError::Requant { row, what: format!("float quantization: {what}") };
     let (sign, m, ep) = parts;
     let mut cols = vec![BaseField::from(0u32); c.total];
     cols[c.q] = BaseField::from(q);
     cols[c.s] = BaseField::from(sign);
     cols[c.m] = BaseField::from(m);
-    cols[c.sm] = BaseField::from(2 * m + sign);
     cols[c.ep] = BaseField::from(ep);
     let Some(n) = &c.nz else {
         return if m == 0 && q == 0 { Ok(cols) } else { Err(bad("the tensor is declared all-zero")) };
@@ -140,8 +163,9 @@ fn quant_row(kexp: i32, c: &QCols, row: usize, parts: (u32, u32, u32), q: i32, h
     if raw < 1 {
         return Err(bad("the quantization shift is below 1"));
     }
-    let sh = raw.min(POW2_MAX_SHIFT as i64);
-    let clamped = raw > sh;
+    // a tiny float (raw shift >= 25) quantizes to 0: sh = 25 then, and the constraints force qa = 0
+    let clamped = raw >= POW2_MAX_SHIFT as i64;
+    let sh = if clamped { POW2_MAX_SHIFT as i64 } else { raw };
     let p2 = 1i64 << sh;
     let half = p2 / 2;
     let m = m as i64;
@@ -157,13 +181,13 @@ fn quant_row(kexp: i32, c: &QCols, row: usize, parts: (u32, u32, u32), q: i32, h
     cols[n.p2] = BaseField::from(p2 as u32);
     cols[n.sh] = BaseField::from(sh as u32);
     cols[n.r] = BaseField::from(rem as i32);
+    let diff = if clamped { raw - POW2_MAX_SHIFT as i64 } else { POW2_MAX_SHIFT as i64 - 1 - raw };
+    if !(0..=254).contains(&diff) {
+        return Err(bad("the quantization shift is out of the range the constraints support"));
+    }
+    cols[n.diff] = BaseField::from(diff as u32);
     if clamped {
         cols[n.c] = BaseField::from(1u32);
-        let diff = raw - POW2_MAX_SHIFT as i64;
-        if diff > 254 {
-            return Err(bad("the float is too small for the range of the shift"));
-        }
-        cols[n.diff] = BaseField::from(diff as u32);
     }
     if rem.abs() == half {
         cols[n.e] = BaseField::from(1u32);
@@ -269,7 +293,6 @@ pub fn build(w: &NetworkWitness, checked: bool) -> Result<NetworkTrace, WitnessE
                             row[c.q] = BaseField::from(q);
                             row[c.s] = BaseField::from(parts.0);
                             row[c.m] = BaseField::from(parts.1);
-                            row[c.sm] = BaseField::from(2 * parts.1 + parts.0);
                             row[c.ep] = BaseField::from(parts.2);
                             row.into_iter().enumerate().for_each(|(i, v)| table[i].push(v));
                         }
@@ -305,6 +328,16 @@ pub fn build(w: &NetworkWitness, checked: bool) -> Result<NetworkTrace, WitnessE
                 table.into_iter().map(|col| column(rows, col)).collect()
             }
             Kind::Table | Kind::Pow2Table => unreachable!(),
+        };
+        #[cfg(any(test, feature = "forgery"))]
+        let base = {
+            let mut base = base;
+            HOOK.with(|h| {
+                if let Some(f) = h.borrow().as_ref() {
+                    f(&kind, &mut base)
+                }
+            });
+            base
         };
         let built = BuiltComponent::new(kind, base);
         count_range_uses(&built, &mut mult, &mut pow2_mult);
@@ -395,9 +428,9 @@ pub fn interaction_traces(t: &NetworkTrace, lookups: &Lookups) -> (Vec<Eval>, Ve
                             let den = lookups.tensor_elements().combine(&[tag, packed(c, i, vec_row), packed(c, j, vec_row), packed(c, value, vec_row)]);
                             (numerator(c, num, vec_row), den)
                         }
-                        Use::Float { tag, i, j, sm, ep, num } => {
+                        Use::Float { tag, i, j, s, m, ep, num } => {
                             let tag = PackedBaseField::broadcast(BaseField::from(tag));
-                            let den = lookups.float_elements().combine(&[tag, packed(c, i, vec_row), packed(c, j, vec_row), packed(c, sm, vec_row), packed(c, ep, vec_row)]);
+                            let den = lookups.float_elements().combine(&[tag, packed(c, i, vec_row), packed(c, j, vec_row), packed(c, s, vec_row), packed(c, m, vec_row), packed(c, ep, vec_row)]);
                             (numerator(c, num, vec_row), den)
                         }
                         Use::Pow2 { sh, p2 } => (numerator(c, Num::One, vec_row), lookups.pow2_elements().combine(&[packed(c, sh, vec_row), packed(c, p2, vec_row)])),
