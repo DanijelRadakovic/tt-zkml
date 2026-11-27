@@ -20,6 +20,15 @@ without building the attack), and several sizes were not checked (H2 to H4). Tha
 manual review plus independent adversarial review plus mutation testing plus randomized and exhaustive tests, **not** a machine-checked proof and not a
 third-party audit (section 7).
 
+> **After round 3 the statement changed (model commitment), and that change has not been reviewed independently.** The verifier no longer takes the
+> weights; the model is a commitment (tree 0 of the proof, its root compared with the verifier's `ModelCommitment`), the constants of the statement moved
+> to their own tree (tree 3, root recomputed by the verifier from the shapes and cached in a `VerifyingKey`), and the weight rows are pinned to the model
+> tree by equality constraints instead of a lookup of public floats; the constraints now also check that a committed triple is well formed (sign bit,
+> significand limbs). The proof encoding became binary (bincode). Sections 1 to 8 describe the code as audited (public weights). The new parts are covered
+> by the author's tests only: unit tests of the commitment, `m1_*` in `tests/audit.rs`, the deviation and malformed-float checks of
+> `tests/row_exhaustive.rs` (with their mutation check: removing the equality constraints, the sign-bit constraint or the significand limbs makes a test
+> fail), the forgery fuzz and the device test. They should get a round of their own.
+
 ## 1. The statement
 
 `verify(proof, inputs)` returns `Ok` only if, for the verifier's `inputs` (model layers with their ReLU flags, float weights, float input, dtype), the

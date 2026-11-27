@@ -9,7 +9,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, relation};
 
 use super::spec::{ACC_LIMBS, LIMB_BASE, LayerSpec, Mode};
-use crate::witness::{PublicInputs, effective, float_parts};
+use crate::witness::float_parts;
 
 relation!(RangeLookup, 1);
 relation!(TensorLookup, 4);
@@ -53,6 +53,11 @@ impl Lookups {
     }
 }
 
+/// The commitment tree of the constants of the statement (index columns, `real` flags, multiplicities, the tables): the verifier recomputes its root
+/// from the shapes alone. Tree 0 (stwo's "preprocessed" tree) holds the committed model instead: its root is the model commitment the verifier is
+/// given, so the verifier needs no weights. Trees 1 and 2 are the trace and the LogUp interaction trace.
+pub const CONSTANTS_TREE: usize = 3;
+
 /// stwo's SIMD backend works on 16 lanes: a trace has at least 2^4 rows.
 pub const MIN_LOG_SIZE: u32 = 4;
 /// The range table has 256 rows: `0 ..= 254` and `254` once more.
@@ -72,7 +77,7 @@ pub(super) const TABLE_MAX: u32 = 254;
 /// A signed value `v` in `[-127, 127]` is range checked as `v + 127` in the table.
 pub(super) const OFFSET: u32 = 127;
 
-pub(super) fn log_rows(rows: usize) -> u32 {
+pub fn log_rows(rows: usize) -> u32 {
     rows.next_power_of_two().ilog2().max(MIN_LOG_SIZE)
 }
 
@@ -276,6 +281,9 @@ pub struct QNonZero {
     pub h: usize,
     pub hv: Vec<usize>,
     pub hs: usize,
+    /// Limbs of the significand `m`: a committed model is not known to the verifier, so `m` is range checked (below 2^29, which is all the
+    /// constraints need: no product with it can wrap).
+    pub ml: Vec<usize>,
 }
 
 impl QCols {
@@ -297,7 +305,8 @@ impl QCols {
         let [h] = take(1)[..] else { unreachable!() };
         let hv = take(ACC_LIMBS);
         let [hs] = take(1)[..] else { unreachable!() };
-        Self { q: 0, s: 1, m: 2, ep: 3, nz: Some(QNonZero { qa, p2, sh, c, diff, r, e, half, v1, v2, z, g, ginv, rn, h, hv, hs }), total: next }
+        let ml = take(ACC_LIMBS);
+        Self { q: 0, s: 1, m: 2, ep: 3, nz: Some(QNonZero { qa, p2, sh, c, diff, r, e, half, v1, v2, z, g, ginv, rn, h, hv, hs, ml }), total: next }
     }
 }
 
@@ -366,7 +375,16 @@ impl Kind {
         names.iter().map(|n| format!("{}_{n}", self.prefix())).collect()
     }
 
-    /// The preprocessed columns, in the order of [`Kind::pre_ids`].
+    /// The ids of the columns of the committed model that the component reads (tree 0): for the weights of a layer, the sign, the significand and the
+    /// exponent of every float, one row per element.
+    pub fn model_ids(&self) -> Vec<String> {
+        match self {
+            Kind::Tensor { layer, which: Which::W, .. } => ["s", "m", "e"].iter().map(|n| format!("tt_zkml_model_w{layer}_{n}")).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The constant columns (tree [`CONSTANTS_TREE`]), in the order of [`Kind::pre_ids`].
     pub fn pre_cols(&self) -> Vec<PreCol> {
         let log_size = self.log_size();
         let rows = 1usize << log_size;
@@ -433,17 +451,20 @@ impl Kind {
                     Which::W => tag_w(*layer),
                 };
                 let c = QCols::new(*kexp);
-                let mut uses = vec![
-                    Use::Float { tag: *tid, i: Src::Pre(0), j: Src::Pre(1), s: Src::Col(c.s), m: Src::Col(c.m), ep: Src::Col(c.ep), num: Num::Pre(3) },
-                    Use::Tensor { tag, i: Src::Pre(0), j: Src::Pre(1), value: Src::Col(c.q), num: Num::NegPre(2) },
-                    Use::Range { value: Src::Col(c.q), offset: OFFSET },
-                ];
+                let mut uses = Vec::new();
+                if *which == Which::X {
+                    // the input is public: every element consumes the verifier's float. The weights are pinned to the committed model instead
+                    // (equality constraints with the columns of tree 0).
+                    uses.push(Use::Float { tag: *tid, i: Src::Pre(0), j: Src::Pre(1), s: Src::Col(c.s), m: Src::Col(c.m), ep: Src::Col(c.ep), num: Num::Pre(3) });
+                }
+                uses.push(Use::Tensor { tag, i: Src::Pre(0), j: Src::Pre(1), value: Src::Col(c.q), num: Num::NegPre(2) });
+                uses.push(Use::Range { value: Src::Col(c.q), offset: OFFSET });
                 if let Some(n) = &c.nz {
                     let range0 = |i: usize| Use::Range { value: Src::Col(i), offset: 0 };
                     uses.push(Use::Pow2 { sh: Src::Col(n.sh), p2: Src::Col(n.p2) });
                     uses.extend([range0(n.qa), range0(n.g), range0(n.diff), range0(n.hs)]);
                     uses.push(Use::Range { value: Src::Col(n.half), offset: OFFSET });
-                    uses.extend(n.v1.iter().chain(&n.v2).chain(&n.rn).chain(&n.hv).map(|&i| range0(i)));
+                    uses.extend(n.v1.iter().chain(&n.v2).chain(&n.rn).chain(&n.hv).chain(&n.ml).map(|&i| range0(i)));
                     uses.push(Use::Tensor { tag: tag_fhit(*tid), i: Src::Const(0), j: Src::Const(0), value: Src::Const(0), num: Num::Col(n.h) });
                 }
                 uses
@@ -483,7 +504,7 @@ impl Kind {
     }
 
     /// The polynomial constraints of a row. `pre` and `cols` are the preprocessed and the trace columns at the row, in the order of their ids / indices.
-    fn constraints<E: EvalAtRow>(&self, eval: &mut E, pre: &[E::F], cols: &[E::F]) {
+    fn constraints<E: EvalAtRow>(&self, eval: &mut E, pre: &[E::F], model: &[E::F], cols: &[E::F]) {
         let c = |v: u64| E::F::from(BaseField::from((v % ((1u64 << 31) - 1)) as u32));
         let limb_sum = |idx: &[usize]| -> E::F {
             let mut base = 1u32;
@@ -504,15 +525,24 @@ impl Kind {
             Kind::Tensor { kexp, .. } => {
                 let qc = QCols::new(*kexp);
                 let one = E::F::one();
-                // s, m and e' are pinned to the public float by the lookup (as field elements: m < 2^24, s a bit, e' in 1..=254)
+                // The float (s, m, e'): for the input it is pinned to the verifier's public float by the lookup; for the weights it is the committed
+                // model (tree 0), row by row. A committed float is not known to the verifier, so the constraints make it well formed themselves: s is
+                // a bit, and (below) m is limb checked and the range checks of the shift bound e'.
                 let (q, sgn, m, ep) = (cols[qc.q].clone(), cols[qc.s].clone(), cols[qc.m].clone(), cols[qc.ep].clone());
                 let real = pre[3].clone();
+                if let [ms, mm, me] = model {
+                    eval.add_constraint(sgn.clone() - ms.clone());
+                    eval.add_constraint(m.clone() - mm.clone());
+                    eval.add_constraint(ep.clone() - me.clone());
+                }
+                eval.add_constraint(sgn.clone() * (sgn.clone() - one.clone()));
                 let Some(n) = &qc.nz else {
                     // an all-zero tensor
                     eval.add_constraint(q);
                     eval.add_constraint(m);
                     return;
                 };
+                eval.add_constraint(m.clone() - limb_sum(&n.ml)); // 0 <= m < 2^29
                 let signed = |v: i64| -> E::F { E::F::from(BaseField::from(v.rem_euclid((1i64 << 31) - 1) as u32)) };
                 let (qa, p2, sh, cl, diff, r) = (cols[n.qa].clone(), cols[n.p2].clone(), cols[n.sh].clone(), cols[n.c].clone(), cols[n.diff].clone(), cols[n.r].clone());
                 // q = (-1)^s * qa, qa >= 0 (range checked)
@@ -630,9 +660,15 @@ impl FrameworkEval for NetEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let pre = self.kind.pre_ids().into_iter().map(|id| eval.get_preprocessed_column(PreProcessedColumnId { id })).collect_vec();
+        let pre = (0..self.kind.pre_ids().len())
+            .map(|_| {
+                let [v] = eval.next_interaction_mask(CONSTANTS_TREE, [0]);
+                v
+            })
+            .collect_vec();
+        let model = self.kind.model_ids().into_iter().map(|id| eval.get_preprocessed_column(PreProcessedColumnId { id })).collect_vec();
         let cols = (0..self.kind.n_cols()).map(|_| eval.next_trace_mask()).collect_vec();
-        self.kind.constraints(&mut eval, &pre, &cols);
+        self.kind.constraints(&mut eval, &pre, &model, &cols);
 
         let value = |s: Src| -> E::F {
             match s {
@@ -683,10 +719,10 @@ impl FrameworkEval for NetEval {
 ///
 /// * the public output tensor (the last requantization yields it once),
 /// * the "largest accumulator" rows (every requantization with a hit consumes one, the public side yields one),
-/// * the public float tensors, the model's weights and the input: every quantization consumes the float tuple `(tag, i, j, 2m + s, e')` of its element,
-///   the public side yields it, so a quantized tensor is the quantization of exactly these floats,
+/// * the public float input (`input`: as the device sees it): the quantization of the input consumes the float tuple `(tag, i, j, s, m, e')` of its
+///   element and the public side yields it. The weights are not here: they are the committed model (tree 0), which the constraints read directly,
 /// * the "largest float" rows of every non-zero float tensor.
-pub fn public_sum(specs: &[LayerSpec], output: &[i32], inputs: &PublicInputs, lookups: &Lookups) -> SecureField {
+pub fn public_sum(specs: &[LayerSpec], output: &[i32], input: &[f32], lookups: &Lookups) -> SecureField {
     let tensor = |tag: u32, i: u32, j: u32, v: BaseField| -> SecureField {
         lookups.tensor_elements().combine::<BaseField, SecureField>(&[BaseField::from(tag), BaseField::from(i), BaseField::from(j), v]).inverse()
     };
@@ -708,18 +744,13 @@ pub fn public_sum(specs: &[LayerSpec], output: &[i32], inputs: &PublicInputs, lo
             sum -= tensor(tag_hit(l), 0, 0, BaseField::zero());
         }
     }
-    // the floats the device sees (bf16 rounded for a bf16 model)
-    let x = effective(&inputs.input, inputs.dtype);
-    for (r, &v) in x.iter().enumerate() {
+    for (r, &v) in input.iter().enumerate() {
         sum -= float(0, r / specs[0].k, r % specs[0].k, v);
     }
     if specs[0].kx < 127 {
         sum -= tensor(tag_fhit(0), 0, 0, BaseField::zero());
     }
     for (l, spec) in specs.iter().enumerate() {
-        for (r, &v) in effective(&inputs.weights[l], inputs.dtype).iter().enumerate() {
-            sum -= float(l as u32 + 1, r / spec.n, r % spec.n, v);
-        }
         if spec.kw < 127 {
             sum -= tensor(tag_fhit(l as u32 + 1), 0, 0, BaseField::zero());
         }

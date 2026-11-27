@@ -81,7 +81,7 @@ pub fn pot_k(absmax: f32, bits: u32) -> Result<i32> {
 }
 
 /// The type of the floats on the device (the arithmetic is int8 either way).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dtype {
     F32,
     Bf16,
@@ -97,7 +97,7 @@ impl Dtype {
 }
 
 /// A fully connected layer `y = x @ W`, `W` of shape `[in_features, out_features]`, with an optional ReLU on the accumulator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layer {
     pub in_features: u32,
     pub out_features: u32,

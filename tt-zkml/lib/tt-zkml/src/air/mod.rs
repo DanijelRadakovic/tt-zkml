@@ -28,12 +28,12 @@ pub mod spec;
 #[doc(hidden)]
 pub mod kind;
 #[cfg(not(feature = "forgery"))]
-mod kind;
+pub(crate) mod kind;
 #[cfg(feature = "forgery")]
 #[doc(hidden)]
 pub mod trace;
 #[cfg(not(feature = "forgery"))]
-mod trace;
+pub(crate) mod trace;
 
 pub use kind::{Kind, Lookups, NetEval, PreCol, Which, check_lookup_budget, layout, public_sum, range_lookups, table_pre_id, TABLE_LOG_SIZE};
 pub use spec::{ACC_LIMBS, LayerSpec, Mode, SpecError};

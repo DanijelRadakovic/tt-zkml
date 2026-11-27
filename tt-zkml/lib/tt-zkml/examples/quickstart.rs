@@ -2,6 +2,7 @@
 //
 //     cargo run --release --example quickstart
 use tt_zkml::modelfile::ModelFile;
+use tt_zkml::proof::{ModelCommitment, VerifyingKey};
 use tt_zkml::witness::PublicInputs;
 use tt_zkml::{device, proof, Device, Dtype, Layer, Model};
 
@@ -25,14 +26,21 @@ fn main() {
     let proof = proof::prove(&model_file, &input, &trace).unwrap();
     println!("proof: {} KiB, {} layers", proof.bytes.len() / 1024, proof.specs.len());
 
-    // 3. Verify it: no device needed. The verifier knows the float model and input; the output is part of the proof.
-    proof::verify(&proof, &PublicInputs::new(&model_file, &input)).unwrap();
-    println!("proof verified: the network on this input gives this output");
+    // 3. Verify it: no device and no weights needed. The verifier holds the model's COMMITMENT (the architecture and a 32-byte root, computed once
+    //    by whoever holds the weights) and the float input; the output is part of the proof.
+    let commitment = ModelCommitment::new(&model_file).unwrap();
+    println!("model commitment: {}", commitment.root.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    proof::verify(&proof, &PublicInputs { model: commitment.clone(), input: input.clone() }).unwrap();
+    println!("proof verified: the committed model on this input gives this output");
     assert_eq!(proof.dequantized_output(), trace.dequantized_output()); // computable from the proof alone
+
+    // Many proofs of one model and batch size: prepare a key once, then each verification costs nothing proportional to the model.
+    let key = VerifyingKey::new(&commitment, 32).unwrap();
+    proof::verify_with_key(&proof, &key, &input).unwrap();
 
     // The proof is plain bytes: store it, send it, verify it elsewhere.
     let bytes = proof.to_bytes();
-    proof::verify(&proof::Proof::from_bytes(&bytes).unwrap(), &PublicInputs::new(&model_file, &input)).unwrap();
+    proof::verify_with_key(&proof::Proof::from_bytes(&bytes).unwrap(), &key, &input).unwrap();
 }
 
 fn pseudo(seed: u64, n: usize) -> Vec<f32> {

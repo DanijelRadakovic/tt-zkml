@@ -29,8 +29,10 @@ type Eval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
 /// One component with its columns materialized.
 pub struct BuiltComponent {
     pub kind: Kind,
-    /// Preprocessed columns (the constants of the statement).
+    /// Constant columns of the statement (tree `CONSTANTS_TREE`).
     pub pre: Vec<BaseColumn>,
+    /// Columns of the committed model (tree 0): the floats of the weights; empty for the other components.
+    pub model: Vec<BaseColumn>,
     /// Trace columns.
     pub base: Vec<BaseColumn>,
 }
@@ -182,6 +184,7 @@ pub fn quant_row(kexp: i32, c: &QCols, row: usize, parts: (u32, u32, u32), q: i3
     if q != if sign == 1 { -(qa as i32) } else { qa as i32 } {
         return Err(bad("q is not the quantization of the float"));
     }
+    put(&mut cols, &n.ml, m)?;
     cols[n.qa] = BaseField::from(qa as u32);
     cols[n.p2] = BaseField::from(p2 as u32);
     cols[n.sh] = BaseField::from(sh as u32);
@@ -229,11 +232,27 @@ fn first_hit(floats: &[f32], kexp: i32) -> Option<usize> {
     })
 }
 
+/// The columns of the committed model for one weight tensor: the sign, the significand and the biased exponent of every float (as the device sees
+/// it), padded with the float `+0` (`(0, 0, 1)`). The model commitment is the Merkle root of these columns of all layers.
+pub fn model_columns(floats: &[f32], rows: usize) -> Vec<BaseColumn> {
+    let parts = |r: usize| if r < floats.len() { float_parts(floats[r]) } else { (0, 0, 1) };
+    vec![
+        column(rows, (0..rows).map(|r| BaseField::from(parts(r).0))),
+        column(rows, (0..rows).map(|r| BaseField::from(parts(r).1))),
+        column(rows, (0..rows).map(|r| BaseField::from(parts(r).2))),
+    ]
+}
+
 impl BuiltComponent {
-    fn new(kind: Kind, base: Vec<BaseColumn>) -> Self {
+    fn new(kind: Kind, base: Vec<BaseColumn>, model: Vec<BaseColumn>) -> Self {
         let rows = 1usize << kind.log_size();
         let pre = kind.pre_cols().into_iter().map(|p| column(rows, p.values.into_iter().map(BaseField::from))).collect();
-        Self { kind, pre, base }
+        Self { kind, pre, base, model }
+    }
+
+    pub fn model_evals(&self) -> Vec<Eval> {
+        let domain = CanonicCoset::new(self.kind.log_size()).circle_domain();
+        self.model.iter().map(|c| CircleEvaluation::new(domain, c.clone())).collect()
     }
 
     pub fn pre_evals(&self) -> Vec<Eval> {
@@ -344,17 +363,21 @@ pub fn build(w: &NetworkWitness, checked: bool) -> Result<NetworkTrace, WitnessE
             });
             base
         };
-        let built = BuiltComponent::new(kind, base);
+        let model = match &kind {
+            Kind::Tensor { layer, which: Which::W, .. } => model_columns(&w.w_float[*layer], rows),
+            _ => Vec::new(),
+        };
+        let built = BuiltComponent::new(kind, base, model);
         count_range_uses(&built, &mut mult, &mut pow2_mult);
         components.push(built);
     }
     // The table: its multiplicity column (the value 254 occurs in two rows; all its uses are booked on the first).
     let table_kind = Kind::Table;
     let column_mult = column(TABLE_ROWS, (0..TABLE_ROWS).map(|i| BaseField::from(if i < TABLE_ROWS - 1 { mult[i] } else { 0 })));
-    components.push(BuiltComponent::new(table_kind, vec![column_mult]));
+    components.push(BuiltComponent::new(table_kind, vec![column_mult], Vec::new()));
     // The power-of-two table: shifts 1 ..= 25, the last one repeated; all its uses are booked on its first row.
     let column_pow2 = column(POW2_ROWS, (0..POW2_ROWS).map(|i| BaseField::from(if i < POW2_MAX_SHIFT as usize { pow2_mult[i] } else { 0 })));
-    components.push(BuiltComponent::new(Kind::Pow2Table, vec![column_pow2]));
+    components.push(BuiltComponent::new(Kind::Pow2Table, vec![column_pow2], Vec::new()));
     Ok(NetworkTrace { components })
 }
 

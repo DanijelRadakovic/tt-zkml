@@ -47,8 +47,12 @@ fn f(v: i64) -> BaseField {
 
 /// Evaluates the constraints of one row on concrete values: records every constraint value and every LogUp fraction.
 struct RowEval<'a> {
+    /// constants of the statement (tree 3)
     pre: &'a [BaseField],
+    /// columns of the committed model (tree 0)
+    model: &'a [BaseField],
     cols: &'a [BaseField],
+    next_model: usize,
     next_pre: usize,
     next_col: usize,
     constraints_hold: bool,
@@ -63,6 +67,10 @@ impl EvalAtRow for RowEval<'_> {
         assert!(N == 1 && offsets[0] == 0, "the constraints read only the current row");
         let v = match interaction {
             0 => {
+                self.next_model += 1;
+                self.model[self.next_model - 1]
+            }
+            3 => {
                 self.next_pre += 1;
                 self.pre[self.next_pre - 1]
             }
@@ -117,10 +125,10 @@ impl Oracle {
 
     /// Evaluates the real constraints of `kind` on the row. Returns `None` if a constraint fails or a lookup is neither one of the `interface` tuples nor
     /// in a table; otherwise the numerators of the interface tuples, in the order of `interface`.
-    fn accept(&self, kind: &Kind, pre: &[BaseField], cols: &[BaseField], interface: &[SecureField]) -> Option<Vec<SecureField>> {
-        let eval = RowEval { pre, cols, next_pre: 0, next_col: 0, constraints_hold: true, fractions: Vec::new() };
+    fn accept(&self, kind: &Kind, pre: &[BaseField], model: &[BaseField], cols: &[BaseField], interface: &[SecureField]) -> Option<Vec<SecureField>> {
+        let eval = RowEval { pre, model, cols, next_model: 0, next_pre: 0, next_col: 0, constraints_hold: true, fractions: Vec::new() };
         let eval = NetEval { kind: kind.clone(), lookups: self.lookups.clone() }.evaluate(eval);
-        assert_eq!(eval.next_col, cols.len(), "the row must have exactly the columns of the component");
+        assert_eq!((eval.next_col, eval.next_pre, eval.next_model), (cols.len(), pre.len(), model.len()), "the row must have exactly the columns of the component");
         if !eval.constraints_hold {
             return None;
         }
@@ -180,6 +188,10 @@ enum Dev {
     Shift(i64),
     P2(i64),
     Ginv(i64),
+    /// the committed model's sign / significand / exponent differs from the row's
+    ModelS(i64),
+    ModelM(i64),
+    ModelE(i64),
 }
 
 fn field_int(v: SecureField) -> Option<i64> {
@@ -287,7 +299,7 @@ fn check_requant(oracle: &Oracle, spec: LayerSpec, accs: &[i64], outs: &[i64], d
                     if c.hit.is_some() {
                         interface.push(oracle.tensor(tag_hit(0), 0, 0, f(0)));
                     }
-                    let Some(nums) = oracle.accept(&kind, &pre, &cols, &interface) else { continue };
+                    let Some(nums) = oracle.accept(&kind, &pre, &[], &cols, &interface) else { continue };
                     count.accepted += 1;
                     let ctx = format!("spec {spec:?} real {real} acc {acc} out {out} flags p={p} e={e} hp={hp} hn={hn} deviation {dev:?}");
                     assert_eq!(field_int(nums[0]), Some(real as i64), "the accumulator is consumed once per real row: {ctx}");
@@ -385,6 +397,7 @@ fn tensor_row(kexp: i32, c: &QCols, sign: u32, m: i64, ep: i64, q: i64, cl: u32,
         return None; // no row of the power-of-two table
     }
     let p2 = if let Dev::P2(v) = dev { f(v) } else { f(1 << sh) };
+    put(&mut cols, &n.ml, f(m));
     cols[n.qa] = qa;
     cols[n.p2] = p2;
     cols[n.sh] = f(sh);
@@ -435,14 +448,15 @@ fn reference(m: i64, raw: i64) -> (i64, bool) {
 
 /// Checks every tensor row over the given raw shifts. `dense`: many significands around every rounding boundary; `deviations`: also rows in which one
 /// derived column is written with another value.
-fn check_tensor(oracle: &Oracle, raws: &[i64], dense: bool, deviations: bool, count: &mut Count) {
+fn check_tensor(oracle: &Oracle, which: Which, raws: &[i64], dense: bool, deviations: bool, count: &mut Count) {
     let kexp = 3;
-    let tid = 1;
+    let tid = if which == Which::W { 1 } else { 0 };
     let layer_spec = LayerSpec { m: 2, k: 2, n: 4, relu: false, ko: -5, kw: kexp, kx: 0 };
-    let kind = Kind::Tensor { layer: 0, which: Which::W, spec: layer_spec, kexp, tid };
+    let kind = Kind::Tensor { layer: 0, which, spec: layer_spec, kexp, tid };
     let c = QCols::new(kexp);
     let (i, j) = (1u32, 3u32);
     let qs: Vec<i64> = (-130..=130).collect();
+    let value_tag = if which == Which::W { tag_w(0) } else { tag_x(0) };
     for real in [1u32, 0] {
         let pre = [BaseField::from(i), BaseField::from(j), BaseField::from(2 * real), BaseField::from(real)];
         for &raw in raws {
@@ -481,6 +495,8 @@ fn check_tensor(oracle: &Oracle, raws: &[i64], dense: bool, deviations: bool, co
                                     Dev::G(0), Dev::G(1), Dev::G(127 - q.abs()),
                                     Dev::Diff(0), Dev::Hs(0), Dev::Half(0), Dev::Half(q.abs() / 2), Dev::Ginv(0), Dev::Ginv(1),
                                     Dev::Shift(1), Dev::Shift(17), Dev::Shift(24), Dev::Shift(25), Dev::P2(1), Dev::P2(1 << 24),
+                                    // the committed model says something else than the row (weights only)
+                                    Dev::ModelS(1 - sign as i64), Dev::ModelM(m + 1), Dev::ModelM(0), Dev::ModelE(ep + 1), Dev::ModelE(1),
                                 ]
                             } else {
                                 vec![Dev::None]
@@ -488,14 +504,35 @@ fn check_tensor(oracle: &Oracle, raws: &[i64], dense: bool, deviations: bool, co
                             for dev in devs {
                                 let Some(cols) = tensor_row(kexp, &c, sign, m, ep, q, cl, e, z, h, dev) else { continue };
                                 count.candidates += 1;
-                                let float = oracle.lookups.float.combine(&[BaseField::from(tid), BaseField::from(i), BaseField::from(j), BaseField::from(sign), f(m), f(ep)]);
-                                let interface = [float, oracle.tensor(tag_w(0), i, j, f(q)), oracle.tensor(tag_fhit(tid), 0, 0, f(0))];
-                                let Some(nums) = oracle.accept(&kind, &pre, &cols, &interface) else { continue };
+                                // the weights are pinned by the committed model (tree 0), the input by the verifier's public float (a lookup)
+                                let model: Vec<BaseField> = if which == Which::W {
+                                    let (mut ms, mut mm, mut me) = (sign as i64, m, ep);
+                                    match dev {
+                                        Dev::ModelS(v) => ms = v,
+                                        Dev::ModelM(v) => mm = v,
+                                        Dev::ModelE(v) => me = v,
+                                        _ => {}
+                                    }
+                                    vec![f(ms), f(mm), f(me)]
+                                } else {
+                                    if matches!(dev, Dev::ModelS(_) | Dev::ModelM(_) | Dev::ModelE(_)) {
+                                        continue;
+                                    }
+                                    Vec::new()
+                                };
+                                let mut interface = vec![oracle.tensor(value_tag, i, j, f(q)), oracle.tensor(tag_fhit(tid), 0, 0, f(0))];
+                                if which == Which::X {
+                                    interface.push(oracle.lookups.float.combine(&[BaseField::from(tid), BaseField::from(i), BaseField::from(j), BaseField::from(sign), f(m), f(ep)]));
+                                }
+                                let Some(nums) = oracle.accept(&kind, &pre, &model, &cols, &interface) else { continue };
                                 count.accepted += 1;
-                                let ctx = format!("real {real} raw {raw} m {m} sign {sign} q {q} flags c={cl} e={e} z={z} h={h} deviation {dev:?}");
-                                assert_eq!(field_int(nums[0]), Some(real as i64), "the float is consumed once per real row: {ctx}");
-                                assert_eq!(field_int(nums[1]), Some(-(2 * real as i64)), "the value is yielded once per use: {ctx}");
-                                let hit = field_int(nums[2]).expect("a hit count");
+                                let ctx = format!("{which:?} real {real} raw {raw} m {m} sign {sign} q {q} flags c={cl} e={e} z={z} h={h} deviation {dev:?}");
+                                assert!(!matches!(dev, Dev::ModelS(_) | Dev::ModelM(_) | Dev::ModelE(_)) || model == vec![f(sign as i64), f(m), f(ep)], "SOUNDNESS: a row that differs from the committed model is accepted: {ctx}");
+                                if which == Which::X {
+                                    assert_eq!(field_int(nums[2]), Some(real as i64), "the float is consumed once per real row: {ctx}");
+                                }
+                                assert_eq!(field_int(nums[0]), Some(-(2 * real as i64)), "the value is yielded once per use: {ctx}");
+                                let hit = field_int(nums[1]).expect("a hit count");
                                 if real == 0 {
                                     assert_eq!(hit, 0, "SOUNDNESS: a padding row counts as the largest float: {ctx}");
                                     continue;
@@ -527,7 +564,8 @@ fn tensor_rows_exhaustive() {
     let oracle = Oracle::new();
     let mut count = Count::default();
     let raws: &[i64] = if full() { &[-2, 0, 1, 2, 3, 7, 8, 14, 17, 18, 19, 20, 21, 23, 24, 25, 26, 40, 146] } else { &[0, 1, 17, 20, 21, 24, 25, 146] };
-    check_tensor(&oracle, raws, full(), false, &mut count);
+    check_tensor(&oracle, Which::W, raws, full(), false, &mut count);
+    check_tensor(&oracle, Which::X, if full() { raws } else { &[1, 20, 25] }, false, false, &mut count);
     println!("tensor rows: {} candidate rows, {} accepted", count.candidates, count.accepted);
     assert!(count.accepted > 100);
 
@@ -543,9 +581,8 @@ fn tensor_rows_exhaustive() {
         for sign in [0u32, 1] {
             for q in -130..=130i64 {
                 let cols = tensor_row(127, &c, sign, m, 1, q, 0, 0, 0, 0, Dev::None).unwrap();
-                let float = oracle.lookups.float.combine(&[BaseField::from(tid), BaseField::from(i), BaseField::from(j), BaseField::from(sign), f(m), f(1)]);
-                let interface = [float, oracle.tensor(tag_w(0), i, j, f(q))];
-                if oracle.accept(&kind, &pre, &cols, &interface).is_some() {
+                let interface = [oracle.tensor(tag_w(0), i, j, f(q))];
+                if oracle.accept(&kind, &pre, &[BaseField::from(sign), f(m), f(1)], &cols, &interface).is_some() {
                     assert!(m == 0 && q == 0, "SOUNDNESS: the all-zero mode accepts m {m} q {q}");
                 }
             }
@@ -577,6 +614,45 @@ fn rows_with_one_deviating_column() {
         }
     }
     let requant = (count.candidates, count.accepted);
-    check_tensor(&oracle, if full() { &[1, 2, 17, 24, 25, 26] } else { &[1, 24, 25] }, false, true, &mut count);
+    check_tensor(&oracle, Which::W, if full() { &[1, 2, 17, 24, 25, 26] } else { &[1, 24, 25] }, false, true, &mut count);
     println!("deviating rows: requantization {requant:?}, with tensor rows {} candidates, {} accepted", count.candidates, count.accepted);
+}
+
+/// A committed model is not known to the verifier, so the constraints themselves must refuse committed "floats" that are not well formed: a sign that is
+/// not a bit, a significand that the limbs cannot hold. (The model column and the row agree here: the malformed value is what was committed.)
+#[test]
+fn malformed_committed_floats_have_no_accepted_row() {
+    let oracle = Oracle::new();
+    let kexp = 3;
+    let layer_spec = LayerSpec { m: 2, k: 2, n: 4, relu: false, ko: -5, kw: kexp, kx: 0 };
+    let kind = Kind::Tensor { layer: 0, which: Which::W, spec: layer_spec, kexp, tid: 1 };
+    let c = QCols::new(kexp);
+    let n = c.nz.as_ref().unwrap();
+    let (i, j) = (1u32, 3u32);
+    let pre = [BaseField::from(i), BaseField::from(j), BaseField::from(2u32), BaseField::from(1u32)];
+    let mut accepted_honest = 0;
+    for raw in [1i64, 17, 24, 25, 40] {
+        let ep = 150 - kexp as i64 - raw;
+        for q in -130..=130i64 {
+            for flags in 0..16u32 {
+                let (cl, e, z, h) = (flags & 1, (flags >> 1) & 1, (flags >> 2) & 1, (flags >> 3) & 1);
+                // (sign, m): honest ones as a control, then malformed ones
+                for (sign, m) in [(0i64, 5i64), (2, 5), (P - 1, 5), (3, 0), (0, 1 << 29), (0, (1 << 30) + 7), (0, P - 1), (1, (254 * 2113665) + 1)] {
+                    let Some(mut cols) = tensor_row(kexp, &c, 0, m, ep, q, cl, e, z, h, Dev::None) else { continue };
+                    cols[c.s] = f(sign);
+                    // with another sign the magnitude column that satisfies q = qa (1 - 2s) is another one
+                    let factor = f(1) - f(2) * f(sign);
+                    if factor != f(0) {
+                        cols[n.qa] = f(q) * factor.inverse();
+                    }
+                    let interface = [oracle.tensor(tag_w(0), i, j, f(q)), oracle.tensor(tag_fhit(1), 0, 0, f(0))];
+                    if oracle.accept(&kind, &pre, &[f(sign), f(m), f(ep)], &cols, &interface).is_some() {
+                        assert!((sign, m) == (0, 5), "SOUNDNESS: a malformed committed float (sign {sign}, m {m}) has an accepted row: raw {raw} q {q}");
+                        accepted_honest += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted_honest > 0);
 }

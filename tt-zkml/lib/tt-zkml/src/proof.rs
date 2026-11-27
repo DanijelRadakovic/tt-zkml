@@ -1,7 +1,15 @@
 //! Proof generation and verification with stwo.
 //!
 //! [`prove`] takes the model, the float input and the device [`Trace`], rebuilds the witness on the CPU ([`NetworkWitness::from_trace`]), converts it to
-//! M31 columns and proves the constraints of [`crate::air`]. [`verify`] checks a [`Proof`] against its public statement (the layer specs and the output).
+//! M31 columns and proves the constraints of [`crate::air`].
+//!
+//! The verifier does not need the model's weights: the model is a [`ModelCommitment`] (the architecture and a 32-byte Merkle root of the weights'
+//! floats, computed once by whoever holds the model). [`verify`] checks a [`Proof`] against the commitment, the float input and the proof's public
+//! statement (the exponents and the output). A [`VerifyingKey`] caches what depends only on the architecture and the batch size, so that verifying
+//! many proofs of one model costs no work proportional to the model.
+//!
+//! The proof is not zero knowledge (stwo does not blind the trace): every proof opens the committed columns at the query positions and at one random
+//! point, so the weights are hidden from a verifier only in the sense that it is never given them; enough proofs of one model reveal them.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -23,7 +31,10 @@ use stwo_constraint_framework::TraceLocationAllocator;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::air::spec::{self, LayerSpec};
+use crate::air::kind::{CONSTANTS_TREE, log_rows};
+use crate::air::trace::model_columns;
 use crate::air::{Kind, Lookups, NetEval, build, check_lookup_budget, interaction_traces, layout, public_sum};
+use crate::device::{Dtype, Layer};
 use crate::device::Trace;
 use crate::modelfile::ModelFile;
 use crate::witness::{NetworkWitness, PublicInputs, WitnessError, effective};
@@ -39,7 +50,7 @@ pub struct Proof {
     pub output: Vec<i32>,
     /// The LogUp claimed sums, one per component of [`layout`].
     pub claimed_sums: Vec<SecureField>,
-    /// The serialized stwo proof.
+    /// The stwo proof in its compact binary encoding (bincode); it has exactly one valid encoding.
     pub bytes: Vec<u8>,
 }
 
@@ -86,11 +97,113 @@ const FOLD_STEP: u32 = 1;
 /// 64 * 2 + 16 = 144 bits under the conjectured (capacity-level) FRI soundness, which is disputed; under proven analyses it is far lower: 80 bits is the
 /// limit of the Johnson bound that no concrete parameter reaches, about 66 bits with a concrete proximity parameter, about 59 bits in the
 /// unique-decoding regime, and the commit-phase term at the largest supported domain is about 2^-58 (see docs/audit.md).
-fn pcs_config(max_log_size: u32) -> PcsConfig {
+///
+/// The model tree (tree 0, stwo's "preprocessed" tree) is lifted to the size of the largest weight tensor only, so that the model commitment does not
+/// depend on the batch size or on anything else of a particular proof.
+fn pcs_config(max_log_size: u32, model_log_size: u32) -> PcsConfig {
     PcsConfig {
         fri_params: FriParams::new(POW_BITS, LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES, FOLD_STEP),
         trace_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
-        preprocessed_lifting_log_size: max_log_size + LOG_BLOWUP_FACTOR,
+        preprocessed_lifting_log_size: model_log_size + LOG_BLOWUP_FACTOR,
+    }
+}
+
+/// log2 of the rows of the largest weight tensor of `layers`.
+fn model_log_size(layers: &[Layer]) -> u32 {
+    layers.iter().map(|l| log_rows(l.in_features as usize * l.out_features as usize)).max().unwrap_or(4)
+}
+
+/// A model as a verifier knows it: the architecture (public) and the commitment to the weights. `root` is the Merkle root of the columns
+/// `(sign, significand, exponent)` of the floats of every weight tensor, as the device sees them (rounded to bf16 for a bf16 model), in the commitment
+/// scheme of the proofs. It depends on the weights, the architecture and the parameters of the proof system, and on nothing else (not on the batch size
+/// or the input), so it is computed once, by whoever holds the weights, and published.
+///
+/// A commitment made from other values than proper floats is still a commitment to one fixed model: the constraints make every committed triple a
+/// well-formed number themselves.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelCommitment {
+    /// How the device treats floats: decides the rounding of the input.
+    pub dtype: Dtype,
+    pub layers: Vec<Layer>,
+    pub root: [u8; 32],
+}
+
+impl ModelCommitment {
+    /// Commits to a model. Needs the weights; the cost is that of committing them once (an FFT and a Merkle tree over the weight tensors).
+    pub fn new(model: &ModelFile) -> Result<Self, ProveError> {
+        let weights: Vec<Vec<f32>> = model.weights.iter().map(|w| effective(w, model.dtype)).collect();
+        Self::from_floats(model.dtype, model.layers.clone(), &weights)
+    }
+
+    /// The commitment as a small JSON document (the architecture and the root).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("a commitment serializes")
+    }
+
+    pub fn from_json(text: &str) -> Result<Self, ProveError> {
+        serde_json::from_str(text).map_err(|e| ProveError::Decode(e.to_string()))
+    }
+
+    /// Commits to weights that are already the floats the device sees.
+    pub fn from_floats(dtype: Dtype, layers: Vec<Layer>, weights: &[Vec<f32>]) -> Result<Self, ProveError> {
+        let bad = |s: &str| Err(ProveError::Witness(s.to_string()));
+        if layers.is_empty() || layers.len() != weights.len() {
+            return bad("a model needs at least one layer, and one weight tensor per layer");
+        }
+        if layers.iter().zip(weights).any(|(l, w)| l.in_features == 0 || l.out_features == 0 || w.len() != l.in_features as usize * l.out_features as usize) {
+            return bad("the weights do not have the shapes of the layers");
+        }
+        if weights.iter().flatten().any(|v| !v.is_finite()) {
+            return bad("the weights must be finite");
+        }
+        let model_log = model_log_size(&layers);
+        let twiddles = twiddles(model_log);
+        let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(pcs_config(model_log, model_log), &twiddles);
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(layers.iter().zip(weights).flat_map(|(l, w)| {
+            let log = log_rows(l.in_features as usize * l.out_features as usize);
+            let domain = CanonicCoset::new(log).circle_domain();
+            model_columns(w, 1 << log).into_iter().map(move |c| stwo::prover::poly::circle::CircleEvaluation::new(domain, c))
+        }).collect_vec());
+        tree.commit(&mut Blake2sChannel::default());
+        Ok(Self { dtype, layers, root: scheme.roots()[0].0 })
+    }
+}
+
+/// What a verifier can prepare once per model and batch size: the root of the tree of constants (index columns, flags, multiplicities, the tables),
+/// which follows from the shapes alone. Building it costs a commitment of those columns; verifying with it costs nothing proportional to the model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifyingKey {
+    pub model: ModelCommitment,
+    pub batch: usize,
+    constants_root: [u8; 32],
+}
+
+/// The statement's layers with placeholder exponents: the constants and the shapes of the columns do not depend on the exponents.
+fn shape_specs(layers: &[Layer], batch: usize) -> Vec<LayerSpec> {
+    layers.iter().map(|l| LayerSpec { m: batch, k: l.in_features as usize, n: l.out_features as usize, relu: l.relu, ko: -1, kw: 0, kx: 0 }).collect()
+}
+
+impl VerifyingKey {
+    pub fn new(model: &ModelCommitment, batch: usize) -> Result<Self, ProveError> {
+        let specs = shape_specs(&model.layers, batch);
+        spec::validate(&specs).map_err(|e| ProveError::Verification(e.to_string()))?;
+        let kinds = layout(&specs);
+        check_lookup_budget(&kinds).map_err(ProveError::Verification)?;
+        let max_log = max_log_size(&kinds);
+        let twiddles = twiddles(max_log);
+        // The constants are not the first tree of a proof (that is the model), and only the first tree has its own lifting size: commit an empty
+        // first tree (which must have lifting size 0), then the constants at the lifting size of the trace.
+        let config = PcsConfig { preprocessed_lifting_log_size: 0, ..pcs_config(max_log, model_log_size(&model.layers)) };
+        let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        let scratch = &mut Blake2sChannel::default();
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(vec![]);
+        tree.commit(scratch);
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(constants_evals(&kinds));
+        tree.commit(scratch);
+        Ok(Self { model: model.clone(), batch, constants_root: scheme.roots()[1].0 })
     }
 }
 
@@ -104,15 +217,17 @@ fn max_log_size(kinds: &[Kind]) -> u32 {
 
 /// The stwo components of `kinds`; their columns follow the order of `kinds` in every tree.
 fn components(kinds: &[Kind], lookups: &Lookups, claimed_sums: &[SecureField]) -> Vec<NetComponent> {
-    let ids = kinds.iter().flat_map(|k| k.pre_ids()).map(|id| PreProcessedColumnId { id }).collect_vec();
+    // stwo's preprocessed columns (tree 0) are the columns of the committed model
+    let ids = kinds.iter().flat_map(|k| k.model_ids()).map(|id| PreProcessedColumnId { id }).collect_vec();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     kinds.iter().zip(claimed_sums).map(|(k, &sum)| NetComponent::new(&mut allocator, NetEval { kind: k.clone(), lookups: lookups.clone() }, sum)).collect()
 }
 
-/// Binds the whole public statement to the Fiat-Shamir transcript before anything else: the layers (shapes, activation, all exponents), the output
-/// and the float input and weights as the device sees them. The preprocessed root alone would not bind the exponents or the activations.
-fn mix_statement(channel: &mut Blake2sChannel, specs: &[LayerSpec], output: &[i32], input: &[f32], weights: &[Vec<f32>]) {
-    let mut words: Vec<u32> = b"tt-zkml proof v3".chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+/// Binds the public statement to the Fiat-Shamir transcript before anything else: the layers (shapes, activation, all exponents), the output and the
+/// float input as the device sees it. The model's weights enter right after, as the root of the first committed tree; the constants follow from the
+/// shapes mixed here.
+fn mix_statement(channel: &mut Blake2sChannel, specs: &[LayerSpec], output: &[i32], input: &[f32]) {
+    let mut words: Vec<u32> = b"tt-zkml proof v4".chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     // the parameters of the proof system are part of what is proven with
     words.extend([POW_BITS, LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES as u32, FOLD_STEP]);
     words.push(specs.len() as u32);
@@ -123,15 +238,11 @@ fn mix_statement(channel: &mut Blake2sChannel, specs: &[LayerSpec], output: &[i3
     words.extend(output.iter().map(|&v| v as u32));
     words.push(input.len() as u32);
     words.extend(input.iter().map(|v| v.to_bits()));
-    for w in weights {
-        words.push(w.len() as u32);
-        words.extend(w.iter().map(|v| v.to_bits()));
-    }
     channel.mix_u32s(&words);
 }
 
-/// The preprocessed tree (constants of the statement) of `kinds`.
-fn preprocessed_evals(kinds: &[Kind]) -> Vec<stwo::prover::poly::circle::CircleEvaluation<SimdBackend, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>> {
+/// The tree of the constants of the statement of `kinds`.
+fn constants_evals(kinds: &[Kind]) -> Vec<stwo::prover::poly::circle::CircleEvaluation<SimdBackend, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>> {
     use stwo::core::fields::m31::BaseField;
     use stwo::prover::poly::circle::CircleEvaluation;
     kinds
@@ -155,13 +266,17 @@ impl Proof {
         self.output.iter().map(|&v| (v as f64 / scale) as f32).collect()
     }
 
-    /// The proof and its statement as one JSON document.
+    /// The proof and its statement as one compact binary document (bincode).
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("a proof serializes")
+        bincode::serialize(self).expect("a proof serializes")
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProveError> {
-        serde_json::from_slice(bytes).map_err(|e| ProveError::Decode(e.to_string()))
+        let proof: Self = bincode::deserialize(bytes).map_err(|e| ProveError::Decode(e.to_string()))?;
+        if proof.to_bytes() != bytes {
+            return Err(ProveError::Decode("the proof file is not in its canonical encoding".into()));
+        }
+        Ok(proof)
     }
 }
 
@@ -189,21 +304,25 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
     let trace = build(witness, checked)?;
     let kinds = trace.components.iter().map(|c| c.kind.clone()).collect_vec();
     let max_log = max_log_size(&kinds);
-    let config = pcs_config(max_log);
+    let model_log = kinds.iter().filter(|k| !k.model_ids().is_empty()).map(|k| k.log_size()).max().unwrap();
+    let config = pcs_config(max_log, model_log);
     let twiddles = twiddles(max_log);
 
     let channel = &mut Blake2sChannel::default();
-    mix_statement(channel, &witness.specs, witness.output(), &witness.x0_float, &witness.w_float);
+    mix_statement(channel, &witness.specs, witness.output(), &witness.x0_float);
     let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
+    // tree 0: the committed model (its root is the model commitment)
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(preprocessed_evals(&kinds));
+    tree.extend_evals(trace.components.iter().flat_map(|c| c.model_evals()).collect_vec());
     tree.commit(channel);
 
+    // tree 1: the trace
     let mut tree = scheme.tree_builder();
     tree.extend_evals(trace.components.iter().flat_map(|c| c.base_evals()).collect_vec());
     tree.commit(channel);
 
+    // tree 2: the LogUp interaction trace
     let lookups = Lookups::draw(channel);
     let (interaction, claimed_sums) = interaction_traces(&trace, &lookups);
     channel.mix_felts(&claimed_sums);
@@ -211,41 +330,49 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
     tree.extend_evals(interaction);
     tree.commit(channel);
 
+    // tree 3: the constants of the statement (the verifier knows their root from the shapes)
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(constants_evals(&kinds));
+    tree.commit(channel);
+
     let comps = components(&kinds, &lookups, &claimed_sums);
     let refs = comps.iter().map(|c| c as &dyn ComponentProver<SimdBackend>).collect_vec();
     let proof = stwo_prove::<SimdBackend, Blake2sMerkleChannel>(&refs, channel, scheme).map_err(|e| ProveError::Prover(format!("{e:?}")))?;
-    let bytes = serde_json::to_vec(&proof).map_err(|e| ProveError::Prover(e.to_string()))?;
+    let bytes = bincode::serialize(&proof).map_err(|e| ProveError::Prover(e.to_string()))?;
     Ok(Proof { specs: witness.specs.clone(), output: witness.output().to_vec(), claimed_sums, bytes })
 }
 
-/// Verifies a proof of the execution of the model `inputs.weights` on `inputs.input`: against its public statement (`specs`, `output`) and the public
-/// floats.
+/// Verifies a proof that the committed model `inputs.model`, on the float input `inputs.input`, gives `proof.output`. Builds the [`VerifyingKey`] for
+/// the batch size first; use [`verify_with_key`] to verify many proofs of one model.
 pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
+    let in0 = inputs.model.layers.first().map_or(0, |l| l.in_features as usize);
+    if in0 == 0 || inputs.input.is_empty() || inputs.input.len() % in0 != 0 {
+        return Err(ProveError::Verification("the input is not a whole number of rows of the model's input size".into()));
+    }
+    let key = VerifyingKey::new(&inputs.model, inputs.input.len() / in0)?;
+    verify_with_key(proof, &key, &inputs.input)
+}
+
+/// Verifies a proof against a prepared key (the model commitment and the batch size) and the float input.
+pub fn verify_with_key(proof: &Proof, key: &VerifyingKey, input: &[f32]) -> Result<(), ProveError> {
     let fail = |s: &str| Err(ProveError::Verification(s.to_string()));
     // ---- cheap checks first: the statement against the verifier's model ----
     spec::validate(&proof.specs).map_err(|e| ProveError::Verification(e.to_string()))?;
-    // The statement is the verifier's model, not the proof's claim: layers, activations and shapes come from `inputs`; only the exponents (which the
-    // constraints prove to be the largest ones) are taken from the proof.
+    // The statement is about the verifier's model, not the proof's claim: layers, activations and shapes come from the commitment and the key; only
+    // the exponents (which the constraints prove to be the largest ones) are taken from the proof.
     let first = &proof.specs[0];
-    let layers = &inputs.layers;
-    let in0 = layers.first().map_or(0, |l| l.in_features as usize);
+    let layers = &key.model.layers;
     if layers.len() != proof.specs.len()
-        || in0 == 0
-        || inputs.input.is_empty()
-        || inputs.input.len() % in0 != 0
-        || first.m != inputs.input.len() / in0
-        || inputs.weights.len() != layers.len()
+        || first.m != key.batch
+        || input.len() != first.m * first.k
         || layers.iter().zip(&proof.specs).any(|(l, s)| l.in_features as usize != s.k || l.out_features as usize != s.n || l.relu != s.relu)
-        || inputs.weights.iter().zip(&proof.specs).any(|(w, s)| w.len() != s.k * s.n)
     {
-        return fail("the statement is not about this model: the layers, their activations or the shapes differ");
+        return fail("the statement is not about this model: the layers, their activations, the batch size or the shapes differ");
     }
     // finite as given (a NaN would round to zero in bf16) and after the dtype's rounding (a large f32 rounds to infinity in bf16)
-    let eff_input = effective(&inputs.input, inputs.dtype);
-    let eff_weights: Vec<Vec<f32>> = inputs.weights.iter().map(|w| effective(w, inputs.dtype)).collect();
-    let raw = inputs.input.iter().chain(inputs.weights.iter().flatten());
-    if raw.chain(eff_input.iter()).chain(eff_weights.iter().flatten()).any(|v| !v.is_finite()) {
-        return fail("the public input and weights must be finite");
+    let eff_input = effective(input, key.model.dtype);
+    if input.iter().chain(eff_input.iter()).any(|v| !v.is_finite()) {
+        return fail("the public input must be finite");
     }
     let last = proof.specs.last().unwrap();
     // (not `v.abs()`: i32::MIN.abs() overflows, and i32::MIN is -1 in M31)
@@ -261,7 +388,7 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
         return Err(ProveError::Decode("a claimed sum is a field element that is not reduced (not below the modulus)".into()));
     }
     let max_log = max_log_size(&kinds);
-    let config = pcs_config(max_log);
+    let config = pcs_config(max_log, model_log_size(layers));
     let shape_comps = components(&kinds, &Lookups::dummy(), &proof.claimed_sums);
     let sizes = TreeVec::concat_cols(shape_comps.iter().map(|c| c.trace_log_degree_bounds()));
     // The size of a proof is bounded by its statement: nothing larger is parsed (the verifier's memory must not depend on the proof file).
@@ -269,45 +396,42 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     if proof.bytes.len() > limit {
         return Err(ProveError::Decode(format!("the proof has {} bytes, more than a proof of this statement can have ({limit})", proof.bytes.len())));
     }
-    let stark: StarkProof<Blake2sMerkleHasher> = serde_json::from_slice(&proof.bytes).map_err(|e| ProveError::Decode(e.to_string()))?;
-    // One encoding per proof: no unknown fields, no other spelling of the same values (the bytes are exactly what the prover's serializer writes).
-    if serde_json::to_vec(&stark).map_err(|e| ProveError::Decode(e.to_string()))? != proof.bytes {
+    let stark: StarkProof<Blake2sMerkleHasher> = bincode::deserialize(&proof.bytes).map_err(|e| ProveError::Decode(e.to_string()))?;
+    // One encoding per proof: no trailing bytes, no other spelling of the same values (the bytes are exactly what the prover's serializer writes).
+    if bincode::serialize(&stark).map_err(|e| ProveError::Decode(e.to_string()))? != proof.bytes {
         return Err(ProveError::Decode("the proof is not in its canonical encoding".into()));
     }
     // The parameters written into the proof are not used (the verifier's own are), but a proof that states others is refused rather than misread.
     if stark.config != config {
         return Err(ProveError::Decode("the proof states other commitment parameters than the verifier's".into()));
     }
-    check_last_layer(&proof.bytes).map_err(ProveError::Decode)?;
+    check_last_layer(&stark).map_err(ProveError::Decode)?;
 
     // ---- the structure of the stwo proof, so that stwo never meets a shape it would assert on ----
-    check_structure(&stark, &shape_comps, &sizes, kinds.iter().map(|k| k.pre_ids().len()).sum(), max_log).map_err(ProveError::Verification)?;
+    check_structure(&stark, &shape_comps, &sizes, sizes[0].len(), max_log).map_err(ProveError::Verification)?;
 
-    // ---- the preprocessed commitment must be the one of the statement's constants (index columns, multiplicities, the tables) ----
-    {
-        let twiddles = twiddles(max_log);
-        let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
-        let mut tree = scheme.tree_builder();
-        tree.extend_evals(preprocessed_evals(&kinds));
-        tree.commit(&mut Blake2sChannel::default());
-        if scheme.roots()[0] != stark.commitments[0] {
-            return fail("the preprocessed commitment is not the one of this statement");
-        }
+    // ---- the two trees the verifier knows: the model (its commitment) and the constants of the statement (from the key) ----
+    if stark.commitments[0].0 != key.model.root {
+        return fail("the proof is not about the committed model");
+    }
+    if stark.commitments[CONSTANTS_TREE].0 != key.constants_root {
+        return fail("the commitment of the constants is not the one of this statement");
     }
 
     let channel = &mut Blake2sChannel::default();
-    mix_statement(channel, &proof.specs, &proof.output, &eff_input, &eff_weights);
+    mix_statement(channel, &proof.specs, &proof.output, &eff_input);
     let scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
     scheme.commit(stark.commitments[0], &sizes[0], channel);
     scheme.commit(stark.commitments[1], &sizes[1], channel);
     let lookups = Lookups::draw(channel);
-    // Every lookup is answered: the LogUp sums of all components and of the public part (the output, the largest-accumulator rows) cancel.
-    let total: SecureField = proof.claimed_sums.iter().copied().sum::<SecureField>() + public_sum(&proof.specs, &proof.output, inputs, &lookups);
+    // Every lookup is answered: the LogUp sums of all components and of the public part (the input, the output, the largest rows) cancel.
+    let total: SecureField = proof.claimed_sums.iter().copied().sum::<SecureField>() + public_sum(&proof.specs, &proof.output, &eff_input, &lookups);
     if total != SecureField::zero() {
-        return fail("the lookups do not cancel: the tensors do not match the matmuls, the requantizations, the quantization of the public floats or the public output");
+        return fail("the lookups do not cancel: the tensors do not match the matmuls, the requantizations, the quantization of the public input or the public output");
     }
     channel.mix_felts(&proof.claimed_sums);
     scheme.commit(stark.commitments[2], &sizes[2], channel);
+    scheme.commit(stark.commitments[CONSTANTS_TREE], &sizes[CONSTANTS_TREE], channel);
 
     let comps = components(&kinds, &lookups, &proof.claimed_sums);
     let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
@@ -334,11 +458,10 @@ fn canonical(v: &SecureField) -> bool {
 }
 
 /// The last FRI layer's polynomial: its `log_size` is a field of the proof that the transcript does not cover (only the coefficients are hashed) and that
-/// stwo uses as a loop bound and a shift amount. Its fields are private, so it is checked on the JSON: exactly `2^LOG_LAST_LAYER_DEGREE_BOUND` coefficients
-/// and the matching `log_size`.
-fn check_last_layer(bytes: &[u8]) -> Result<(), String> {
-    let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    let poly = &json["fri_proof"]["last_layer_poly"];
+/// stwo uses as a loop bound and a shift amount. Its fields are private, so they are read through its serialization: exactly
+/// `2^LOG_LAST_LAYER_DEGREE_BOUND` coefficients and the matching `log_size`.
+fn check_last_layer(stark: &StarkProof<Blake2sMerkleHasher>) -> Result<(), String> {
+    let poly = serde_json::to_value(&stark.fri_proof.last_layer_poly).map_err(|e| e.to_string())?;
     let coeffs = poly["coeffs"].as_array().map(|c| c.len());
     if coeffs != Some(1 << LOG_LAST_LAYER_DEGREE_BOUND) || poly["log_size"].as_u64() != Some(LOG_LAST_LAYER_DEGREE_BOUND as u64) {
         return Err("the last FRI layer of the proof does not have the size of the parameters".into());
@@ -346,14 +469,14 @@ fn check_last_layer(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// An upper bound of the size of the serialized stwo proof of a statement with `columns` committed columns and traces of at most `2^max_log` rows:
-/// every number is counted with its longest decimal form and separator.
+/// An upper bound of the size of the serialized stwo proof of a statement with `columns` committed columns and traces of at most `2^max_log` rows
+/// (16 bytes per extension-field element, 32 per hash, 8 per length).
 fn max_proof_bytes(columns: usize, max_log: u32) -> usize {
     let height = (max_log + LOG_BLOWUP_FACTOR + 2) as usize;
     let columns = columns + 8; // + the composition polynomial
     let field_elements = columns * 2 * 4 + columns * N_QUERIES + (height + 2) * N_QUERIES * 2 * 4 + 16;
-    let hashes = (4 + height + 2) * N_QUERIES * (height + 1) + 64;
-    field_elements * 14 + hashes * 32 * 4 + 16 * 1024
+    let hashes = (5 + height + 2) * N_QUERIES * (height + 1) + 64;
+    field_elements * 16 + hashes * 32 + (columns * 4 + height * 8 + 64) * 8 + 4096
 }
 
 /// The number of distinct query positions of the preprocessed tree and of the other trees. They follow from the transcript only after stwo has absorbed
@@ -366,11 +489,11 @@ fn query_counts(stark: &StarkProof<Blake2sMerkleHasher>, sizes: &TreeVec<Vec<u32
     use stwo::core::proof_of_work::OODS_POW_BITS;
     let mut scheme = CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
     let scratch = &mut Blake2sChannel::default();
-    for tree in 0..3 {
+    for tree in 0..4 {
         scheme.commit(stark.commitments[tree], &sizes[tree], scratch);
     }
     let _random_coeff = channel.draw_secure_felt();
-    scheme.commit(stark.commitments[3], &[max_log; 8], &mut channel);
+    scheme.commit(stark.commitments[4], &[max_log; 8], &mut channel);
     if !channel.verify_pow_nonce(OODS_POW_BITS, stark.oods_proof_of_work) {
         return Err("the proof of work before the out-of-domain point is wrong".into());
     }
@@ -410,24 +533,25 @@ fn check_structure(stark: &StarkProof<Blake2sMerkleHasher>, comps: &[NetComponen
     if !base_ok || !secure_ok {
         return Err("the proof contains a field element that is not reduced (not below the modulus)".into());
     }
-    if p.commitments.len() != 4 || p.sampled_values.len() != 4 || p.decommitments.len() != 4 || p.queried_values.len() != 4 {
-        return Err("the proof does not have the four trees of this statement".into());
+    // the model, the trace, the interaction trace, the constants, the composition polynomial
+    if p.commitments.len() != 5 || p.sampled_values.len() != 5 || p.decommitments.len() != 5 || p.queried_values.len() != 5 || sizes.len() != 4 {
+        return Err("the proof does not have the five trees of this statement".into());
     }
     let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
     // The number of points per column does not depend on the point itself.
     let masks = Components { components: refs, n_preprocessed_columns: n_preprocessed }.mask_points(CirclePoint::<SecureField>::zero(), max_log + 1, false);
-    for tree in 0..3 {
+    for tree in 0..4 {
         let expected: Vec<usize> = masks[tree].iter().map(|points| points.len()).collect();
         let found: Vec<usize> = p.sampled_values[tree].iter().map(|values| values.len()).collect();
         if expected != found || sizes[tree].len() != p.queried_values[tree].len() {
             return Err(format!("tree {tree} of the proof does not have the columns or samples of this statement"));
         }
     }
-    if p.sampled_values[3].len() != COMPOSITION_COLUMNS || p.sampled_values[3].iter().any(|v| v.len() != 1) || p.queried_values[3].len() != COMPOSITION_COLUMNS {
+    if p.sampled_values[4].len() != COMPOSITION_COLUMNS || p.sampled_values[4].iter().any(|v| v.len() != 1) || p.queried_values[4].len() != COMPOSITION_COLUMNS {
         return Err("the composition tree of the proof has the wrong shape".into());
     }
     // every column of a tree is queried at the same positions
-    for tree in 0..4 {
+    for tree in 0..5 {
         let lens: Vec<usize> = p.queried_values[tree].iter().map(|c| c.len()).collect();
         if lens.windows(2).any(|w| w[0] != w[1]) {
             return Err(format!("the queried values of tree {tree} are ragged"));
@@ -572,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_does_not_verify_for_other_public_floats() {
+    fn a_proof_does_not_verify_for_another_input_or_model() {
         let original = network(4, &[8, 16, 8], &[true, false], 6);
         let proof = prove_witness(&original).unwrap();
         let public = original.public_inputs();
@@ -581,22 +705,54 @@ mod tests {
         let mut forged = public.clone();
         forged.input[0] += 0.001;
         assert!(verify(&proof, &forged).is_err());
-        // another weight, even by one ulp, in either layer
-        for (l, i) in [(0, 0), (0, 77), (1, 5)] {
-            let mut forged = public.clone();
-            forged.weights[l][i] = f32::from_bits(forged.weights[l][i].to_bits() + 1);
-            assert!(verify(&proof, &forged).is_err(), "weight {l}/{i}");
-        }
-        // swapped weights, wrong shapes, not finite
-        let mut forged = public.clone();
-        forged.weights.swap(0, 1);
-        assert!(verify(&proof, &forged).is_err());
         let mut forged = public.clone();
         forged.input.pop();
         assert!(verify(&proof, &forged).is_err());
-        let mut forged = public;
-        forged.weights[1][0] = f32::INFINITY;
+        // the commitment of another model: one weight differs by one ulp, in either layer
+        for (l, i) in [(0, 0), (0, 77), (1, 5)] {
+            let mut weights = original.w_float.clone();
+            weights[l][i] = f32::from_bits(weights[l][i].to_bits() + 1);
+            let other = ModelCommitment::from_floats(public.model.dtype, public.model.layers.clone(), &weights).unwrap();
+            assert_ne!(other.root, public.model.root, "weight {l}/{i}");
+            assert!(verify(&proof, &PublicInputs { model: other, input: public.input.clone() }).is_err(), "weight {l}/{i}");
+        }
+        // a commitment with the same weights but another architecture (activation), and one with a made-up root
+        let mut forged = public.clone();
+        forged.model.layers[0].relu = !forged.model.layers[0].relu;
         assert!(verify(&proof, &forged).is_err());
+        let mut forged = public.clone();
+        forged.model.root[0] ^= 1;
+        assert!(verify(&proof, &forged).is_err());
+        // weights that are not finite cannot be committed
+        let mut weights = original.w_float.clone();
+        weights[1][0] = f32::INFINITY;
+        assert!(ModelCommitment::from_floats(public.model.dtype, public.model.layers.clone(), &weights).is_err());
+    }
+
+    #[test]
+    fn a_model_commitment_depends_on_the_model_only() {
+        // the same model with two batch sizes and two inputs: one commitment, and a proof of each verifies against it
+        let dims = [8usize, 16, 8];
+        let w: Vec<Vec<f32>> = vec![floats(8 * 16, 21, -1.0, 1.0), floats(16 * 8, 22, -1.0, 1.0)];
+        let small = NetworkWitness::simulate(2, &dims, &[true, false], &floats(2 * 8, 1, -2.0, 2.0), &w, Dtype::F32).unwrap();
+        let large = NetworkWitness::simulate(64, &dims, &[true, false], &floats(64 * 8, 2, -3.0, 3.0), &w, Dtype::F32).unwrap();
+        let commitment = small.public_inputs().model;
+        assert_eq!(commitment, large.public_inputs().model);
+        for witness in [&small, &large] {
+            let proof = prove_witness(witness).unwrap();
+            verify(&proof, &PublicInputs { model: commitment.clone(), input: witness.x0_float.clone() }).unwrap();
+        }
+        // a key is reused for every proof of its model and batch size; it does not fit another batch size
+        let key = VerifyingKey::new(&commitment, 2).unwrap();
+        let other_input = NetworkWitness::simulate(2, &dims, &[true, false], &floats(2 * 8, 9, -2.0, 2.0), &w, Dtype::F32).unwrap();
+        for witness in [&small, &other_input] {
+            verify_with_key(&prove_witness(witness).unwrap(), &key, &witness.x0_float).unwrap();
+        }
+        assert!(verify_with_key(&prove_witness(&large).unwrap(), &key, &large.x0_float).is_err());
+        // the commitment and the key are small and serializable
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(serde_json::from_str::<VerifyingKey>(&json).unwrap(), key);
+        assert!(json.len() < 1000);
     }
 
     /// A forged witness is refused by the consistency checks, and if it is forced past them stwo's prover refuses it or the verifier rejects it.

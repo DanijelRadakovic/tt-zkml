@@ -30,14 +30,18 @@ cargo run --release --bin tt-zkml -- example --out /tmp/demo --dims 64,128,32 --
 # 2. run it on the device and print the execution trace (optionally write it with --trace-dir)
 cargo run --release --bin tt-zkml -- run --model /tmp/demo --input /tmp/demo/input.f32
 
-# 3. run it, generate the proof of the execution and verify it
+# 3. commit to the model: done once, by whoever holds the weights. The commitment (the architecture and a 32-byte root) is all a verifier needs
+cargo run --release --bin tt-zkml -- commit --model /tmp/demo --out /tmp/demo/model.commitment
+#   model commitment c09860c4...494eaa (2 layers, bf16) written to /tmp/demo/model.commitment
+
+# 4. run it, generate the proof of the execution and verify it
 cargo run --release --bin tt-zkml -- prove --model /tmp/demo --input /tmp/demo/input.f32 --proof /tmp/demo/proof.bin
 #   output [32 x 32], first row: [8, -25, 18, -18, -6, 14, 1, 7, ...]
-#   proof generated in 0.11 s (1611 KiB)
+#   proof generated in 0.15 s (617 KiB)
 #   proof verified in 0.01 s
 
-# 4. verify it later, elsewhere, without a device: the verifier needs the proof and the float model and input the proof is about
-cargo run --release --bin tt-zkml -- verify --proof /tmp/demo/proof.bin --model /tmp/demo --input /tmp/demo/input.f32
+# 5. verify it later, elsewhere, without a device and without the weights: the proof, the model's commitment and the input
+cargo run --release --bin tt-zkml -- verify --proof /tmp/demo/proof.bin --commitment /tmp/demo/model.commitment --input /tmp/demo/input.f32
 #   proof valid (2 layers, output 1024 values), verified in 0.01 s      (exit code 1 and a message if it is not valid)
 ```
 
@@ -50,6 +54,7 @@ The same flow as a program, `tt-zkml/lib/tt-zkml/examples/quickstart.rs` (`cargo
 
 ```rust
 use tt_zkml::modelfile::ModelFile;
+use tt_zkml::proof::{ModelCommitment, VerifyingKey};
 use tt_zkml::witness::PublicInputs;
 use tt_zkml::{device, proof, Device, Dtype, Layer, Model};
 
@@ -69,12 +74,20 @@ let floats: Vec<f32> = trace.dequantized_output();   // the same output as float
 // 2. Prove it: the CPU rebuilds the quantized tensors from the floats and the trace, converts them to M31 and proves the constraints.
 let proof = proof::prove(&model_file, &input, &trace)?;
 
-// 3. Verify it (no device needed): the verifier supplies the float model and input; the output is part of the proof (proof.output == output,
-//    and proof.dequantized_output() == floats: the scalers are in the public statement).
-proof::verify(&proof, &PublicInputs::new(&model_file, &input))?;
+// 3. Verify it: no device and no weights. The verifier holds the model's commitment (computed once by whoever holds the weights: the architecture
+//    and a 32-byte root) and the float input; the output is part of the proof (proof.output == output, proof.dequantized_output() == floats).
+let commitment = ModelCommitment::new(&model_file)?;
+proof::verify(&proof, &PublicInputs { model: commitment.clone(), input: input.clone() })?;
 
-// The proof is plain bytes (proof.to_bytes() / Proof::from_bytes) and so is easy to store or send.
+// Many proofs of one model and batch size: prepare a key once, then a verification costs nothing proportional to the model.
+let key = VerifyingKey::new(&commitment, 32)?;
+proof::verify_with_key(&proof, &key, &input)?;
+
+// The proof is compact binary data (proof.to_bytes() / Proof::from_bytes) and so is easy to store or send.
 ```
+
+The proof is not zero knowledge: the verifier is never given the weights, but every proof opens a few values of the committed columns, so enough
+proofs of one model reveal it (see `tt-zkml/README.md`).
 
 The device context is thread-affine: open the device, create and run models and drop them on one thread (the `main` thread in the CLI and the tests).
 The Python bindings of the C ABI (`abi/python`) cover the device part (steps 1) only; the proof is Rust.

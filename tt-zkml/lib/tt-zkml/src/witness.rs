@@ -11,6 +11,7 @@
 use crate::air::spec::{self, LayerSpec, QMAX, SpecError, activate, choose_ko, exponent_of, pot_exponent};
 use crate::device::{Dtype, Layer, Trace};
 use crate::modelfile::ModelFile;
+use crate::proof::{ModelCommitment, ProveError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessError {
@@ -129,19 +130,18 @@ pub fn shift_of(ep: u32, k: i32) -> i32 {
     150 - ep as i32 - k
 }
 
-/// What a verifier knows: the model (its layers, with their activations, and the float weights), the float input, and the dtype, which decides the
-/// bf16 rounding. The proof is about exactly this model on exactly this input; nothing about the network's structure is taken from the proof.
+/// What a verifier knows: the model as a commitment (its architecture and the root of its weights, not the weights themselves) and the float input.
+/// The proof is about exactly this committed model on exactly this input; nothing about the network's structure is taken from the proof.
 #[derive(Debug, Clone)]
 pub struct PublicInputs {
-    pub dtype: Dtype,
-    pub layers: Vec<Layer>,
+    pub model: ModelCommitment,
     pub input: Vec<f32>,
-    pub weights: Vec<Vec<f32>>,
 }
 
 impl PublicInputs {
-    pub fn new(model: &ModelFile, input: &[f32]) -> Self {
-        Self { dtype: model.dtype, layers: model.layers.clone(), input: input.to_vec(), weights: model.weights.clone() }
+    /// From the model itself (computes its commitment, which needs the weights). A verifier that only holds a commitment builds the struct directly.
+    pub fn new(model: &ModelFile, input: &[f32]) -> Result<Self, ProveError> {
+        Ok(Self { model: ModelCommitment::new(model)?, input: input.to_vec() })
     }
 }
 
@@ -155,10 +155,12 @@ impl NetworkWitness {
         if l == 0 { &self.q_x0 } else { &self.out[l - 1] }
     }
 
-    /// The public inputs of this witness: the floats the device saw (already rounded to the dtype, so the dtype is irrelevant here).
+    /// The public inputs of this witness: the commitment of its model (the floats the device saw, already rounded to the dtype, so the dtype is
+    /// irrelevant here) and its input.
     pub fn public_inputs(&self) -> PublicInputs {
         let layers = self.specs.iter().map(|s| Layer { in_features: s.k as u32, out_features: s.n as u32, relu: s.relu }).collect();
-        PublicInputs { dtype: Dtype::F32, layers, input: self.x0_float.clone(), weights: self.w_float.clone() }
+        let model = ModelCommitment::from_floats(Dtype::F32, layers, &self.w_float).expect("the weights of a witness have the shapes of its layers");
+        PublicInputs { model, input: self.x0_float.clone() }
     }
 
     /// The output of the network (public).

@@ -33,8 +33,8 @@ A quantized neural network runs on a Tenstorrent device. This document describes
 network computes on the verifier's own model and input. The proof system is a Circle STARK (stwo) over the Mersenne field
 $FF_p$, $p = 2^31 - 1$, with LogUp lookups between the components.
 
-*Statement.* For the verifier's model (layers with their ReLU flags, float weights $W_l$), float input $X$, and dtype (f32, or bf16 which rounds the floats first),
-and for the prover's per-layer exponents $(k_x, k_(w,l), k_(o,l))$ and public output $Y$, the proof shows:
+*Statement.* For the verifier's model, given as a *commitment* (the layers with their ReLU flags, the dtype, and a 32-byte root $C$ that commits to the float
+weights $W_l$), the float input $X$ (rounded first for a bf16 model), and for the prover's per-layer exponents $(k_x, k_(w,l), k_(o,l))$ and public output $Y$, the proof shows:
 
 + $q^x_0 = op("rne")(X dot 2^(k_x))$ and $q^w_l = op("rne")(W_l dot 2^(k_(w,l)))$, where $op("rne")$ is round-half-to-even and each $k$ is the *largest*
   exponent with $op("absmax") dot 2^k <= 127$ ($k = 127$ means "all zero");
@@ -43,8 +43,9 @@ and for the prover's per-layer exponents $(k_x, k_(w,l), k_(o,l))$ and public ou
   and $k_o$ the *largest* exponent with $max |a| dot 2^(k_o) <= 127$ (over the raw accumulators, also under a ReLU); $q^x_(l+1) = o_l$;
 + $Y = o_(L-1)$.
 
-The weights and the input are public inputs of the verifier (this is an integrity proof, not zero knowledge for them). The device and its trace are not
-trusted: only the proof matters. The soundness of the first version of these circuits was audited (see docs/audit.md); every constraint below is the fixed one.
+The verifier is not given the weights: it holds the commitment $C$, computed once by whoever holds the model, and the proof shows that the committed
+weights were used (section 3). This is not zero knowledge: each proof opens a few values of the committed columns, so enough proofs of one model reveal
+it. The input and the output are public. The device and its trace are not trusted: only the proof matters. The soundness of the first version of these circuits was audited (see docs/audit.md); every constraint below is the fixed one.
 
 == The pieces and how they are linked
 
@@ -72,9 +73,19 @@ trusted: only the proof matters. The soundness of the first version of these cir
 
 == Columns, rows and padding
 
-A component has a trace of $2^L$ rows ($L >= 4$, the smallest power of two that holds its data). Columns are of two kinds:
-*preprocessed* columns are constants of the statement that the verifier recomputes and checks against the commitment (index columns `i`, `j`, `m`, `n`,
-the flag `real`, the multiplicity `mult`, the tables); *trace* columns are the prover's witness. Rows beyond the data are *padding rows*: their
+A component has a trace of $2^L$ rows ($L >= 4$, the smallest power of two that holds its data). A proof commits five Merkle trees of columns:
+
+#ctable((auto, auto, 1fr),
+  [Tree], [Contents], [How the verifier knows it is right],
+  [0], [the *model*: sign, significand and exponent of every weight], [its root must equal the model commitment $C$ the verifier holds],
+  [1], [the *trace*: the prover's witness], [the constraints],
+  [2], [the LogUp interaction trace], [the constraints and the claimed sums],
+  [3], [the *constants* of the statement: index columns `i`, `j`, `m`, `n`, the flag `real`, the multiplicity `mult`, the tables], [it recomputes the root from the shapes alone (cached per model and batch size)],
+  [4], [the composition polynomial], [stwo's verification],
+)
+
+The model tree is lifted only to the size of the largest weight tensor, so $C$ does not depend on the batch size or on anything else of a proof.
+Below, "preprocessed" means a constant of tree 3. Rows beyond the data are *padding rows*: their
 preprocessed `real` and `mult` are $0$ and their trace columns are free (but constrained like any row). Every lookup that is not self-balancing carries
 `real` or `mult` as its multiplicity, so padding rows cannot be used to prove anything; the "largest" counters below are explicitly gated by `real`.
 
@@ -117,19 +128,31 @@ the *public* float $v = (-1)^s dot m dot 2^(e' - 150)$ ($m$ the 24-bit significa
 $m = 0$). The quantization is $q = (-1)^s dot op("rne")(m dot 2^(-"sh"))$ with the shift $"raw" = 150 - e' - k$ (because $v dot 2^k = m dot 2^(-"raw")$).
 
 *Preprocessed*: `i`, `j`, `mult` ($n$ for $X$, $m$ for $W$: how often the matmul reads each element), `real`.
-*Trace* (33 columns): $q, s, m, e'$ and
-$q_a, p_2, "sh", c, "diff", r, e, "half", v_1[4], v_2[4], z, g, g^(-1), r_n[4], h, h_v[4], h_s$.
+*Model* (weights only, tree 0): $S, M, E$, the committed sign, significand and exponent of the element.
+*Trace* (37 columns): $q, s, m, e'$ and
+$q_a, p_2, "sh", c, "diff", r, e, "half", v_1[4], v_2[4], z, g, g^(-1), r_n[4], h, h_v[4], h_s, m_l[4]$.
 (An all-zero tensor, $k = 127$, has only $q, s, m, e'$.)
+
+*Where the float comes from.* For the input, $(s, m, e')$ is the verifier's public float, by a lookup. For the weights it is the committed model:
+#ctable((auto, 1fr, 1fr),
+  [], [Constraint], [Meaning],
+  [T0a], [weights: $s - S = 0$, $m - M = 0$, $e' - E = 0$], [the row quantizes the committed float of its element (every row, also padding)],
+  [T0b], [$s (s - 1) = 0$], [the sign is a bit],
+  [T0c], [$m - sum m_l = 0$ ($op("Limbs")$)], [$0 <= m < 2^(29)$: no product with $m$ can wrap],
+)
+T0b and T0c matter for the weights: nobody but the committer knows the committed values, so the circuit itself makes each triple a well-formed number
+(the exponent is bounded by the range checks of the shift below). A commitment to values that are not proper floats is still a commitment to one fixed
+model.
 
 *Lookups of a row.*
 #ctable((auto, 1fr),
   [use], [meaning],
-  [`Float`$(op("tag"), i, j, s, m, e')$, mult $+"real"$], [consumes the public float of the element: $s$, $m$, $e'$ are *equal* to the verifier's values],
+  [input only: `Float`$(op("tag"), i, j, s, m, e')$, mult $+"real"$], [consumes the public float of the element: $s$, $m$, $e'$ are *equal* to the verifier's values],
   [`Tensor`$(op("tag"), i, j, q)$, mult $-"mult"$], [yields the quantized element, once per use by the matmul],
   [$op("Range")(q)$], [$q in [-127, 127]$],
   [`Pow2`$("sh", p_2)$], [$p_2 = 2^("sh")$ with $"sh" in [1, 25]$],
   [$op("Range")_0(q_a), op("Range")_0(g), op("Range")_0("diff"), op("Range")_0(h_s), op("Range")("half")$], [small non-negative columns],
-  [$op("Limbs")(v_1), op("Limbs")(v_2), op("Limbs")(r_n), op("Limbs")(h_v)$], [the four limb sets (16 `Range` lookups)],
+  [$op("Limbs")(v_1), op("Limbs")(v_2), op("Limbs")(r_n), op("Limbs")(h_v), op("Limbs")(m_l)$], [the five limb sets (20 `Range` lookups)],
   [`Tensor`$("fhit", 0, 0, 0)$, mult $+h$], [counts the "largest float" row (the verifier subtracts one)],
 )
 
@@ -314,20 +337,22 @@ $("sh", p_2)$ of every quantized float: $p_2$ is exactly $2^("sh")$ and $1 <= "s
 The verifier adds to the claimed sums of the components the part it can compute itself, with $h_T, h_F$ the combinations of the `Tensor` and `Float` relations:
 $ P = sum_((i, j)) 1 / h_T(x_L, i, j, Y_(i j)) #h(0.4em) - #h(0.4em) sum_(l : k_(o,l) != 127) 1 / h_T("hit"_l, 0, 0, 0)
   #h(0.4em) - #h(0.4em) sum_((i, j)) 1 / h_F(0, i, j, s, m, e')_(X) #h(0.4em) - #h(0.4em) [k_x != 127] / h_T("fhit"_0, 0, 0, 0)
-  #h(0.4em) - #h(0.4em) sum_l (sum_((i, j)) 1 / h_F(l + 1, i, j, s, m, e')_(W_l) + [k_(w,l) != 127] / h_T("fhit"_(l+1), 0, 0, 0)) $
-(the $(s, m, e')$ come from the verifier's own floats, rounded to bf16 first for a bf16 model). The terms mean: the last `Requant` yields the output once and the public side
-consumes it (so the circuit's output is $Y$); every "largest" counter is checked to be exactly one; every quantization consumes the float tuple of its element and the
-public side yields it (so a quantized tensor is the quantization of exactly the verifier's floats). `verify` returns `Ok` only if:
+  #h(0.4em) - #h(0.4em) sum_l [k_(w,l) != 127] / h_T("fhit"_(l+1), 0, 0, 0) $
+(the $(s, m, e')$ come from the verifier's own input floats, rounded to bf16 first for a bf16 model). The terms mean: the last `Requant` yields the output once and the public side
+consumes it (so the circuit's output is $Y$); every "largest" counter is checked to be exactly one; the quantization of the input consumes the float tuple of its element and the
+public side yields it (so the quantized input is the quantization of exactly the verifier's floats). The weights do not appear: they are bound by the root of tree 0.
+The verifier's work is proportional to the input and the output, not to the model. `verify` returns `Ok` only if:
 
-+ the statement is the verifier's: the layers, activations and shapes ($m, k, n$, relu) equal the verifier's model (only the exponents $k_x, k_w, k_o$ come from the proof);
++ the statement is the verifier's: the layers, activations and shapes ($m, k, n$, relu) equal those of the model commitment and the batch size of the key (only the exponents $k_x, k_w, k_o$ come from the proof);
+  the root of tree 0 is the model commitment $C$ and the root of tree 3 is the one the verifier computed for these shapes;
   the floats are finite as given and after the dtype's rounding (a NaN would round to $-0$ in bf16); the public output is in $[-127, 127]$ (checked without
   integer overflow: $-2^(31)$ is $-1$ in $FF_p$); the total number of range lookups of the statement is below $p$ (LogUp only proves counts modulo $p$);
 + the proof file is well formed before anything is computed with it: its size is within the bound of the statement, its bytes are the canonical
-  serialization (no unknown fields, no other spelling), the parameters it states are the verifier's, every field element is reduced (below $p$: stwo's
+  binary serialization (no trailing data, no other spelling), the parameters it states are the verifier's, every field element is reduced (below $p$: stwo's
   arithmetic assumes it), the last FRI layer has the size of the parameters, and its shape is that of the statement (trees, sampled values per column,
   decommitments, one queried value per query position, which the verifier derives by replaying the transcript); any panic inside the stwo verifier is
   turned into a rejection as well;
-+ the statement (the parameters of the proof system, layers, output, floats) is mixed into the Fiat-Shamir transcript first, then the preprocessed root is recomputed from the statement and compared with the proof's;
++ the statement (the parameters of the proof system, layers, output, input floats) is mixed into the Fiat-Shamir transcript first; the model root follows as the first commitment;
 + the number of commitments and sampled columns is that of the statement; the lookup elements are drawn after the base trace and the claimed sums are mixed into the transcript
   before the interaction trace is committed;
 + $sum_c "claimed"_c + P = 0$ (it is bound to the per-row LogUp constraints by the framework, and must vanish for each relation: they have independent random elements);
@@ -344,7 +369,7 @@ range lookups per row, padding included) must be below $p$.
   [Quantity], [Bound], [Why it is below $p = 2^31 - 1$ (no wrap-around)],
   [$x$, $w$, $o$], [$[-127, 127]$], [range checked],
   [$a$], [$|a| <= 127^2 dot 8192 < 2^(28)$], [$K <= 8192$],
-  [$m$], [$< 2^(24)$], [pinned to the public float by the `Float` lookup ($s$, $m$, $e'$ are separate tuple entries)],
+  [$m$], [$< 2^(24)$ (input), $< 2^(29)$ (weights)], [input: pinned to the public float by the `Float` lookup; weights: the committed value, limb checked (T0c)],
   [$q_a p_2$], [$<= 127 dot 2^(24) = 2.13 dot 10^9$], [$"sh" <= 24$ unless $c = 1$, where $q_a = 0$],
   [$o dot 2^s$, $s <= 20$], [$<= 127 dot 2^(20)$], [$o$ is range checked],
   [$a dot 2^(k_o)$, $k_o <= 6$], [$<= 127 dot 64$], [$|a| <= 127$ is range checked in Left mode (and $s_a$ checks the scaled value)],

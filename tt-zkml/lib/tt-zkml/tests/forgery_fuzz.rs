@@ -27,7 +27,7 @@ use tt_zkml::air::spec::{LayerSpec, choose_ko};
 use tt_zkml::air::trace::HOOK;
 use tt_zkml::air::Kind;
 use tt_zkml::device::Dtype;
-use tt_zkml::proof::{self, Proof, ProveError, prove_unchecked, prove_witness};
+use tt_zkml::proof::{self, ModelCommitment, Proof, ProveError, prove_unchecked, prove_witness};
 use tt_zkml::air::spec::activate;
 use tt_zkml::witness::{NetworkWitness, PublicInputs, matmul};
 
@@ -385,33 +385,39 @@ fn a_forger_cannot_make_the_verifier_accept_a_false_statement() {
             }
         }
 
-        // 5. the honest proof against other public inputs: it is about this model and this input only
+        // 5. the honest proof against other public inputs: it is about this committed model and this input only
         let mut other = public.clone();
-        match rng.below(4) {
+        let mut same_model = true;
+        match rng.below(5) {
             0 => {
                 let i = rng.below(other.input.len());
                 other.input[i] = f32::from_bits(other.input[i].to_bits() ^ (1 << rng.range(0, 22))); // a mantissa bit
             }
             1 => {
-                let l = rng.below(other.weights.len());
-                let i = rng.below(other.weights[l].len());
-                other.weights[l][i] = f32::from_bits(other.weights[l][i].to_bits() ^ (1 << rng.range(0, 22)));
+                // the commitment of a model with one other weight
+                let mut weights = honest_w.w_float.clone();
+                let l = rng.below(weights.len());
+                let i = rng.below(weights[l].len());
+                weights[l][i] = f32::from_bits(weights[l][i].to_bits() ^ (1 << rng.range(0, 22)));
+                other.model = ModelCommitment::from_floats(other.model.dtype, other.model.layers.clone(), &weights).unwrap();
+                same_model = other.model.root == public.model.root;
             }
             2 => {
-                let l = rng.below(other.layers.len());
-                other.layers[l].relu = !other.layers[l].relu;
+                let l = rng.below(other.model.layers.len());
+                other.model.layers[l].relu = !other.model.layers[l].relu;
+                same_model = false;
             }
-            _ => other.dtype = if other.dtype == Dtype::F32 { Dtype::Bf16 } else { Dtype::F32 },
+            3 => {
+                other.model.root[rng.below(32)] ^= 1 << rng.below(8);
+                same_model = false;
+            }
+            _ => other.model.dtype = if other.model.dtype == Dtype::F32 { Dtype::Bf16 } else { Dtype::F32 },
         }
-        // the verifier's floats changed: a proof of the honest statement is not a proof about them unless the change is invisible (bf16 rounding)
-        let same_model = {
-            let eff = |v: &[f32], d: Dtype| tt_zkml::witness::effective(v, d);
-            eff(&other.input, other.dtype) == eff(&public.input, public.dtype)
-                && other.weights.iter().zip(&public.weights).all(|(a, b)| eff(a, other.dtype) == eff(b, public.dtype))
-                && other.layers.iter().zip(&public.layers).all(|(a, b)| a.relu == b.relu)
-        };
+        // the verifier's input changed: a proof of the honest statement is not a proof about it unless the change is invisible (bf16 rounding)
+        let eff = |v: &[f32], d: Dtype| tt_zkml::witness::effective(v, d);
+        let same = same_model && eff(&other.input, other.model.dtype) == eff(&public.input, public.model.dtype);
         let verdict = proof::verify(&honest, &other);
-        if !same_model {
+        if !same {
             assert!(verdict.is_err(), "SOUNDNESS BUG: the proof verified for other public inputs. {}", context("other public inputs"));
         }
         stats.tampered += 1;

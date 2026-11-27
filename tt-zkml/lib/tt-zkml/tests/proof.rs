@@ -55,7 +55,7 @@ impl Network {
     }
 
     fn public(&self) -> PublicInputs {
-        PublicInputs::new(&self.model, &self.input)
+        PublicInputs::new(&self.model, &self.input).unwrap()
     }
 
     fn run(&self, device: &Device) -> Trace {
@@ -200,34 +200,47 @@ fn forged_proofs(net: &Network, proof: &Proof) {
     forged.claimed_sums.pop();
     rejected(&forged, &public, "a truncated network");
 
-    // the public floats: the proof is about this model and this input only
+    // the verifier holds the model's commitment, not its weights: 32 bytes and the architecture
+    assert_eq!(public.model, tt_zkml::proof::ModelCommitment::new(&net.model).unwrap());
+    // a key prepared once for this model and batch size verifies without any work proportional to the model
+    let key = tt_zkml::proof::VerifyingKey::new(&public.model, net.batch as usize).unwrap();
+    proof::verify_with_key(proof, &key, &net.input).unwrap();
+
+    // the proof is about this committed model and this input only
     let mut other = public.clone();
     other.input[7] += 0.05;
     rejected(proof, &other, "another input");
-    let mut other = public.clone();
-    // the smallest change the device can see: the lowest mantissa bit of an f32, of a bf16 (bits below it do not survive the rounding)
+    // the commitment of a model that differs by the smallest change the device can see: the lowest mantissa bit of an f32, of a bf16
     let lowest_bit = if net.model.dtype == Dtype::Bf16 { 1 << 16 } else { 1 };
-    other.weights[0][9] = f32::from_bits(other.weights[0][9].to_bits() ^ lowest_bit);
-    rejected(proof, &other, "weights that differ by one bit");
-    // a change below the dtype's precision is the same model for the device, and the proof still holds
+    let mut model = net.model.clone();
+    model.weights[0][9] = f32::from_bits(model.weights[0][9].to_bits() ^ lowest_bit);
+    rejected(proof, &PublicInputs::new(&model, &net.input).unwrap(), "the commitment of weights that differ by one bit");
+    // a change below the dtype's precision is the same model for the device: the same commitment
     if net.model.dtype == Dtype::Bf16 {
-        let mut same = public.clone();
-        same.weights[0][9] = f32::from_bits(same.weights[0][9].to_bits() ^ 1);
-        if effective(&same.weights[0], Dtype::Bf16) == effective(&public.weights[0], Dtype::Bf16) {
+        let mut model = net.model.clone();
+        model.weights[0][9] = f32::from_bits(model.weights[0][9].to_bits() ^ 1);
+        if effective(&model.weights[0], Dtype::Bf16) == effective(&net.model.weights[0], Dtype::Bf16) {
+            let same = PublicInputs::new(&model, &net.input).unwrap();
+            assert_eq!(same.model.root, public.model.root);
             proof::verify(proof, &same).unwrap();
         }
     }
+    // a model with fewer layers, another activation, a made-up root
+    let mut model = net.model.clone();
+    model.layers.pop();
+    model.weights.pop();
+    rejected(proof, &PublicInputs::new(&model, &net.input).unwrap(), "the commitment of a model with fewer layers");
     let mut other = public.clone();
-    other.weights.swap(1, 2);
-    rejected(proof, &other, "swapped weights");
+    other.model.layers[0].relu = !other.model.layers[0].relu;
+    rejected(proof, &other, "a commitment with another activation");
     let mut other = public.clone();
-    other.weights.pop();
-    rejected(proof, &other, "a model with fewer layers");
+    other.model.root[31] ^= 0x80;
+    rejected(proof, &other, "a made-up commitment");
     let mut other = public;
-    other.dtype = if net.model.dtype == Dtype::F32 { Dtype::Bf16 } else { Dtype::F32 };
-    // the other dtype rounds the floats differently: the same floats do not match unless every one of them is exactly representable
-    if effective(&other.input, other.dtype) != effective(&net.input, net.model.dtype) {
-        rejected(proof, &other, "the floats of another dtype");
+    other.model.dtype = if net.model.dtype == Dtype::F32 { Dtype::Bf16 } else { Dtype::F32 };
+    // the other dtype rounds the input differently: it does not match unless every value is exactly representable
+    if effective(&other.input, other.model.dtype) != effective(&net.input, net.model.dtype) {
+        rejected(proof, &other, "the input rounded as another dtype");
     }
 }
 

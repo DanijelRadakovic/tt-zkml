@@ -4,7 +4,8 @@
 //! tt-zkml example --out model/ --dims 64,128,32          write a random model and an input
 //! tt-zkml run     --model model/ --input model/input.f32  run the forward pass, write the trace
 //! tt-zkml prove   --model model/ --input model/input.f32  run the forward pass and generate the proof
-//! tt-zkml verify  --proof proof.bin --model model/ --input model/input.f32  check a proof of this model on this input
+//! tt-zkml commit  --model model/ --out model.commitment     commit to a model (done once, by whoever holds the weights)
+//! tt-zkml verify  --proof proof.bin --commitment model.commitment --input input.f32   check a proof: no device, no weights
 //! ```
 
 use std::fs;
@@ -14,6 +15,7 @@ use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use tt_zkml::modelfile::{self, ModelFile};
+use tt_zkml::proof::ModelCommitment;
 use tt_zkml::witness::PublicInputs;
 use tt_zkml::{device, proof, Device, Dtype, Layer, Model, Trace};
 
@@ -32,8 +34,20 @@ enum Command {
     Run(RunArgs),
     /// Run the forward pass and generate the proof of the execution
     Prove(ProveArgs),
-    /// Verify a proof (needs no device)
+    /// Verify a proof (needs no device and no weights: the model's commitment and the input)
     Verify(VerifyArgs),
+    /// Commit to a model: writes the architecture and the 32-byte root of the weights, which is all a verifier needs
+    Commit(CommitArgs),
+}
+
+#[derive(Args)]
+struct CommitArgs {
+    /// Model directory (model.json and the weights)
+    #[arg(long)]
+    model: PathBuf,
+    /// Where to write the commitment (JSON)
+    #[arg(long, default_value = "model.commitment")]
+    out: PathBuf,
 }
 
 #[derive(Args)]
@@ -41,9 +55,12 @@ struct VerifyArgs {
     /// The proof written by `prove`
     #[arg(long, default_value = "proof.bin")]
     proof: PathBuf,
-    /// The model the proof is about (model.json and the weights): the verifier knows the float weights
+    /// The commitment of the model the proof is about (written by `commit`)
+    #[arg(long, conflicts_with = "model")]
+    commitment: Option<PathBuf>,
+    /// Or the model itself (model.json and the weights): its commitment is computed first
     #[arg(long)]
-    model: PathBuf,
+    model: Option<PathBuf>,
     /// The input the proof is about: little-endian f32
     #[arg(long)]
     input: PathBuf,
@@ -115,6 +132,7 @@ fn real_main() -> Result<ExitCode, String> {
         Command::Run(a) => forward(&a.fwd).map(|_| ExitCode::SUCCESS),
         Command::Prove(a) => prove(a),
         Command::Verify(a) => verify(a),
+        Command::Commit(a) => commit(a).map(|_| ExitCode::SUCCESS),
     }
 }
 
@@ -230,19 +248,42 @@ fn prove(a: ProveArgs) -> Result<ExitCode, String> {
     println!("proof generated in {:.2} s ({} KiB)", t.elapsed().as_secs_f64(), proof.bytes.len() / 1024);
     fs::write(&a.proof, proof.to_bytes()).map_err(|e| format!("{}: {e}", a.proof.display()))?;
     println!("proof written to {}", a.proof.display());
+    // what a verifier would hold: the commitment of the model (not the weights) and the input
+    let commitment = ModelCommitment::new(&model).map_err(|e| e.to_string())?;
+    println!("model commitment: {}", hex(&commitment.root));
     let t = Instant::now();
-    proof::verify(&proof, &PublicInputs::new(&model, &x)).map_err(|e| e.to_string())?;
+    proof::verify(&proof, &PublicInputs { model: commitment, input: x }).map_err(|e| e.to_string())?;
     println!("proof verified in {:.2} s", t.elapsed().as_secs_f64());
     Ok(ExitCode::SUCCESS)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn commit(a: CommitArgs) -> Result<(), String> {
+    let model = modelfile::load_model(&a.model)?;
+    let t = Instant::now();
+    let commitment = ModelCommitment::new(&model).map_err(|e| e.to_string())?;
+    fs::write(&a.out, commitment.to_json()).map_err(|e| format!("{}: {e}", a.out.display()))?;
+    println!("model commitment {} ({} layers, {}) written to {} in {:.2} s", hex(&commitment.root), commitment.layers.len(), modelfile::dtype_name(commitment.dtype), a.out.display(), t.elapsed().as_secs_f64());
+    Ok(())
 }
 
 fn verify(a: VerifyArgs) -> Result<ExitCode, String> {
     let bytes = fs::read(&a.proof).map_err(|e| format!("{}: {e}", a.proof.display()))?;
     let proof = proof::Proof::from_bytes(&bytes).map_err(|e| e.to_string())?;
-    let model = modelfile::load_model(&a.model)?;
+    let commitment: ModelCommitment = match (&a.commitment, &a.model) {
+        (Some(path), _) => {
+            let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            ModelCommitment::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        (None, Some(dir)) => ModelCommitment::new(&modelfile::load_model(dir)?).map_err(|e| e.to_string())?,
+        (None, None) => return Err("give --commitment (the model's commitment) or --model (the model itself)".into()),
+    };
     let input = modelfile::read_f32(&a.input)?;
     let t = Instant::now();
-    match proof::verify(&proof, &PublicInputs::new(&model, &input)) {
+    match proof::verify(&proof, &PublicInputs { model: commitment, input }) {
         Ok(()) => {
             println!("proof valid ({} layers, output {} values), verified in {:.2} s", proof.specs.len(), proof.output.len(), t.elapsed().as_secs_f64());
             Ok(ExitCode::SUCCESS)

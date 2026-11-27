@@ -154,7 +154,7 @@ fn f1_the_mantissa_and_sign_of_a_float_are_pinned() {
     assert_rejected(prove_unchecked(&forged), &public, "a flipped sign through an unpinned mantissa");
 }
 
-/// F1, isolated from the clamped-shift fix: a float with a raw shift of 24 (not clamped), whose sign and mantissa are replaced by the other solution of
+/// F1, isolated from the clamped-shift fix (since the weights are a committed model, the pin is the equality of the row with the model's columns): a float with a raw shift of 24 (not clamped), whose sign and mantissa are replaced by the other solution of
 /// `2m + s = sm` (`m + 2^30`, flipped sign). The row satisfies every constraint of the tensor component; only the pinning of `s` and `m` to the public
 /// float rejects it.
 #[test]
@@ -376,7 +376,7 @@ fn statements_are_canonical_and_bounded() {
     assert!(proof::verify(&forged, &public).is_err());
     // a float that is finite in f32 but infinite in bf16
     let mut other = public.clone();
-    other.dtype = Dtype::Bf16;
+    other.model.dtype = Dtype::Bf16;
     other.input[0] = f32::MAX;
     assert!(proof::verify(&proof, &other).is_err());
 }
@@ -462,13 +462,12 @@ fn g3_malformed_proofs_are_rejected_without_panicking() {
         ("a queried column missing", |v| { v["queried_values"][1].as_array_mut().unwrap().pop(); }),
         ("a queried value missing", |v| { v["queried_values"][1][0].as_array_mut().unwrap().pop(); }),
         ("all queried values of a tree one short", |v| { for c in v["queried_values"][2].as_array_mut().unwrap() { c.as_array_mut().unwrap().pop(); } }),
-        ("a composition column missing", |v| { v["sampled_values"][3].as_array_mut().unwrap().pop(); }),
+        ("a composition column missing", |v| { v["sampled_values"][4].as_array_mut().unwrap().pop(); }),
+        ("a model column missing", |v| { v["sampled_values"][0].as_array_mut().unwrap().pop(); }),
+        ("a tree missing", |v| { v["sampled_values"].as_array_mut().unwrap().pop(); }),
     ];
     for (what, edit) in edits {
-        let mut json: serde_json::Value = serde_json::from_slice(&proof.bytes).unwrap();
-        edit(&mut json);
-        let mut forged = proof.clone();
-        forged.bytes = serde_json::to_vec(&json).unwrap();
+        let forged = with_json(&proof, edit);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proof::verify(&forged, &public)));
         match result {
             Ok(r) => assert!(r.is_err(), "the verifier accepted {what}"),
@@ -517,7 +516,7 @@ fn g6_non_finite_public_floats_are_refused_before_rounding() {
     let mut x = vec![1.0f32, -0.0, -0.25, 2.0];
     let honest = NetworkWitness::simulate(2, &[2, 2], &[false], &x, &[vec![0.5, -1.0, 0.25, 1.0]], Dtype::Bf16).unwrap();
     let mut public = honest.public_inputs();
-    public.dtype = Dtype::Bf16;
+    public.model.dtype = Dtype::Bf16;
     let proof = prove_witness(&honest).unwrap();
     proof::verify(&proof, &public).unwrap();
     x[1] = f32::from_bits(0x7fff_ffff); // a NaN that bf16 rounding turns into -0.0
@@ -529,11 +528,17 @@ fn g6_non_finite_public_floats_are_refused_before_rounding() {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Third audit round.
 
+type Stark = stwo::core::proof::StarkProof<stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher>;
+
+/// Edits the stwo proof inside `proof` as a JSON value (field names and nesting as in stwo's structs) and encodes it again: the result is a
+/// well-encoded proof with other contents.
 fn with_json(proof: &Proof, edit: impl Fn(&mut serde_json::Value)) -> Proof {
-    let mut json: serde_json::Value = serde_json::from_slice(&proof.bytes).unwrap();
+    let stark: Stark = bincode::deserialize(&proof.bytes).unwrap();
+    let mut json = serde_json::to_value(&stark).unwrap();
     edit(&mut json);
+    let stark: Stark = serde_json::from_value(json).expect("the edit keeps the types of the proof");
     let mut forged = proof.clone();
-    forged.bytes = serde_json::to_vec(&json).unwrap();
+    forged.bytes = bincode::serialize(&stark).unwrap();
     forged
 }
 
@@ -551,7 +556,9 @@ fn h1_non_canonical_field_elements_are_refused() {
     let edits: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
         ("a sampled base-trace value", Box::new(move |j| bump(&mut j["sampled_values"][1][0][0][0][0]))),
         ("a sampled interaction value", Box::new(move |j| bump(&mut j["sampled_values"][2][0][0][1][1]))),
-        ("a sampled composition value", Box::new(move |j| bump(&mut j["sampled_values"][3][0][0][0][0]))),
+        ("a sampled model value", Box::new(move |j| bump(&mut j["sampled_values"][0][0][0][0][0]))),
+        ("a sampled constant", Box::new(move |j| bump(&mut j["sampled_values"][3][0][0][0][0]))),
+        ("a sampled composition value", Box::new(move |j| bump(&mut j["sampled_values"][4][0][0][0][0]))),
         ("a queried value", Box::new(move |j| bump(&mut j["queried_values"][1][0][0]))),
         ("a FRI witness value", Box::new(move |j| bump(&mut j["fri_proof"]["first_layer"]["fri_witness"][0][0][0]))),
         ("an inner FRI witness value", Box::new(move |j| bump(&mut j["fri_proof"]["inner_layers"][0]["fri_witness"][0][1][0]))),
@@ -613,7 +620,7 @@ fn rejected_with(proof: &Proof, public: &PublicInputs, expected: &str, what: &st
 #[test]
 fn h3_queried_columns_have_one_value_per_query_position() {
     let (proof, public) = small_proof();
-    for tree in 0..4 {
+    for tree in 0..5 {
         for longer in [false, true] {
             let forged = with_json(&proof, |j| {
                 for column in j["queried_values"][tree].as_array_mut().unwrap() {
@@ -632,24 +639,26 @@ fn h3_queried_columns_have_one_value_per_query_position() {
     rejected_with(&forged, &public, "one queried value per query position", "empty queried columns");
 }
 
-/// H4 (round 3): the verifier's memory must not depend on the proof file, and a proof has exactly one encoding: no ignored fields, no other spelling,
+/// H4 (round 3): the verifier's memory must not depend on the proof file, and a proof has exactly one encoding: no trailing data, no other spelling,
 /// no parameters other than the verifier's.
 #[test]
 fn h4_proofs_are_bounded_and_canonical() {
     let (proof, public) = small_proof();
-    // a field the deserializer would ignore
-    let forged = with_json(&proof, |j| j["junk"] = serde_json::json!([0, 0, 0]));
-    rejected_with(&forged, &public, "canonical encoding", "an unknown field");
-    // megabytes of it: refused by its size, before anything is parsed
-    let forged = with_json(&proof, |j| j["junk"] = serde_json::json!(vec![0u8; 4 << 20]));
+    // trailing bytes that the decoder would ignore
+    let mut forged = proof.clone();
+    forged.bytes.extend([0u8; 3]);
+    rejected_with(&forged, &public, "canonical encoding", "trailing bytes");
+    // megabytes of them: refused by its size, before anything is parsed
+    let mut forged = proof.clone();
+    forged.bytes.extend(vec![0u8; 4 << 20]);
     rejected_with(&forged, &public, "more than a proof of this statement can have", "a proof padded with megabytes");
-    // other spellings of the same proof
+    // a truncated proof, and an empty one
     let mut forged = proof.clone();
-    forged.bytes.insert(0, b' ');
-    rejected_with(&forged, &public, "canonical encoding", "leading whitespace");
+    forged.bytes.truncate(forged.bytes.len() - 1);
+    assert!(proof::verify(&forged, &public).is_err());
     let mut forged = proof.clone();
-    forged.bytes.push(b'\n');
-    rejected_with(&forged, &public, "canonical encoding", "trailing whitespace");
+    forged.bytes.clear();
+    assert!(proof::verify(&forged, &public).is_err());
     // parameters written into the proof that are not the verifier's
     for (field, value) in [("n_queries", 1), ("pow_bits", 0), ("log_blowup_factor", 1)] {
         let forged = with_json(&proof, |j| j["config"]["fri_params"][field] = serde_json::json!(value));
@@ -657,6 +666,11 @@ fn h4_proofs_are_bounded_and_canonical() {
     }
     let forged = with_json(&proof, |j| j["config"]["trace_lifting_log_size"] = serde_json::json!(40));
     rejected_with(&forged, &public, "other commitment parameters", "a proof stating another lifting size");
+    // the whole proof file (statement and proof) has one encoding too
+    let mut file = proof.to_bytes();
+    assert_eq!(Proof::from_bytes(&file).unwrap().bytes, proof.bytes);
+    file.push(0);
+    assert!(Proof::from_bytes(&file).is_err());
 }
 
 /// Round 3, low: helpers on an unverified proof do not panic, and the float range of the scalers covers every finite f32.
@@ -679,4 +693,43 @@ fn round3_low_items() {
     assert_eq!((honest.specs[0].kx, honest.specs[0].kw), (-122, -122));
     let proof = prove_witness(&honest).unwrap();
     proof::verify(&proof, &honest.public_inputs()).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// The committed model (the verifier holds a commitment, not the weights).
+
+/// The quantization rows of the weights must use the committed floats: a prover that keeps the model tree honest (so that the proof carries the right
+/// commitment) but quantizes another float in the trace is refused. Only the equality of the row with the model's columns stands in its way.
+#[test]
+fn m1_the_trace_must_use_the_committed_weights() {
+    let x = floats(2 * 4, 41, -2.0, 2.0);
+    let w0 = floats(4 * 3, 42, -1.0, 1.0);
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[false], &x, &[w0.clone()], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    // another weight at index 1: a complete, consistent execution of that other model
+    let mut other_w = w0.clone();
+    other_w[1] = -other_w[1] * 0.5 + 0.1;
+    let other = NetworkWitness::simulate(2, &[4, 3], &[false], &x, &[other_w.clone()], Dtype::F32).unwrap();
+    if other.specs[0].kw != honest.specs[0].kw {
+        return; // the scaler changed: another statement altogether, rejected for that reason already
+    }
+    assert_ne!(other.output(), honest.output());
+    // the forged witness: everything of the other model, but the float tensor that goes into the model tree is the committed one
+    let mut forged = other.clone();
+    forged.w_float = honest.w_float.clone();
+    let kexp = forged.specs[0].kw;
+    let (float, q) = (other_w[1], other.q_w[0][1]);
+    set_hook(move |kind, cols| {
+        if let Kind::Tensor { layer: 0, which: Which::W, .. } = kind {
+            let c = QCols::new(kexp);
+            for (i, v) in quant_row(kexp, &c, 1, float_parts(float), q, false).unwrap().into_iter().enumerate() {
+                cols[i].set(1, v);
+            }
+        }
+    });
+    assert_rejected(prove_unchecked(&forged), &public, "a trace that quantizes other weights than the committed ones");
+    // and proving the other model honestly gives a proof of ANOTHER commitment
+    let proof = prove_witness(&other).unwrap();
+    assert!(proof::verify(&proof, &public).unwrap_err().to_string().contains("committed model"));
+    proof::verify(&proof, &other.public_inputs()).unwrap();
 }
