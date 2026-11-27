@@ -75,7 +75,7 @@ impl LayerSpec {
         match self.ko {
             ko if ko >= 41 => Mode::Zero,
             ko if ko >= 0 => Mode::Left(ko as u32),
-            ko => Mode::Right((-ko) as u32),
+            ko => Mode::Right(ko.unsigned_abs()), // no overflow for i32::MIN; validate refuses shifts above MAX_SHIFT
         }
     }
 

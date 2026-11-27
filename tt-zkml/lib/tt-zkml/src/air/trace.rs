@@ -100,6 +100,11 @@ fn requant_row_inner(spec: &LayerSpec, c: &RqCols, row: usize, acc: i32, out: i3
             if (a as i64) << ko != out as i64 {
                 return Err(bad("out != acc * 2^ko"));
             }
+            let scaled = acc << ko;
+            if scaled.abs() > 127 {
+                return Err(bad("|acc| * 2^ko > 127"));
+            }
+            cols[c.left_scaled.unwrap()] = BaseField::from(scaled);
         }
         Mode::Right(sh) => {
             let r = c.right.as_ref().unwrap();

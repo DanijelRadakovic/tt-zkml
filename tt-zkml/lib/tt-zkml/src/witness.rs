@@ -202,6 +202,14 @@ impl NetworkWitness {
         if input.len() != m * k0 {
             return Err(WitnessError::Size { what: "input".into(), expected: m * k0, found: input.len() });
         }
+        if let Some(index) = input.iter().position(|v| !v.is_finite()) {
+            return Err(WitnessError::Float { what: "input".into(), index });
+        }
+        for (l, w) in model.weights.iter().enumerate() {
+            if let Some(index) = w.iter().position(|v| !v.is_finite()) {
+                return Err(WitnessError::Float { what: format!("weights[{l}]"), index });
+            }
+        }
         let x0_float = effective(input, model.dtype);
         let kx = exponent_of(trace.scaler_x).ok_or_else(|| WitnessError::Trace(format!("scaler_x {} is not a power of two", trace.scaler_x)))?;
         let q_x0 = x0_float.iter().map(|&v| quantize(v, trace.scaler_x, Dtype::F32)).collect();

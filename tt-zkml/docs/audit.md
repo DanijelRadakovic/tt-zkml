@@ -1,13 +1,19 @@
 # Soundness audit of the tt-zkml AIR
 
 Scope: `tt-zkml/lib/tt-zkml/src/{air/*.rs, proof.rs, witness.rs}` over stwo (`starkware-libs/proving` rev `c87ea10`, Circle STARK over M31, constraint
-framework, LogUp). Date: 2026-11-27. Status of the code audited: the AIR as first written (the "v3" with float quantization binding). The findings below
-were fixed in the same pass; every fix has a regression test.
+framework, LogUp). Date: 2026-11-27. Two rounds:
+
+* **Round 1** audited the AIR as first written (the "v3" with float quantization binding): findings F1 to F12.
+* **Round 2** audited the code after the round-1 fixes, with a fresh independent reviewer: findings G1 to G6.
+
+Every finding of both rounds is fixed and has a regression test that fails without its fix.
 
 **Bottom line.** The first version was not sound: 7 distinct ways for a malicious prover to make `proof::verify` accept a false statement were found
-(three of them critical) and all were confirmed by running forged proofs. All are fixed. After the fixes, the review below finds no further way to
-violate the statement, under the assumptions and limits listed in section 6. This is a manual review plus an independent adversarial review plus mutation
-testing, **not** a machine-checked proof and not a third-party audit: see section 7.
+(three of them critical) and all were confirmed by running forged proofs. The second round, on the fixed code, found two more critical ways (G1, G2), a
+verifier crash on malformed proofs (G3) and a counting limit of LogUp (G4); the author's own second pass had missed G1 and G2. All are fixed. After the
+fixes, neither round finds a further way to violate the statement, under the assumptions and limits listed in section 6. That each round found new critical
+issues is a reason for caution: this is manual review plus independent adversarial review plus mutation testing plus a randomized forgery test, **not** a
+machine-checked proof and not a third-party audit (section 7).
 
 ## 1. The statement
 
@@ -35,16 +41,24 @@ Not in the statement: zero knowledge (the float weights and input are public inp
    copy, built forged proofs by rewriting columns of an otherwise honest trace (a malicious prover is not bound by the honest trace generator), and
    reported only findings it confirmed with a running test that `verify` accepted. It had a negative control (the same forgery without column forging is
    rejected).
-3. **Regression tests** (`src/audit_tests.rs`): every finding is a test in which a forged proof must not verify. The forgeries are written through a
-   test-only hook (`air::trace::HOOK`) that rewrites the columns of a component.
+3. **Regression tests** (`lib/tt-zkml/tests/audit.rs`): every finding is a test in which a forged proof must not verify. The forgeries are written through
+   a hook (`air::trace::HOOK`, exposed by the `forgery` cargo feature that `cargo test` enables) that rewrites the columns of a component.
 4. **Mutation testing of the regression tests**: each fix was switched off in turn, and the matching test must then FAIL (the forgery is accepted). This
    showed that three tests (`f1`, `f5`, `f6`) were first vacuous (rejected for an unrelated reason) and they were rewritten, or accompanied by an
-   isolated one (`f1b`), until the fix under test was the only thing rejecting the forgery. Result: every fix below is covered by a test that fails without it (table, section 3).
+   isolated one (`f1b`), until the fix under test was the only thing rejecting the forgery. In round 2, `g1` and `g6` were first vacuous in the same way
+   and were rewritten. Result: every fix below is covered by a test that fails without it (tables, section 3).
+5. **Randomized forgery test** (`lib/tt-zkml/tests/forgery_fuzz.rs`, added after round 1): random networks, random forged witnesses and columns, tampered
+   proofs and public inputs; it fails if `verify` accepts any statement other than the true one (which is unique for fixed public floats). Mutation testing
+   of the fuzzer itself showed what it can and cannot find: it catches a removed matmul constraint within seconds, but not the subtle local constraints
+   (tie handling, the bound limbs, the hit gating, the ReLU gadget), which only the targeted tests of item 3 cover. A clean fuzz run is breadth, not proof.
 
-Both reviews found the same critical issues independently (F1 to F4), which is some evidence of coverage; the independent reviewer found F5 to F7 and the
-transcript and robustness points as well.
+Round 1: both reviews found the same critical issues independently (F1 to F4); the independent reviewer found F5 to F7 and the transcript and robustness
+points as well. Round 2: a new reviewer, given only the code and the statement and asked not to read this report or the audit tests before finishing its
+own analysis, found G1 to G6; the author's parallel pass found none of them.
 
 ## 3. Findings
+
+### 3.1 Round 1
 
 Severity: critical = a false statement is accepted; high = accepted under a plausible adversary; medium/low = robustness or defense in depth.
 
@@ -66,6 +80,25 @@ Severity: critical = a false statement is accepted; high = accepted under a plau
 Other changes made for the fixes: the largest right shift is 20 (was 22) so that the bound check fits four 7-bit limbs; `K <= 8192` (the honest
 accumulator then never exceeds `127 * 2^20`).
 
+### 3.2 Round 2
+
+| ID | Sev. | Where | Problem | Fix | Test (fails without the fix) |
+|---|---|---|---|---|---|
+| G1 | critical | Requant, left shift under ReLU | The round-1 fix F6 bounded the raw accumulator only in the right-shift mode. In the left-shift mode `out = max(acc, 0) * 2^ko` bounds only the non-negative part, and the range check of `acc` allows up to 127, so a negative accumulator in `[-127, -64]` let an exponent one too large through: `acc = [20, -100]`, true `ko = 0` and output `[20, 0]`, accepted `ko = 1` and output `[40, 0]`. | A column `sa = acc * 2^ko` of the RAW accumulator, range checked to `[-127, 127]` (no wrap: `|acc| <= 127` is still range checked). | `g1_*` |
+| G2 | critical | Verifier, public output | The output range check was `v.abs() > 127`; in a release build `i32::MIN.abs()` wraps to `i32::MIN` and passes, and `i32::MIN` is `-1` in M31, so the tuple matched the circuit's `-1`: `proof.output` claimed `-2^31` where the network gives `-1` (and `dequantized_output` reported it). | `!(-127..=127).contains(v)`. | `g2_*` |
+| G3 | high | Verifier, robustness | A structurally malformed stwo proof (inner vectors of the wrong length: sampled values of a column, decommitments, queried values) made the verifier panic inside stwo; a wrong number of mask values of an interaction column panicked during an unwinding, which aborts the process (`catch_unwind` cannot contain it). | `check_structure` compares every tree, every column's number of sampled values (from `Components::mask_points`), the decommitments and the queried values with the statement before stwo reads the proof; any remaining panic in stwo's verifier is caught and becomes a rejection. | `g3_*` (nine malformations) |
+| G4 | medium | LogUp counting | LogUp proves equality of counts modulo p. The supported limits allowed statements with more than p range lookups in total (64 layers of large tensors: about `25 p`); a value outside the table used exactly p times would cancel and break every range check. Not exploited (it needs about `10^11` cells), but within the stated limits. | `check_lookup_budget`: the verifier and the prover refuse statements with p or more range lookups (rows times range lookups per row over all components, padding included). The other relations have far fewer uses per tuple. | `g4_*` |
+| G5 | low | Verifier, robustness | `ko = i32::MIN` in a proof overflowed in `-ko` (a panic in a debug build). | `ko.unsigned_abs()`; the shift is then refused by `validate`. | `g5_*` |
+| G6 | low | Verifier, public floats | A NaN rounds to `-0.0` in bf16 (`round_bf16`), and finiteness was checked only after the rounding, so a NaN input was accepted as `-0.0`. | Finiteness is checked before the rounding too (verifier and witness). | `g6_*` |
+
+Not fixed (low, reported in round 2):
+
+* The verifier recomputes the whole preprocessed commitment for every proof before the cheaper checks of the transcript; a garbage proof therefore
+  costs a full recomputation. It is bounded by the verifier's own model (the statement's shapes must equal it). The structure checks now run first;
+  caching the root per model would remove the rest.
+* The CPU reference treats subnormal floats exactly. If the device flushes them to zero, the results differ only for scaler exponents near the
+  upper limit (`k >= 126`). Not checked on hardware.
+
 ## 4. Why the fixed AIR is sound (the review)
 
 Notation: p = 2^31 - 1; "integer" means the canonical representative in `[0, p)` or `(-p/2, p/2)` as the context says. A *limb decomposition* of a
@@ -73,7 +106,8 @@ column `v` is `v = sum_{t<4} l_t * 128^t` with every `l_t` looked up in the rang
 
 **L1 (lookups are multiset equality).** A LogUp relation with random challenges `(z, alpha)` drawn after the base commitment makes `sum use_i / (z - h(t_i))
 = 0` over all components and the public part imply, except with probability about `N / 2^124` (QM31), that the multiset of used tuples equals the multiset of
-yielded tuples with the multiplicities as field elements; since the number of rows is far below p, this is equality of counts. Every component's claimed
+yielded tuples with the multiplicities as field elements; this is equality of counts because every relation is used fewer than p times in total
+(enforced for the range relation, which is the only one with many uses of one tuple, by `check_lookup_budget`: G4). Every component's claimed
 sum is bound by the framework's cumulative-sum constraint (`cumsum_shift = claimed_sum / 2^log_size`, cyclic `[-1, 0]` mask), and the verifier requires
 `sum(claimed) + public_sum = 0` for each relation (relations have separate challenges, and the check on the total forces per-relation cancellation).
 
@@ -113,7 +147,8 @@ the entry's `(i, j)` in the tuple, so by L1 every row reads the committed entry,
 * Right shift `s in [1, 20]`: with `|out| <= 127` (range check), `rem = a' - out * 2^s` is an exact integer (`< 2^29 + 127 * 2^20`); then as in L4:
   `out = round_half_even(a' / 2^s)`, tie handled by evenness. `|acc| <= 127 * 2^s` on the RAW accumulator by `u1 = 127 * 2^s - acc >= 0`,
   `u2 = 127 * 2^s + acc >= 0` (limb checked; `u <= 254 * 2^20 < 2^29`), so `max|acc| * 2^ko <= 127` exactly (F5, F6).
-* Left shift `ko in [0, 6]`: the raw `acc` is range checked to `[-127, 127]`, so `out = a' * 2^ko` cannot wrap (F3), and `|out| <= 127` is range checked.
+* Left shift `ko in [0, 6]`: the raw `acc` is range checked to `[-127, 127]`, so `out = a' * 2^ko` and `sa = acc * 2^ko` cannot wrap (F3); `sa` is range checked,
+  so `|acc| * 2^ko <= 127` holds for the RAW accumulator, also under a ReLU where `|out| <= 127` would bound only `max(acc, 0)` (G1).
 * Zero mode: `acc = out = 0` on every row (`ko = 127` only).
 * Largest exponent: exactly one real row has `|acc| >= T` where `T` is the smallest integer with `T * 2^(ko+1) > 127` (`hp`/`hn` bits, gated by `real`, `hv`
   limb checked, counted against the public `-1`); with the bound above, `ko` is the largest exponent (the device's `choose_ko`).
@@ -127,8 +162,10 @@ unconditional lookups (range checks, powers of two) are self-balancing (each use
 `real` (F4). Padding-row columns are otherwise free but constrained like any row, and no constraint of a padding row feeds a real one.
 
 **L9 (verifier).** The preprocessed root is recomputed from the verifier's statement (index columns, `real`, multiplicities, tables) and compared; the PCS
-and FRI parameters are the verifier's, not read from the proof; the number of commitments and sampled columns is checked; the statement and claimed sums
-are in the transcript before the challenges they feed. Constraint degrees are at most 3, so the composition polynomial bound `log_size + 1` suffices
+and FRI parameters are the verifier's, not read from the proof; the full structure of the stwo proof (trees, sampled values per column, decommitments,
+queried values) is checked before stwo reads it, and a panic inside stwo is a rejection (G3); the statement and claimed sums are in the transcript before
+the challenges they feed. Every integer of the statement is attacker-controlled: the checks on it avoid overflow (G2, G5), and the public floats must be
+finite before and after the dtype's rounding (G6). Constraint degrees are at most 3, so the composition polynomial bound `log_size + 1` suffices
 (the quotient has degree `< 2^(L+1)`).
 
 ## 5. Integer ranges (where wrap-around was possible)
@@ -140,7 +177,9 @@ are in the transcript before the challenges they feed. Constraint degrees are at
 | `m` (float significand) | `< 2^24` | | pinned to the public value |
 | `qa * 2^sh` (quantization) | `<= 127 * 2^24 = 2.13e9` | `< p = 2.147e9` | `sh <= 24`, else `qa = 0` |
 | `out * 2^s`, `s <= 20` (requant) | `<= 127 * 2^20 = 1.33e8` | yes | `MAX_SHIFT = 20` |
-| `acc * 2^ko`, `ko <= 6` (requant) | `<= 127 * 64` | yes | `|acc| <= 127` is checked |
+| `acc * 2^ko`, `ko <= 6` (requant) | `<= 127 * 64` | yes | `|acc| <= 127` is checked; `sa = acc * 2^ko` is range checked (G1) |
+| range lookups of a statement | `< p` | yes | `check_lookup_budget` (G4) |
+| `proof.output` entries (i32) | `[-127, 127]` | | checked without `abs()` (G2) |
 | limb sums | `< 2^29` | yes | four limbs of at most 254 |
 | `u1, u2 = 127 * 2^s -+ acc` | `< 254 * 2^20 + ...` | yes | `< 2^29` |
 | `hv = 2m - 127 * 2^sh - 1` (`sh <= 20`) | `< 2^25` | yes | `sh <= 20` is forced when `h = 1` |
@@ -153,7 +192,8 @@ are in the transcript before the challenges they feed. Constraint degrees are at
   negligible.
 * The Fiat-Shamir transcript is Blake2s with the statement mixed in first.
 * Supported ranges: `kx, kw in [-100, 127]`, a quantization shift of at least 1 for every non-zero float, `K <= 8192`, right shift of the requantization at most 20,
-  at most 64 layers, every tensor at most `2^24` elements. Statements outside these are refused (by the prover and by the verifier), not unsound.
+  at most 64 layers, every tensor at most `2^24` elements, fewer than p range lookups in total (G4), finite public floats before and after the dtype's
+  rounding. Statements outside these are refused (by the prover and by the verifier), not unsound.
 * The proof is an integrity proof, not zero knowledge: the weights and the input are public inputs of the verifier. The output is public.
 * `verify` must be given `PublicInputs` from a trusted source (the model the verifier cares about). Everything about the network's structure is taken from it.
 * The device and its trace are not trusted; a trace that does not reproduce an honest execution simply cannot be proven.
@@ -162,23 +202,30 @@ are in the transcript before the challenges they feed. Constraint degrees are at
 
 * Not a machine-checked proof: the arguments in section 4 are manual. The constraints were not modelled in a proof assistant or checked with a dedicated
   ZK-circuit analysis tool (for example an under-constraint solver).
-* Not an audit by a third party. Two independent readers (the author and the independent reviewer) plus a test suite is reasonable evidence, not a
-  guarantee; the first version contained seven findings that passed all of its original tests.
+* Not an audit by a third party. Two rounds with independent reviewers plus a test suite is reasonable evidence, not a guarantee: the first version
+  contained seven findings that passed all of its original tests, and the round-1 fixes still contained two critical ones (G1, G2) that the author's own
+  second pass missed.
 * stwo itself (the constraint framework, the prover and verifier, FRI and the PCS) was relied on, not audited.
 
-Recommended next steps before any production use: an external review of `air/kind.rs` and `proof.rs`; a randomized forgery test (mutate honest columns
-at random and require rejection) run in CI; running the mutation procedure above in CI so that the regression tests keep failing when a constraint is
-removed; and a model of the constraints in an under-constraint checker.
+Recommended next steps before any production use: an external review of `air/kind.rs` and `proof.rs`; running the randomized forgery test (now in
+`tests/forgery_fuzz.rs`) for long runs in CI; running the mutation procedure below in CI so that the regression tests keep failing when a constraint is
+removed; and a model of the constraints in an under-constraint checker. Lessons from round 2 for further changes: every bound must hold for the RAW value in
+every mode (with and without ReLU), and every number in a proof is attacker-controlled, including its integer overflows.
 
 ## 8. Reproducing
 
 ```bash
 cd tt-zkml
-cargo test --release -p tt-zkml --lib                 # all unit tests, including src/audit_tests.rs (the forgeries)
+cargo test --release -p tt-zkml --lib                 # the unit tests
+cargo test --release -p tt-zkml --test audit          # the forgeries of both rounds (f*, g*)
+cargo test --release -p tt-zkml --test forgery_fuzz   # the randomized forgery test (FUZZ_ITERS, FUZZ_SEED for longer runs)
 cargo test --release -p tt-zkml --test proof          # the end-to-end test on a device
 ```
 
 Mutation check of one fix (example, F4): in `src/air/kind.rs` delete the line
-`eval.add_constraint((hp.clone() + hn.clone()) * (one - real));` and run `cargo test --release --lib audit_tests`: `f4a_*` must fail. The other mutations: delete
+`eval.add_constraint((hp.clone() + hn.clone()) * (one - real));` and run `cargo test --release --test audit`: `f4a_*` must fail. The other mutations: delete
 `eval.add_constraint(h.clone() * (one.clone() - real));` (`f4b`), the two `u1_limbs` / `u2_limbs` constraints (`f5`, `f6`), the `Use::Range` on `c.acc` in
 the left-shift branch of `uses()` (`f3`), `eval.add_constraint(cl * qa.clone());` (`f2`), and pin `(s, m)` only through `2m + s` in the Float tuple (`f1b`).
+Round 2: delete the `Use::Range` on `sa` and the `left_scaled` constraint (`g1`); use `v.abs() > spec::QMAX` for the output check in `proof.rs` (`g2`); remove
+the `check_structure` call and the `catch_unwind` around `stwo_verify` (`g3`, the abort ends the test process); use `(-ko) as u32` in `LayerSpec::mode` and run
+in a debug build (`g5`); check finiteness only after the rounding (`g6`).

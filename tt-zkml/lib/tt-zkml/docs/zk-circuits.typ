@@ -239,7 +239,7 @@ the element: $n_(l+1)$, and $1$ for the last layer whose output is public). Colu
 #ctable((auto, 1fr),
   [Mode], [Condition and columns],
   [Zero], [$k_o = 127$ ($max |a| = 0$). Columns: $a, o$.],
-  [Left($k_o$)], [$0 <= k_o <= 6$. Columns: $a, o$, [ReLU: $p, a_p, "ap"[4], "ng"[4]$], $h_p, h_n, h_v[4]$.],
+  [Left($k_o$)], [$0 <= k_o <= 6$. Columns: $a, o$, [ReLU: $p, a_p, "ap"[4], "ng"[4]$], $s_a$, $h_p, h_n, h_v[4]$.],
   [Right($s$)], [$k_o = -s$, $1 <= s <= 20$. Columns: $a, o$, [ReLU columns], $e, "half", v_1[n_s], v_2[n_s], u_1[4], u_2[4]$, $h_p, h_n, h_v[4]$ with $n_s = ceil(s slash 7)$.],
 )
 
@@ -254,6 +254,7 @@ Let $a' = a_p$ with a ReLU and $a' = a$ without; $H = 2^(s-1)$; $"rem" := a' - o
   [R3], [ReLU: $a_p - sum "ap" = 0$ ($op("Limbs")$)], [$a_p >= 0$],
   [R4], [ReLU: $(p - 1) a - sum "ng" = 0$ ($op("Limbs")$)], [$p = 0 ==> a <= 0$; so $a_p = max(a, 0)$],
   [R5], [Left: $o - a' dot 2^(k_o) = 0$], [exact (no wrap: $|a| <= 127$ is range checked)],
+  [R5b], [Left: $s_a - a dot 2^(k_o) = 0$, with $op("Range")(s_a)$], [the *raw* accumulator fits: $|a| dot 2^(k_o) <= 127$, also under a ReLU where $o$ bounds only $max(a, 0)$],
   [R6], [Right: $e (e - 1) = 0$], [$e$ marks a tie],
   [R7], [Right: $e ("rem"^2 - H^2) = 0$], [a tie has $|"rem"| = H$],
   [R8], [Right: $e (o - 2 "half") = 0$], [and an even $o$],
@@ -266,10 +267,10 @@ Let $a' = a_p$ with a ReLU and $a' = a$ without; $H = 2^(s-1)$; $"rem" := a' - o
 
 *Lookups of a row.* use `Tensor`$(a_l, i, j, a)$ with mult $+"real"$ (the accumulator from the matmul); yield `Tensor`$(x_(l+1), i, j, o)$ with mult $-"mult"$
 (the next layer's input); $op("Range")(o)$; with a ReLU the limbs of $a_p$ and $"ng"$; Right: $op("Range")("half")$ and the limbs of $v_1, v_2, u_1, u_2$;
-Left: $op("Range")(a)$ (this is what keeps $|a| <= 127$); for the modes with a hit: the limbs of $h_v$ and `Tensor`$("hit"_l, 0, 0, 0)$ with mult $h_p + h_n$.
+Left: $op("Range")(a)$ (this keeps $|a| <= 127$, so $a dot 2^(k_o)$ cannot wrap) and $op("Range")(s_a)$; for the modes with a hit: the limbs of $h_v$ and `Tensor`$("hit"_l, 0, 0, 0)$ with mult $h_p + h_n$.
 
 *Why the exponent is the largest.* $o$ is range checked to $[-127, 127]$, which only says the *rounded* value fits. R11/R12 (and the range check of $a$ in Left mode)
-bound the *exact* value: $|a| <= 127 dot 2^s$, so $max|a| dot 2^(k_o) <= 127$. R13-R16 and the verifier's "exactly one" give a real row with $|a| dot 2^(k_o+1) > 127$, so $k_o + 1$ would not fit.
+bound the *exact* value of the raw accumulator: $|a| <= 127 dot 2^s$ (Right) or $|a| dot 2^(k_o) <= 127$ via $s_a$ (Left), so $max|a| dot 2^(k_o) <= 127$. R13-R16 and the verifier's "exactly one" give a real row with $|a| dot 2^(k_o+1) > 127$, so $k_o + 1$ would not fit.
 Together $k_o$ is the largest exponent, which is what the device chooses.
 
 == Example: $a = [1000, -2500, 300]$, $k_o = -5$
@@ -296,7 +297,8 @@ $"rem" = +4 = H$ but is odd, so R8 rejects it.
 == Example: left shift and zero mode
 
 $a = [20, -30, 5]$: $max|a| = 30$, $30 dot 2^2 = 120 <= 127 < 240$, so $k_o = 2$ (Left(2)), $o = [80, -120, 20]$, $T = floor(127 slash 8) + 1 = 16$. Every $a$ is range checked
-to $[-127, 127]$ (otherwise $a dot 2^(k_o)$ could wrap modulo $p$). The first row with $|a| >= 16$ (here $a = 20$) is flagged $h_p = 1$; the verifier only needs exactly one such row.
+to $[-127, 127]$ (otherwise $a dot 2^(k_o)$ could wrap modulo $p$) and $s_a = a dot 4 = [80, -120, 20]$ is range checked too. With a ReLU the outputs are $[80, 0, 20]$,
+but $s_a = -120$ still bounds the negative accumulator: $a = -40$ would give $s_a = -160$, which is rejected, so $k_o = 2$ could not be claimed for it. The first row with $|a| >= 16$ (here $a = 20$) is flagged $h_p = 1$; the verifier only needs exactly one such row.
 $a = [0, 0, 0]$: $k_o = 127$, Zero mode: R0 forces $a = o = 0$ in every row and there is no hit.
 
 = Tables
@@ -318,7 +320,10 @@ consumes it (so the circuit's output is $Y$); every "largest" counter is checked
 public side yields it (so a quantized tensor is the quantization of exactly the verifier's floats). `verify` returns `Ok` only if:
 
 + the statement is the verifier's: the layers, activations and shapes ($m, k, n$, relu) equal the verifier's model (only the exponents $k_x, k_w, k_o$ come from the proof);
-  the floats are finite after the dtype's rounding; the public output is in $[-127, 127]$;
+  the floats are finite as given and after the dtype's rounding (a NaN would round to $-0$ in bf16); the public output is in $[-127, 127]$ (checked without
+  integer overflow: $-2^(31)$ is $-1$ in $FF_p$); the total number of range lookups of the statement is below $p$ (LogUp only proves counts modulo $p$);
++ the shape of the stwo proof is that of the statement (trees, sampled values per column, decommitments, queried values per column), so that malformed
+  data is a rejection; any panic inside the stwo verifier is turned into a rejection as well;
 + the statement (layers, output, floats) is mixed into the Fiat-Shamir transcript first, then the preprocessed root is recomputed from the statement and compared with the proof's;
 + the number of commitments and sampled columns is that of the statement; the lookup elements are drawn after the base trace and the claimed sums are mixed into the transcript
   before the interaction trace is committed;
@@ -329,7 +334,8 @@ public side yields it (so a quantized tensor is the quantization of exactly the 
 
 Statements outside these ranges are refused by prover and verifier (never unsound):
 $k_x, k_w in [-100, 127]$ with a quantization shift of at least 1 for every non-zero float; $K <= 8192$; right shift $s <= 20$; at most 64 layers; every tensor at most $2^(24)$ elements;
-a tensor of only tiny non-zero floats (scaler capped at 127) is not supported.
+a tensor of only tiny non-zero floats (scaler capped at 127) is not supported; the total number of range lookups of all components (rows times
+range lookups per row, padding included) must be below $p$.
 
 #ctable((auto, auto, 1fr),
   [Quantity], [Bound], [Why it is below $p = 2^31 - 1$ (no wrap-around)],
@@ -338,7 +344,8 @@ a tensor of only tiny non-zero floats (scaler capped at 127) is not supported.
   [$m$], [$< 2^(24)$], [pinned to the public float by the `Float` lookup ($s$, $m$, $e'$ are separate tuple entries)],
   [$q_a p_2$], [$<= 127 dot 2^(24) = 2.13 dot 10^9$], [$"sh" <= 24$ unless $c = 1$, where $q_a = 0$],
   [$o dot 2^s$, $s <= 20$], [$<= 127 dot 2^(20)$], [$o$ is range checked],
-  [$a dot 2^(k_o)$, $k_o <= 6$], [$<= 127 dot 64$], [$|a| <= 127$ is range checked in Left mode],
+  [$a dot 2^(k_o)$, $k_o <= 6$], [$<= 127 dot 64$], [$|a| <= 127$ is range checked in Left mode (and $s_a$ checks the scaled value)],
+  [range lookup counts], [$< p$], [checked for the whole statement (LogUp counts are modulo $p$)],
   [limb sums], [$< 2^(29)$], [four limbs of at most 254],
   [$u_1, u_2 = 127 dot 2^s plus.minus a$], [$<= 254 dot 2^(20) < 2^(29)$], [$|a| <= 127 dot 2^s$ and $s <= 20$],
   [$h_v = 2m - 127 p_2 - 1$], [$< 2^(25)$], [$"sh" <= 20$ is forced when $h = 1$],

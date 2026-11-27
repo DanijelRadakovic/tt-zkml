@@ -3,6 +3,8 @@
 //! [`prove`] takes the model, the float input and the device [`Trace`], rebuilds the witness on the CPU ([`NetworkWitness::from_trace`]), converts it to
 //! M31 columns and proves the constraints of [`crate::air`]. [`verify`] checks a [`Proof`] against its public statement (the layer specs and the output).
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use itertools::Itertools;
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -21,7 +23,7 @@ use stwo_constraint_framework::TraceLocationAllocator;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::air::spec::{self, LayerSpec};
-use crate::air::{Kind, Lookups, NetEval, build, interaction_traces, layout, public_sum};
+use crate::air::{Kind, Lookups, NetEval, build, check_lookup_budget, interaction_traces, layout, public_sum};
 use crate::device::Trace;
 use crate::modelfile::ModelFile;
 use crate::witness::{NetworkWitness, PublicInputs, WitnessError, effective};
@@ -169,6 +171,7 @@ pub fn prove_unchecked(witness: &NetworkWitness) -> Result<Proof, ProveError> {
 
 /// `checked = false` skips the consistency checks of the witness: for the tests that a forged witness cannot be proven or verified.
 pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proof, ProveError> {
+    check_lookup_budget(&layout(&witness.specs)).map_err(ProveError::Witness)?;
     let trace = build(witness, checked)?;
     let kinds = trace.components.iter().map(|c| c.kind.clone()).collect_vec();
     let max_log = max_log_size(&kinds);
@@ -205,6 +208,7 @@ pub(crate) fn prove_impl(witness: &NetworkWitness, checked: bool) -> Result<Proo
 /// floats.
 pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     let fail = |s: &str| Err(ProveError::Verification(s.to_string()));
+    // ---- cheap checks first: the statement against the verifier's model ----
     spec::validate(&proof.specs).map_err(|e| ProveError::Verification(e.to_string()))?;
     // The statement is the verifier's model, not the proof's claim: layers, activations and shapes come from `inputs`; only the exponents (which the
     // constraints prove to be the largest ones) are taken from the proof.
@@ -222,17 +226,20 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     {
         return fail("the statement is not about this model: the layers, their activations or the shapes differ");
     }
-    // finite after the dtype's rounding too (a large f32 rounds to infinity in bf16)
+    // finite as given (a NaN would round to zero in bf16) and after the dtype's rounding (a large f32 rounds to infinity in bf16)
     let eff_input = effective(&inputs.input, inputs.dtype);
     let eff_weights: Vec<Vec<f32>> = inputs.weights.iter().map(|w| effective(w, inputs.dtype)).collect();
-    if eff_input.iter().chain(eff_weights.iter().flatten()).any(|v| !v.is_finite()) {
+    let raw = inputs.input.iter().chain(inputs.weights.iter().flatten());
+    if raw.chain(eff_input.iter()).chain(eff_weights.iter().flatten()).any(|v| !v.is_finite()) {
         return fail("the public input and weights must be finite");
     }
     let last = proof.specs.last().unwrap();
-    if proof.output.len() != last.m * last.n || proof.output.iter().any(|v| v.abs() > spec::QMAX) {
+    // (not `v.abs()`: i32::MIN.abs() overflows, and i32::MIN is -1 in M31)
+    if proof.output.len() != last.m * last.n || proof.output.iter().any(|v| !(-spec::QMAX..=spec::QMAX).contains(v)) {
         return fail("the public output has the wrong size or values out of range");
     }
     let kinds = layout(&proof.specs);
+    check_lookup_budget(&kinds).map_err(ProveError::Verification)?;
     if proof.claimed_sums.len() != kinds.len() {
         return Err(ProveError::Decode("one claimed sum per component is expected".into()));
     }
@@ -240,14 +247,19 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     let max_log = max_log_size(&kinds);
     let config = pcs_config(max_log);
 
-    // The preprocessed commitment must be the one of the statement's constants (index columns, multiplicities, the range table).
+    // ---- the structure of the stwo proof, so that stwo never meets a shape it would assert on ----
+    let shape_comps = components(&kinds, &Lookups::dummy(), &proof.claimed_sums);
+    let sizes = TreeVec::concat_cols(shape_comps.iter().map(|c| c.trace_log_degree_bounds()));
+    check_structure(&stark, &shape_comps, &sizes, kinds.iter().map(|k| k.pre_ids().len()).sum(), max_log).map_err(ProveError::Verification)?;
+
+    // ---- the preprocessed commitment must be the one of the statement's constants (index columns, multiplicities, the tables) ----
     {
         let twiddles = twiddles(max_log);
         let mut scheme = CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
         let mut tree = scheme.tree_builder();
         tree.extend_evals(preprocessed_evals(&kinds));
         tree.commit(&mut Blake2sChannel::default());
-        if stark.commitments.is_empty() || scheme.roots()[0] != stark.commitments[0] {
+        if scheme.roots()[0] != stark.commitments[0] {
             return fail("the preprocessed commitment is not the one of this statement");
         }
     }
@@ -255,14 +267,6 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
     let channel = &mut Blake2sChannel::default();
     mix_statement(channel, &proof.specs, &proof.output, &eff_input, &eff_weights);
     let scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
-    let sizes = TreeVec::concat_cols(components(&kinds, &Lookups::dummy(), &proof.claimed_sums).iter().map(|c| c.trace_log_degree_bounds()));
-    // Refuse a proof with other column counts: stwo would panic on it.
-    let shaped = stark.commitments.len() == 4 // + the composition polynomial
-        && stark.sampled_values.len() == 4
-        && (0..3).all(|tree| stark.sampled_values[tree].len() == sizes[tree].len());
-    if !shaped {
-        return fail("the proof does not have the columns of this statement");
-    }
     scheme.commit(stark.commitments[0], &sizes[0], channel);
     scheme.commit(stark.commitments[1], &sizes[1], channel);
     let lookups = Lookups::draw(channel);
@@ -276,7 +280,45 @@ pub fn verify(proof: &Proof, inputs: &PublicInputs) -> Result<(), ProveError> {
 
     let comps = components(&kinds, &lookups, &proof.claimed_sums);
     let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
-    stwo_verify(&refs, channel, scheme, stark).map_err(|e| ProveError::Verification(format!("{e:?}")))
+    // Defense in depth: the structure was checked above, but a panic inside stwo on attacker data must be a rejection, not a crash.
+    match catch_unwind(AssertUnwindSafe(|| stwo_verify(&refs, channel, scheme, stark))) {
+        Ok(result) => result.map_err(|e| ProveError::Verification(format!("{e:?}"))),
+        Err(_) => fail("the proof is malformed (the stwo verifier rejected its structure)"),
+    }
+}
+
+/// Checks the shapes of a stwo proof against the statement before stwo reads it: the number of trees, the sampled values per column (the number of
+/// mask points of each column; a mismatch makes the constraint framework panic during an unwinding, which aborts the process), the decommitments and
+/// the queried values per tree and column.
+fn check_structure(stark: &StarkProof<Blake2sMerkleHasher>, comps: &[NetComponent], sizes: &TreeVec<Vec<u32>>, n_preprocessed: usize, max_log: u32) -> Result<(), String> {
+    use stwo::core::air::Components;
+    use stwo::core::circle::CirclePoint;
+    const COMPOSITION_COLUMNS: usize = 8; // 2 * SECURE_EXTENSION_DEGREE
+    let p = &stark.0;
+    if p.commitments.len() != 4 || p.sampled_values.len() != 4 || p.decommitments.len() != 4 || p.queried_values.len() != 4 {
+        return Err("the proof does not have the four trees of this statement".into());
+    }
+    let refs = comps.iter().map(|c| c as &dyn Component).collect_vec();
+    // The number of points per column does not depend on the point itself.
+    let masks = Components { components: refs, n_preprocessed_columns: n_preprocessed }.mask_points(CirclePoint::<SecureField>::zero(), max_log + 1, false);
+    for tree in 0..3 {
+        let expected: Vec<usize> = masks[tree].iter().map(|points| points.len()).collect();
+        let found: Vec<usize> = p.sampled_values[tree].iter().map(|values| values.len()).collect();
+        if expected != found || sizes[tree].len() != p.queried_values[tree].len() {
+            return Err(format!("tree {tree} of the proof does not have the columns or samples of this statement"));
+        }
+    }
+    if p.sampled_values[3].len() != COMPOSITION_COLUMNS || p.sampled_values[3].iter().any(|v| v.len() != 1) || p.queried_values[3].len() != COMPOSITION_COLUMNS {
+        return Err("the composition tree of the proof has the wrong shape".into());
+    }
+    // every column of a tree is queried at the same positions
+    for tree in 0..4 {
+        let lens: Vec<usize> = p.queried_values[tree].iter().map(|c| c.len()).collect();
+        if lens.windows(2).any(|w| w[0] != w[1]) {
+            return Err(format!("the queried values of tree {tree} are ragged"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

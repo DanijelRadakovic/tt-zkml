@@ -380,3 +380,148 @@ fn statements_are_canonical_and_bounded() {
     other.input[0] = f32::MAX;
     assert!(proof::verify(&proof, &other).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// Second audit round (findings G1 to G6).
+
+/// G1: a left-shift requantization under a ReLU bounded only `max(acc, 0)`: a negative accumulator could exceed `127 >> ko`, so an exponent one too
+/// large was accepted (acc = [20, -100]: the true exponent is 0, the forged one 1 with output [40, 0] instead of [20, 0]).
+#[test]
+fn g1_a_relu_left_shift_bounds_its_negative_accumulators() {
+    let honest = NetworkWitness::simulate(1, &[2, 2], &[true], &[1.0, 63.0 / 64.0], &[vec![20. / 64., -100. / 64., -20. / 64., 100. / 64.]], Dtype::F32).unwrap();
+    honest.check().unwrap();
+    assert_eq!(honest.acc[0], vec![20, -100]);
+    assert_eq!(honest.specs[0].ko, 0);
+    let public = honest.public_inputs();
+    let mut forged = honest.clone();
+    forged.specs[0].ko = 1; // 100 * 2 = 200 > 127
+    forged.out[0] = vec![40, 0];
+    // the attacker's row for acc = -100 is complete and consistent except for the raw bound: it is built as the row of -63 (which fits) and then
+    // given acc = -100, its ReLU limbs (-acc = 100), its hit limbs (|acc| - T = 100 - 32) and the scaled value -200
+    set_hook(|kind, cols| {
+        if let Kind::Requant { layer: 0, spec, .. } = kind {
+            let c = RqCols::new(spec);
+            let mut row = requant_row(spec, &c, 1, -63, 0, -1).unwrap();
+            row[c.acc] = BaseField::from(-100i32);
+            let relu = c.relu.as_ref().unwrap();
+            for (i, d) in relu.neg_limbs.iter().zip(digits(100)) {
+                row[*i] = BaseField::from(d);
+            }
+            let hit = c.hit.as_ref().unwrap();
+            for (i, d) in hit.limbs.iter().zip(digits(100 - spec.hit_threshold() as i64)) {
+                row[*i] = BaseField::from(d);
+            }
+            row[c.left_scaled.unwrap()] = BaseField::from(-200i32);
+            for (i, v) in row.into_iter().enumerate() {
+                cols[i].set(1, v);
+            }
+        }
+    });
+    assert_rejected(prove_unchecked(&forged), &public, "a ReLU left shift with an exponent too large for a negative accumulator");
+}
+
+/// G2: `i32::MIN.abs()` wraps in a release build, and `i32::MIN` is `-1` in M31: a public output of `i32::MIN` passed the range check and matched -1.
+#[test]
+fn g2_the_public_output_is_range_checked_without_overflow() {
+    let honest = NetworkWitness::simulate(1, &[2, 2], &[false], &[1.0, 0.0], &[vec![-1. / 64., -100. / 64., 1. / 64., 100. / 64.]], Dtype::F32).unwrap();
+    honest.check().unwrap();
+    assert_eq!(honest.output(), &[-1, -100]);
+    let public = honest.public_inputs();
+    let mut forged = honest.clone();
+    forged.out[0][0] = i32::MIN; // the same field element as -1
+    let spec = forged.specs[0];
+    set_hook(move |kind, cols| {
+        if let Kind::Requant { layer: 0, .. } = kind {
+            let c = RqCols::new(&spec);
+            for (i, v) in requant_row(&spec, &c, 0, -64, -1, 0).unwrap().into_iter().enumerate() {
+                cols[i].set(0, v);
+            }
+        }
+    });
+    let forged_proof = prove_unchecked(&forged);
+    if let Ok(p) = &forged_proof {
+        assert_eq!(p.output[0], i32::MIN);
+    }
+    assert_rejected(forged_proof, &public, "a public output of i32::MIN");
+}
+
+/// G3: a structurally malformed stwo proof (inner vectors of the wrong length) made the verifier panic, and one case aborted the process. It must be
+/// a plain rejection.
+#[test]
+fn g3_malformed_proofs_are_rejected_without_panicking() {
+    let honest = NetworkWitness::simulate(2, &[4, 3], &[true], &floats(8, 1, -2.0, 2.0), &[floats(12, 2, -1.0, 1.0)], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &public).unwrap();
+    let edits: Vec<(&str, fn(&mut serde_json::Value))> = vec![
+        ("a sampled column with one value missing", |v| { v["sampled_values"][1][0].as_array_mut().unwrap().pop(); }),
+        ("an interaction column with one value too many", |v| { let x = v["sampled_values"][2][0][0].clone(); v["sampled_values"][2][0].as_array_mut().unwrap().push(x); }),
+        ("an empty sampled column", |v| { v["sampled_values"][1][0] = serde_json::json!([]); }),
+        ("one decommitment missing", |v| { v["decommitments"].as_array_mut().unwrap().pop(); }),
+        ("one tree of queried values missing", |v| { v["queried_values"].as_array_mut().unwrap().pop(); }),
+        ("a queried column missing", |v| { v["queried_values"][1].as_array_mut().unwrap().pop(); }),
+        ("a queried value missing", |v| { v["queried_values"][1][0].as_array_mut().unwrap().pop(); }),
+        ("all queried values of a tree one short", |v| { for c in v["queried_values"][2].as_array_mut().unwrap() { c.as_array_mut().unwrap().pop(); } }),
+        ("a composition column missing", |v| { v["sampled_values"][3].as_array_mut().unwrap().pop(); }),
+    ];
+    for (what, edit) in edits {
+        let mut json: serde_json::Value = serde_json::from_slice(&proof.bytes).unwrap();
+        edit(&mut json);
+        let mut forged = proof.clone();
+        forged.bytes = serde_json::to_vec(&json).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proof::verify(&forged, &public)));
+        match result {
+            Ok(r) => assert!(r.is_err(), "the verifier accepted {what}"),
+            Err(_) => panic!("the verifier panicked on {what}"),
+        }
+    }
+}
+
+/// G4: LogUp proves equality of counts modulo p only; a statement with p or more range lookups is refused.
+#[test]
+fn g4_statements_with_too_many_range_lookups_are_refused() {
+    use tt_zkml::air::{check_lookup_budget, layout, range_lookups};
+    let spec = |relu| LayerSpec { m: 2048, k: 1024, n: 1024, relu, ko: -18, kw: 7, kx: 5 };
+    let big: Vec<LayerSpec> = (0..64).map(|l| spec(l % 2 == 0)).collect();
+    validate(&big).unwrap(); // every limit of a single layer is respected
+    assert!(range_lookups(&layout(&big)) >= (1u128 << 31) - 1);
+    assert!(check_lookup_budget(&layout(&big)).is_err());
+    let small = vec![LayerSpec { m: 32, k: 64, n: 32, relu: true, ko: -12, kw: 7, kx: 5 }];
+    assert!(check_lookup_budget(&layout(&small)).is_ok());
+}
+
+/// G5: absurd exponents in the proof are refused without an arithmetic overflow (a panic in a debug build).
+#[test]
+fn g5_absurd_exponents_are_refused_without_panicking() {
+    let honest = NetworkWitness::simulate(2, &[2, 2], &[false], &[1.0, 0.5, -0.25, 2.0], &[vec![0.5, -1.0, 0.25, 1.0]], Dtype::F32).unwrap();
+    let public = honest.public_inputs();
+    let proof = prove_witness(&honest).unwrap();
+    for ko in [i32::MIN, i32::MIN + 1, -21, 7, 40, 126, i32::MAX] {
+        let mut forged = proof.clone();
+        forged.specs[0].ko = ko;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proof::verify(&forged, &public)));
+        assert!(matches!(result, Ok(Err(_))), "ko = {ko}");
+    }
+    for k in [i32::MIN, -101, 128, i32::MAX] {
+        let mut forged = proof.clone();
+        forged.specs[0].kw = k;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proof::verify(&forged, &public)));
+        assert!(matches!(result, Ok(Err(_))), "kw = {k}");
+    }
+}
+
+/// G6: a NaN in the public floats rounded to zero in bf16 and passed the finiteness check (which looked only at the rounded values).
+#[test]
+fn g6_non_finite_public_floats_are_refused_before_rounding() {
+    // x[1] = -0.0: a NaN that bf16 rounds to -0.0 is the "same" float for the circuit, so only the finiteness check of the raw value rejects it
+    let mut x = vec![1.0f32, -0.0, -0.25, 2.0];
+    let honest = NetworkWitness::simulate(2, &[2, 2], &[false], &x, &[vec![0.5, -1.0, 0.25, 1.0]], Dtype::Bf16).unwrap();
+    let mut public = honest.public_inputs();
+    public.dtype = Dtype::Bf16;
+    let proof = prove_witness(&honest).unwrap();
+    proof::verify(&proof, &public).unwrap();
+    x[1] = f32::from_bits(0x7fff_ffff); // a NaN that bf16 rounding turns into -0.0
+    assert_eq!(round_bf16(x[1]).to_bits(), 0x8000_0000);
+    public.input = x;
+    assert!(proof::verify(&proof, &public).is_err());
+}

@@ -126,6 +126,26 @@ pub fn layout(specs: &[LayerSpec]) -> Vec<Kind> {
     kinds
 }
 
+/// The number of lookups into the range table of all components (each row of each component, padding included). LogUp proves equality of counts
+/// modulo p only: if the range table could be used p times or more, a value outside the table used exactly p times would cancel. Statements must stay
+/// below the modulus (checked by `check_lookup_budget`).
+pub fn range_lookups(kinds: &[Kind]) -> u128 {
+    kinds
+        .iter()
+        .filter(|k| !matches!(k, Kind::Table | Kind::Pow2Table))
+        .map(|k| (1u128 << k.log_size()) * k.uses().iter().filter(|u| matches!(u, Use::Range { .. })).count() as u128)
+        .sum()
+}
+
+/// Refuses statements whose range lookups (or any other relation's uses, which are fewer) could reach the field size.
+pub fn check_lookup_budget(kinds: &[Kind]) -> Result<(), String> {
+    let total = range_lookups(kinds);
+    if total >= (1u128 << 31) - 1 {
+        return Err(format!("the statement needs {total} range lookups, at least the field size: LogUp counts would wrap"));
+    }
+    Ok(())
+}
+
 // ---- tags of the tensor relation: the first element of every tuple ----
 pub fn tag_x(layer: usize) -> u32 {
     4 * layer as u32
@@ -183,6 +203,9 @@ pub struct RqCols {
     pub out: usize,
     pub relu: Option<RqRelu>,
     pub right: Option<RqRight>,
+    /// Left shift: `sa = acc * 2^ko` of the RAW accumulator, range checked, so that `|acc| * 2^ko <= 127` holds also under a ReLU (where `out` only
+    /// bounds the non-negative part).
+    pub left_scaled: Option<usize>,
     pub hit: Option<RqHit>,
     pub total: usize,
 }
@@ -285,7 +308,7 @@ impl RqCols {
         };
         let mode = spec.mode();
         if mode == Mode::Zero {
-            return Self { acc: 0, out: 1, relu: None, right: None, hit: None, total: 2 };
+            return Self { acc: 0, out: 1, relu: None, right: None, left_scaled: None, hit: None, total: 2 };
         }
         let relu = spec.relu.then(|| {
             let [p, ap] = take(2)[..] else { unreachable!() };
@@ -299,9 +322,10 @@ impl RqCols {
             }
             _ => None,
         };
+        let left_scaled = matches!(mode, Mode::Left(_)).then(|| take(1)[0]);
         let [hp, hn] = take(2)[..] else { unreachable!() };
         let hit = Some(RqHit { hp, hn, limbs: take(ACC_LIMBS) });
-        Self { acc: 0, out: 1, relu, right, hit, total: next }
+        Self { acc: 0, out: 1, relu, right, left_scaled, hit, total: next }
     }
 }
 
@@ -439,9 +463,10 @@ impl Kind {
                     uses.extend(limbs(&r.v2_limbs));
                     uses.extend(limbs(&r.u1_limbs));
                     uses.extend(limbs(&r.u2_limbs));
-                } else if matches!(spec.mode(), Mode::Left(_)) {
-                    // the raw accumulator is at most 127 in magnitude: `acc * 2^ko` cannot wrap
+                } else if let Some(sa) = c.left_scaled {
+                    // the raw accumulator is at most 127 in magnitude, so `acc * 2^ko` cannot wrap, and `|acc| * 2^ko <= 127` (also under a ReLU)
                     uses.push(Use::Range { value: Src::Col(c.acc), offset: OFFSET });
+                    uses.push(Use::Range { value: Src::Col(sa), offset: OFFSET });
                 }
                 if let Some(h) = &c.hit {
                     uses.extend(limbs(&h.limbs));
@@ -545,7 +570,11 @@ impl Kind {
                     acc.clone()
                 };
                 match spec.mode() {
-                    Mode::Left(ko) => eval.add_constraint(out.clone() - a * c(1u64 << ko)),
+                    Mode::Left(ko) => {
+                        eval.add_constraint(out.clone() - a * c(1u64 << ko));
+                        // the raw accumulator, scaled, fits too: under a ReLU `out` bounds only max(acc, 0)
+                        eval.add_constraint(cols[rc.left_scaled.unwrap()].clone() - acc.clone() * c(1u64 << ko));
+                    }
                     Mode::Right(_) => {
                         let r = rc.right.as_ref().unwrap();
                         let sh = r.shift;

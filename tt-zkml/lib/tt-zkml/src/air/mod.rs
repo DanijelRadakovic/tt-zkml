@@ -35,6 +35,6 @@ pub mod trace;
 #[cfg(not(feature = "forgery"))]
 mod trace;
 
-pub use kind::{Kind, Lookups, NetEval, PreCol, Which, layout, public_sum, table_pre_id, TABLE_LOG_SIZE};
+pub use kind::{Kind, Lookups, NetEval, PreCol, Which, check_lookup_budget, layout, public_sum, range_lookups, table_pre_id, TABLE_LOG_SIZE};
 pub use spec::{ACC_LIMBS, LayerSpec, Mode, SpecError};
 pub use trace::{BuiltComponent, NetworkTrace, build, interaction_traces};
